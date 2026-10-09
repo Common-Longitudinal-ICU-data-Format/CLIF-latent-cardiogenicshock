@@ -1,0 +1,26 @@
+%YAML 1.2
+---
+# Anchor: cardiogenic shock onset.
+#
+# cocoa's Winnower only supports a global duration threshold or a global
+# first-occurrence token. Anchoring at a per-patient timestamp requires a custom
+# threshold, so clifcs.onset_winnower.OnsetWinnower overrides run_thresholding()
+# and cuts each timeline at that patient's `cs_onset_dttm`. Everything else
+# (outcome flags, past/future split, output schema) is cocoa's.
+
+outcome_tokens: # supports patterns with fnmatch
+  - RESP//imv
+  - DSCG//expired
+  - LABEL//*
+
+# read by OnsetWinnower, not by cocoa
+onset_anchor:
+  # tokens strictly at or before cs_onset_dttm form `tokens_past`
+  inclusive: !!bool true
+  # drop timelines with fewer than this many tokens before onset
+  min_tokens_past: !!int 2
+
+splits:
+  - train
+  - tuning
+  - held_out

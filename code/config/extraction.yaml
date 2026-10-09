@@ -1,0 +1,11 @@
+%YAML 1.2
+---
+max_seq_len: !!int &max_len 4096
+
+extract:
+  max_len: *max_len
+  batch_size: !!int 32
+  shard_size: !!int 1000000 # number of samples per shard when saving extracted features
+
+time_based_rope:
+  sec_per_pos_id: !!int 300

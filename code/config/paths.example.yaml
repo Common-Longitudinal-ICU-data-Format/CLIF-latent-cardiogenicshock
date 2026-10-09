@@ -1,0 +1,43 @@
+%YAML 1.2
+---
+# Copy to paths.yaml and fill in for this machine. paths.yaml is machine-
+# specific and is NOT in git -- it names local data locations, which differ at
+# every site and should not be published.
+#
+#   cp code/config/paths.example.yaml code/config/paths.yaml
+
+# Every site this machine holds CLIF-2.1 data for. The key is the label that
+# appears in plots and in the `site` column; add or remove entries freely.
+# Scatterplots cap at three sites (the colour palette's all-pairs gate).
+sites:
+  UCMC:
+    data_dir: /path/to/CLIF_UCMC_2_1
+  NU:
+    data_dir: /path/to/CLIF_NU_2_1
+  # RUSH:
+  #   data_dir: /path/to/CLIF_RUSH_2_1
+
+model:
+  # The frozen foundation model checkpoint directory: the one holding
+  # config.json and model.safetensors. A glob is accepted (and needed for
+  # GEM*-all, whose directory name contains a non-ASCII character), but it must
+  # match exactly one directory.
+  home_glob: /path/to/GEM-weights-FL-manuscript/GEM*-all/mdl-cotorra
+
+  # The fitted cocoa tokenizer the model was TRAINED with.
+  #
+  # This is not interchangeable. The model's embedding table has one row per
+  # token id, and the numeric bin edges are baked into the token names, so a
+  # tokenizer learned anywhere else maps the same clinical event to a different
+  # id and the representations become meaningless. Ship this file alongside the
+  # weights; 02 refuses to run if its vocabulary size does not match the model's.
+  tokenizer_yaml: /path/to/GEM-weights-FL-manuscript/tokenizer.yaml
+
+# Results: cohort tables, embeddings, figures. Small enough to keep with the repo.
+output_home: ./output
+
+# Intermediates: cohort-restricted CLIF tables, token streams, raw feature
+# shards. Large (hundreds of GB for a big cohort) and fully regenerable, so put
+# this on fast scratch -- never on a synced drive (Box, Dropbox, OneDrive),
+# which will both sync it and lock the files.
+scratch_home: /path/to/fast/scratch/clif-cs

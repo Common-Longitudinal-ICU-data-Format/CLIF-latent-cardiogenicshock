@@ -1,0 +1,136 @@
+%YAML 1.2
+---
+# Preferred dose units for clifpy, copied verbatim from coreopsis
+# recipes/run_clifpy.py and recipes/run_sofa_scoring.py at commit 950c2478.
+#
+# These must match the units used when the foundation model was trained: cocoa
+# bins MED-CTS / MED-INT numeric values into deciles, so a drug converted to a
+# different unit here lands in different bins and therefore different tokens.
+# Extracted by code/config/_regen_clifpy_units.py -- do not hand-edit.
+
+continuous:
+  acetaminophen: mg/min
+  albumin_infusion: ml/hr
+  alteplase: mg/hr
+  aminocaproic: g/hr
+  aminophylline: mg/kg/hr
+  amiodarone: mg/min
+  angiotensin: ng/kg/min
+  argatroban: mcg/kg/min
+  bivalirudin: mg/kg/hr
+  bumetanide: mg/hr
+  cisatracurium: mg/kg/hr
+  clevidipine: mg/hr
+  dexmedetomidine: mcg/kg/hr
+  dextrose: ml/hr
+  dextrose_in_water_d5w: ml/hr
+  diltiazem: mg/hr
+  dobutamine: mcg/kg/min
+  dopamine: mcg/kg/min
+  epinephrine: mcg/kg/min
+  epoprostenol: ng/kg/min
+  eptifibatide: mcg/kg/min
+  esmolol: mcg/kg/min
+  fentanyl: mcg/hr
+  furosemide: mg/hr
+  heparin: u/hr
+  hydromorphone: mg/hr
+  insulin: u/hr
+  ketamine: mg/kg/hr
+  labetalol: mg/min
+  lidocaine: mg/min
+  lorazepam: mg/hr
+  magnesium: g/hr
+  midazolam: mg/hr
+  milrinone: mcg/kg/min
+  morphine: mg/hr
+  naloxone: mg/hr
+  nicardipine: mcg/kg/min
+  nitroglycerin: mcg/kg/min
+  nitroprusside: mcg/kg/min
+  norepinephrine: mcg/kg/min
+  octreotide: mcg/hr
+  pantoprazole: mg/hr
+  pentobarbital: mg/kg/hr
+  phenylephrine: mcg/kg/min
+  procainamide: mg/min
+  propofol: mcg/kg/min
+  rocuronium: mcg/kg/min
+  sodium chloride: ml/hr
+  tpn: ml/hr
+  treprostinil: ng/kg/min
+  vasopressin: u/hr
+  vecuronium: mg/kg/hr
+intermittent:
+  acetaminophen: mg
+  acyclovir: dose
+  adenosine: mg
+  amikacin: dose
+  amiodarone: mg
+  ampicillin: dose
+  ampicillin_sulbactam: dose
+  azithromycin: dose
+  aztreonam: dose
+  bumetanide: mg
+  caspofungin: dose
+  cefazolin: dose
+  cefepime: dose
+  ceftaroline: dose
+  ceftazidime: dose
+  ceftriaxone: dose
+  ciprofloxacin: dose
+  cisatracurium: mg
+  clindamycin: dose
+  colistin: dose
+  daptomycin: dose
+  dextrose: ml
+  dextrose_in_water_d5w: ml
+  diazepam: mg
+  diltiazem: mg
+  doxycycline: dose
+  epinephrine: mg
+  ertapenem: dose
+  erythromycin: dose
+  esomeprazole: dose
+  fentanyl: mcg
+  fluconazole: dose
+  foscarnet: dose
+  furosemide: mg
+  gentamicin: dose
+  heparin: dose
+  hydromorphone: mg
+  imipenem: dose
+  insulin: units
+  ketamine: mcg
+  labetalol: mg
+  levofloxacin: dose
+  lidocaine: mg
+  linezolid: dose
+  lorazepam: mg
+  magnesium: grams
+  meropenem: dose
+  metronidazole: dose
+  micafungin: dose
+  midazolam: mg
+  morphine: mg
+  moxifloxacin: dose
+  nafcillin: dose
+  naloxone: mg
+  pantoprazole: dose
+  penicillin: dose
+  piperacillin_tazobactam: dose
+  propofol: mg
+  rifampin: dose
+  rocuronium: mg
+  sodium bicarbonate: ml
+  sodium chloride: ml
+  tigecycline: dose
+  tobramycin: dose
+  vancomycin: dose
+  vecuronium: mg
+  voriconazole: dose
+sofa_continuous:
+  dobutamine: mcg/kg/min
+  dopamine: mcg/kg/min
+  epinephrine: mcg/kg/min
+  norepinephrine: mcg/kg/min

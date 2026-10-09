@@ -1,0 +1,32 @@
+# ---------------------------------------------------------------- patient data
+# Nothing derived from patient records belongs in this repository. The pipeline
+# writes everything under output/ and scratch_home; both stay local.
+output/
+*.parquet
+*.csv
+*.png
+*.pdf
+
+# salt used to pseudonymize record numbers for cross-site transfer; keeping it
+# out of git is what makes the pseudonyms non-reversible by a reader of the repo
+.id_salt
+
+# ------------------------------------------------------------ machine-specific
+# names local data locations, which differ at every site
+code/config/paths.yaml
+
+# ------------------------------------------------------------------ environment
+.venv/
+.venv-stub-delete-me/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+
+# ------------------------------------------------------------------------ tooling
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

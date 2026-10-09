@@ -1,0 +1,166 @@
+%YAML 1.2
+---
+# Cardiogenic shock cohort definition.
+#
+# Target definition (as specified for this study):
+#   (1) SBP < 90 mmHg for > 30 min, OR a supportive intervention to maintain
+#       SBP > 90 mmHg; AND
+#   (2) evidence of end-organ damage.
+#
+# NOTE ON URINE OUTPUT: the original end-organ criterion is
+# "AMS, UO < 30 mL/h". Neither the UCMC nor the NU CLIF-2.1 extract contains a
+# patient_intake_output table, and urine output appears in neither
+# clif_vitals.vital_category nor clif_patient_assessments.assessment_category at
+# either site. UO < 30 mL/h is therefore not computable here. Per study decision
+# it is replaced by a creatinine-based KDIGO AKI arm (see `end_organ.aki`), and
+# a lactate arm is added as a second marker of hypoperfusion.
+
+# ---------------------------------------------------------------- base cohort
+# Mirrors coreopsis recipes/preprocessing.py, so that the cohort sits inside the
+# distribution the frozen model was trained on (the `*-icu` datasets).
+base_cohort:
+  first_hospitalization_only: !!bool true
+  min_hospitalization_duration_days: !!float 1.0
+  require_icu: !!bool true
+  icu_within_days_of_admission: !!float 1.0
+
+# -------------------------------------------------- (1) hemodynamic criterion
+hemodynamics:
+  # sustained hypotension
+  sbp_threshold_mmhg: !!float 90.0
+  sbp_min_duration_min: !!float 30.0
+  # artifact guard: SBP values outside this range are dropped before runs of
+  # hypotension are detected. UCMC sbp reaches 28 at the 0.01st percentile and
+  # NU reaches 4, which are line-disconnect artifacts, not measurements; left
+  # in, they manufacture spurious >30 min hypotensive runs.
+  sbp_plausible_range: [!!float 20.0, !!float 300.0]
+
+  # Supportive intervention to maintain SBP > 90: a continuous vasoactive
+  # infusion at a non-zero dose.
+  #
+  # Mechanical circulatory support is deliberately NOT part of this criterion.
+  # clif_ecmo_mcs is a concept table at both sites and is not populated
+  # reliably, so it is not read anywhere in this pipeline; and MCS without
+  # either sustained hypotension or a vasoactive infusion is vanishingly rare
+  # here (3 of 34,139 patients), so nothing is lost by leaving it out.
+  #
+  # Matched on med_category only, deliberately not on med_group: UCMC files
+  # angiotensin under med_group "cardiac" while NU files it under "vasoactives".
+  vasoactive_categories:
+    - norepinephrine
+    - epinephrine
+    - phenylephrine
+    - vasopressin
+    - dopamine
+    - angiotensin
+    - dobutamine
+    - milrinone
+    - isoproterenol
+  require_nonzero_dose: !!bool true
+
+# ------------------------------------------------ (2) end-organ damage window
+# Evidence must fall within [onset - lookback, onset + lookahead] of the time
+# the hemodynamic criterion is first met, so the two are clinically linked.
+end_organ:
+  window_lookback_hours: !!float 6.0
+  window_lookahead_hours: !!float 24.0
+
+  # altered mental status
+  ams:
+    enabled: !!bool true
+    gcs_total_below: !!float 15.0
+    # UCMC clif_patient_assessments.gcs_total spans 0-158; values outside the
+    # scale are dropped. NU is already clean at 3-15.
+    gcs_total_valid_range: [!!float 3.0, !!float 15.0]
+    # also qualifies if GCS drops >= this many points below the patient's own
+    # best (maximum) GCS recorded during the hospitalization
+    gcs_drop_from_baseline: !!float 2.0
+
+  # hypoperfusion
+  lactate:
+    enabled: !!bool true
+    threshold_mmol_l: !!float 2.0
+
+  # creatinine-based KDIGO AKI, standing in for the unavailable UO criterion
+  aki:
+    enabled: !!bool true
+    baseline: min_before_onset # lowest creatinine from admission up to onset
+    absolute_rise_mg_dl: !!float 0.3
+    rise_window_hours: !!float 48.0
+    relative_rise_factor: !!float 1.5
+
+# ------------------------------------------------------- cardiac origin (opt-in)
+# The definition specified for this study has no cardiac criterion: sustained
+# hypotension or vasoactive support plus end-organ damage selects
+# undifferentiated shock, so septic, hypovolaemic and haemorrhagic shock are all
+# included. That is why the cohort comes out large (tens of thousands rather
+# than the hundreds a cardiogenic-shock registry would hold).
+#
+# The flag below is computed and reported for every patient regardless, so the
+# effect of requiring cardiac origin is visible in the filter ledger without a
+# rerun. Set `enabled: true` to actually restrict the cohort to it.
+cardiac_origin:
+  enabled: !!bool false
+  # satisfied by either an inotrope infusion or a mechanical circulatory
+  # support procedure. Diagnosis codes are deliberately not used: an ICD
+  # diagnosis records an assertion about the patient, whereas an inotrope
+  # infusion and an MCS procedure record a therapy that was actually delivered,
+  # which is the stronger evidence that the treating team judged the shock to
+  # be cardiac.
+  require_any_of:
+    - inotrope
+    - mcs_procedure
+
+  inotrope_categories:
+    - dobutamine
+    - milrinone
+
+  # Mechanical circulatory support, read from clif_patient_procedures.
+  # clif_ecmo_mcs is not used -- see the note under `hemodynamics`.
+  # Within the shock cohort these yield UCMC 846 (9.3%) and NU 1,165 (4.7%),
+  # against 14.6% / 12.1% for inotropes.
+  mcs_procedures:
+    cpt:
+      ecmo: {start: !!int 33946, end: !!int 33989}
+      codes: # IABP, then percutaneous VAD / Impella / TandemHeart
+        - '33967'
+        - '33970'
+        - '33971'
+        - '33973'
+        - '33974'
+        - '33990'
+        - '33991'
+        - '33992'
+        - '33993'
+        - '33995'
+        - '33997'
+    icd10pcs_prefixes:
+      - 5A15 # extracorporeal membrane oxygenation
+      - 5A02 # assistance with cardiac output (balloon pump, impeller pump)
+      - 02HA # insertion of short-term external heart assist device
+
+# ---------------------------------------------------------- phenotype feature
+# Zweck et al., "Phenotyping Cardiogenic Shock", J Am Heart Assoc 2021;10:e020085
+# (doi:10.1161/JAHA.120.020085). The eight labs most associated with in-hospital
+# mortality in that paper; the four strongest are marked `primary`.
+phenotype:
+  # value nearest CS onset inside this window is used
+  window_lookback_hours: !!float 24.0
+  window_lookahead_hours: !!float 6.0
+  labs:
+    - {name: egfr, primary: true} # derived from creatinine (CKD-EPI 2021)
+    - {name: lactate, primary: true}
+    - {name: bicarbonate, primary: true}
+    - {name: alt, primary: true}
+    - {name: creatinine, primary: false}
+    - {name: bun, primary: false}
+    - {name: platelet_count, primary: false}
+    - {name: wbc, primary: false}
+  n_clusters: !!int 3
+  random_state: !!int 42
+
+# ------------------------------------------------------------------- outcomes
+outcomes:
+  mortality_discharge_categories:
+    - Expired
+  icu_location_category: icu

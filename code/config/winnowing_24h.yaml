@@ -1,0 +1,17 @@
+%YAML 1.2
+---
+outcome_tokens: # supports patterns with fnmatch
+  - RESP//imv
+  - DSCG//expired
+  - LABEL//*
+
+threshold:
+  # choose one and only one of the following
+  duration_s: !!int 86400 # 24h
+  # first_occurrence: XFR-IN//icu
+
+splits: #select which splits to prepare
+  - train
+  - tuning
+  - held_out
+# rep-based inference requires train and tuning splits
