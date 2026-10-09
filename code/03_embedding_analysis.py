@@ -379,6 +379,7 @@ def load_anchor(paths, anchor: str, logger) -> pl.DataFrame:
             cs_phenotype_local=pl.col("cs_phenotype"),
             icu_los_days_local=pl.col("icu_los_days"),
             in_hospital_mortality_local=pl.col("in_hospital_mortality"),
+            cardiac_origin_local=pl.col("cardiac_origin"),
         )
         frame = frame.join(local, on=["hospitalization_id", "site"], how="left")
         n_refreshed = int(frame["cs_phenotype_local"].is_not_null().sum())
@@ -388,10 +389,12 @@ def load_anchor(paths, anchor: str, logger) -> pl.DataFrame:
             in_hospital_mortality=pl.coalesce(
                 "in_hospital_mortality_local", "in_hospital_mortality"
             ),
+            cardiac_origin=pl.coalesce("cardiac_origin_local", "cardiac_origin"),
         ).drop(
             "cs_phenotype_local",
             "icu_los_days_local",
             "in_hospital_mortality_local",
+            "cardiac_origin_local",
         )
         logger.info(
             f"[{anchor}] refreshed covariates for {n_refreshed} locally-processed "

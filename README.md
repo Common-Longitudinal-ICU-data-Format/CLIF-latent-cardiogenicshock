@@ -65,12 +65,31 @@ shock — septic, hypovolaemic and haemorrhagic shock are all included, which is
 why the cohort runs to tens of thousands rather than the hundreds a cardiogenic
 shock registry would hold. A `cardiac_origin` flag is computed and reported for
 every patient but **not applied**; set `cardiac_origin.enabled: true` in the
-config to restrict to it. It is satisfied by an **inotrope infusion**
-(dobutamine, milrinone) or a **mechanical circulatory support procedure** (ECMO,
-IABP, percutaneous VAD, in CPT and ICD-10-PCS). Diagnosis codes are deliberately
-not used: a diagnosis code asserts a condition, whereas an infusion and a
-procedure record a therapy actually delivered — the stronger evidence that the
-treating team judged the shock to be cardiac.
+config to restrict to it. It is satisfied by any of:
+
+| arm | UCMC | NU |
+|---|---|---|
+| inotrope infusion (dobutamine, milrinone) | 1,335 | 3,027 |
+| MCS procedure (ECMO, IABP, pVAD) | 846 | 1,168 |
+| peak troponin ≥500 ng/L near onset | 813 | 1,909 |
+| **any** | **2,219 (24.3%)** | **5,104 (20.4%)** |
+
+Diagnosis codes are deliberately not used: a diagnosis code asserts a condition,
+whereas an infusion, a procedure and a troponin record something that was
+actually done or measured.
+
+The troponin threshold is high on purpose. UCMC runs troponin-T and NU
+troponin-I — different assays, different reference limits — so one absolute cut
+is not equivalent across them. At the ~14 ng/L URL the sites diverge (44.1% vs
+29.2%) and the criterion catches the sepsis and PE patients the flag exists to
+exclude; at 500 ng/L they behave alike (8.9% vs 7.3%).
+
+**`clif_patient_procedures` at UCMC is only half usable.** Its CPT rows carry
+1.72M distinct ids, none of which key on `hospitalization_id`; only the
+ICD-10-PCS rows join (98.2% of the cohort). UCMC's MCS ascertainment is
+therefore ICD-10-PCS-only, and its echo/cath/PCI are unavailable, while NU's CPT
+joins at 99.8%. `01` checks per-format coverage and warns rather than letting an
+unjoinable code system contribute zero silently.
 
 **`clif_ecmo_mcs` is not read anywhere.** It is a concept table at both sites
 and is not reliably populated — at UCMC it names 136,565 of 166,814

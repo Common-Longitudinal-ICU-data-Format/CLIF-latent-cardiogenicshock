@@ -517,7 +517,79 @@ def end_organ_criterion(
 # ------------------------------------------------- cardiac origin (optional)
 
 
-def _mcs_procedures(data_dir, shock: pl.DataFrame, cfg) -> pl.DataFrame:
+def _warn_unjoinable_formats(data_dir, shock: pl.DataFrame, logger) -> None:
+    """
+    flag a procedure code system whose ids do not key on hospitalization_id
+
+    UCMC's clif_patient_procedures carries 1.72M distinct ids under
+    procedure_code_format "cpt" and *none* of them match a hospitalization;
+    only its ICD-10-PCS rows use the real key. A code-set query over that table
+    therefore returns zero from the CPT arm and a plausible-looking number from
+    the PCS arm, with nothing to indicate half the search silently found
+    nothing. Checking coverage per format turns that into a visible warning.
+    """
+    cohort_ids = set(shock["hospitalization_id"].to_list())
+    frame = scan(data_dir, "clif_patient_procedures").select(
+        "hospitalization_id", "procedure_code_format"
+    )
+    formats = (
+        frame.select("procedure_code_format").unique().collect().to_series().to_list()
+    )
+    for fmt in formats:
+        ids = set(
+            frame.filter(pl.col("procedure_code_format") == fmt)
+            .select("hospitalization_id")
+            .unique()
+            .collect()
+            .to_series()
+            .to_list()
+        )
+        covered = len(cohort_ids & ids) / max(len(cohort_ids), 1)
+        if covered < 0.01:
+            logger.warning(
+                f"clif_patient_procedures format {fmt!r} has {len(ids)} ids but "
+                f"matches {covered:.1%} of the cohort: it is keyed on something "
+                "other than hospitalization_id, so procedures recorded under it "
+                "cannot be used here"
+            )
+
+
+def _troponin_evidence(data_dir, shock: pl.DataFrame, cfg) -> pl.DataFrame:
+    """
+    peak troponin above threshold in a window around cardiogenic shock onset
+
+    Myocardial injury is the most directly available marker of cardiac origin
+    in CLIF and, unlike procedures, it comes from clif_labs, which keys on
+    hospitalization_id at both sites.
+    """
+    tc = cfg.cardiac_origin.troponin
+    window = shock.lazy().select(
+        "hospitalization_id",
+        win_start=pl.col("cs_onset_dttm")
+        - pl.duration(hours=float(tc.window_lookback_hours)),
+        win_end=pl.col("cs_onset_dttm")
+        + pl.duration(hours=float(tc.window_lookahead_hours)),
+    )
+    return (
+        scan(data_dir, "clif_labs", dttm_cols=("lab_result_dttm",))
+        .filter(
+            pl.col("lab_category").is_in(list(tc.categories)),
+            pl.col("lab_value_numeric") >= float(tc.threshold_ng_l),
+        )
+        .join(window, on="hospitalization_id", how="inner")
+        .filter(
+            pl.col("lab_result_dttm").is_between(pl.col("win_start"), pl.col("win_end"))
+        )
+        .group_by("hospitalization_id")
+        .agg(
+            cardiac_troponin=pl.lit(True),
+            peak_troponin_ng_l=pl.col("lab_value_numeric").max(),
+        )
+        .collect()
+    )
+
+
+def _mcs_procedures(data_dir, shock: pl.DataFrame, cfg, logger) -> pl.DataFrame:
     """
     hospitalizations with a mechanical circulatory support procedure
 
@@ -534,6 +606,7 @@ def _mcs_procedures(data_dir, shock: pl.DataFrame, cfg) -> pl.DataFrame:
     empty = pl.DataFrame(schema={"hospitalization_id": pl.String, "cardiac_mcs": pl.Boolean})
     if not has_table(data_dir, "clif_patient_procedures"):
         return empty
+    _warn_unjoinable_formats(data_dir, shock, logger)
 
     spec = cfg.cardiac_origin.mcs_procedures
     ecmo = spec.cpt.ecmo
@@ -600,13 +673,33 @@ def cardiac_origin(
 
     if "mcs_procedure" in required:
         shock = shock.join(
-            _mcs_procedures(data_dir, shock, cfg), on="hospitalization_id", how="left"
+            _mcs_procedures(data_dir, shock, cfg, logger),
+            on="hospitalization_id",
+            how="left",
         )
         flags.append(pl.col("cardiac_mcs").fill_null(False))
+
+    if "troponin" in required:
+        shock = shock.join(
+            _troponin_evidence(data_dir, shock, cfg), on="hospitalization_id", how="left"
+        )
+        flags.append(pl.col("cardiac_troponin").fill_null(False))
 
     shock = shock.with_columns(
         cardiac_origin=pl.any_horizontal(*flags) if flags else pl.lit(False)
     )
+
+    for arm, column in (
+        ("inotrope infusion", "cardiac_inotrope"),
+        ("MCS procedure", "cardiac_mcs"),
+        ("troponin above threshold", "cardiac_troponin"),
+    ):
+        if column in shock.columns:
+            ledger.add(
+                site,
+                f"    [arm] {arm}",
+                shock.filter(pl.col(column).fill_null(False)),
+            )
 
     n_cardiac = int(shock["cardiac_origin"].sum())
     ledger.add(

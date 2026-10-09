@@ -110,10 +110,28 @@ cardiac_origin:
   require_any_of:
     - inotrope
     - mcs_procedure
+    - troponin
 
   inotrope_categories:
     - dobutamine
     - milrinone
+
+  # Myocardial injury, from clif_labs.
+  #
+  # The threshold is deliberately high. UCMC runs troponin-T and NU troponin-I,
+  # which are different assays with different reference limits, so one absolute
+  # cut is not equivalent across them. At the 99th-percentile URL (~14 ng/L) the
+  # sites diverge sharply (44.1% vs 29.2%) and the criterion is non-specific --
+  # sepsis, pulmonary embolism and renal failure all raise troponin, and those
+  # are the patients this flag exists to exclude. At 500 ng/L the two assays
+  # behave alike (8.9% vs 7.3%), so the flag adds little site bias.
+  troponin:
+    categories:
+      - troponin_t
+      - troponin_i
+    threshold_ng_l: !!float 500.0
+    window_lookback_hours: !!float 24.0
+    window_lookahead_hours: !!float 48.0
 
   # Mechanical circulatory support, read from clif_patient_procedures.
   # clif_ecmo_mcs is not used -- see the note under `hemodynamics`.
