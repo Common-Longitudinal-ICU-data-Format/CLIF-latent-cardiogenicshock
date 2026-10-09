@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import pathlib
 import sys
+import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
@@ -169,6 +170,30 @@ def _finish(scatter_ax, title: str, xlabel: str, ylabel: str) -> None:
     scatter_ax.set_aspect("equal", adjustable="datalim")
 
 
+def save_figure(figure, out_path: pathlib.Path, attempts: int = 6) -> None:
+    """
+    save a figure, retrying if the destination is locked
+
+    output_home normally sits on a synced drive (Box, OneDrive, Dropbox). When
+    the sync client is mid-upload on a file being overwritten, the open fails
+    with EINVAL/EACCES rather than blocking, which kills a run several minutes
+    in and leaves half the figures regenerated. Writing to a temporary name
+    first keeps the existing file intact if every attempt fails.
+    """
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    staged = out_path.with_suffix(".tmp.png")
+    figure.savefig(staged, dpi=DPI, bbox_inches="tight")
+
+    for attempt in range(attempts):
+        try:
+            staged.replace(out_path)
+            return
+        except OSError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(0.5 * 2**attempt)
+
+
 def _marker_size(n: int) -> float:
     """smaller marks as the cloud gets denser, so structure stays visible"""
     if n > 20000:
@@ -242,7 +267,7 @@ def plot_categorical(
         fontsize=7,
     )
 
-    figure.savefig(out_path, dpi=DPI, bbox_inches="tight")
+    save_figure(figure, out_path)
     plt.close(figure)
 
 
@@ -308,7 +333,7 @@ def plot_continuous(
         va="top",
     )
 
-    figure.savefig(out_path, dpi=DPI, bbox_inches="tight")
+    save_figure(figure, out_path)
     plt.close(figure)
 
 
