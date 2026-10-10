@@ -36,9 +36,11 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
+from matplotlib.ticker import FuncFormatter
 from sklearn.decomposition import PCA
-from sklearn.linear_model import LogisticRegression
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.metrics import roc_auc_score
+from sklearn.model_selection import StratifiedKFold, cross_val_score
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import StandardScaler
 
@@ -215,7 +217,7 @@ def stage_tokens(paths, anchor: str, sites, logger) -> tuple[pl.DataFrame, pl.Da
                 f"least one, making up {volume / max(total, 1):.1%} of its tokens"
             )
 
-    return family_mix, discriminative
+    return family_mix, discriminative, counts
 
 
 # ============================================================== stage: axis
@@ -223,12 +225,17 @@ def stage_tokens(paths, anchor: str, sites, logger) -> tuple[pl.DataFrame, pl.Da
 
 def stage_axis(paths, frame: pl.DataFrame, anchor: str, sites, logger) -> pl.DataFrame:
     """
-    how much of the embedding's site axis is explained by token statistics
+    find the site-discriminating axis by LDA, and say what drives it
 
-    A logistic probe gives a single direction along which the sites separate.
-    Regressing each patient's position on that axis against simple, countable
-    properties of their token stream says what the model is keying on. R^2 near
-    1 means the axis is nothing more than documentation volume and mix.
+    LDA gives the single direction maximising between-site over within-site
+    scatter -- the natural definition of "the site axis". It is fitted on the
+    50-d PCA representation with shrinkage, because the raw 1024-d classes are
+    linearly separable and an unregularised within-class scatter matrix is
+    singular there. Accuracy and AUC are cross-validated, so a separable class
+    pair cannot report a free 100%.
+
+    Regressing each patient's position on that axis against countable
+    properties of their token stream then says what the model is keying on.
     """
     names, families = vocabulary(str(paths.tokenizer_yaml))
     tokens = pl.concat([load_pre_anchor_tokens(paths, s, anchor) for s in sites])
@@ -239,12 +246,42 @@ def stage_axis(paths, frame: pl.DataFrame, anchor: str, sites, logger) -> pl.Dat
     embeddings = StandardScaler().fit_transform(embedding_matrix(frame))
     is_first_site = (frame["site"] == sites[0]).to_numpy().astype(int)
 
-    probe = LogisticRegression(max_iter=5000, C=1.0).fit(embeddings, is_first_site)
-    site_score = probe.decision_function(embeddings)
-    auc = roc_auc_score(is_first_site, site_score)
-    logger.info(f"[{anchor}] linear site probe AUC = {auc:.4f}")
+    reduced = PCA(n_components=PCA_COMPONENTS, random_state=42).fit_transform(embeddings)
+    lda = LinearDiscriminantAnalysis(solver="lsqr", shrinkage="auto")
 
-    family_order = sorted({f for f in families.values()})
+    folds = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    accuracy = cross_val_score(lda, reduced, is_first_site, cv=folds, scoring="accuracy")
+    auc_cv = cross_val_score(lda, reduced, is_first_site, cv=folds, scoring="roc_auc")
+    baseline = max(is_first_site.mean(), 1 - is_first_site.mean())
+
+    lda.fit(reduced, is_first_site)
+    site_score = lda.decision_function(reduced)
+    auc = roc_auc_score(is_first_site, site_score)
+
+    logger.info(
+        f"[{anchor}] LDA site axis: 5-fold accuracy "
+        f"{accuracy.mean():.4f} +/- {accuracy.std():.4f} "
+        f"(majority-class baseline {baseline:.4f}), AUC {auc_cv.mean():.4f}, "
+        f"in-sample AUC {auc:.4f}"
+    )
+    probe_table = pl.DataFrame(
+        {
+            "anchor": [anchor],
+            "cv_accuracy": [float(accuracy.mean())],
+            "cv_accuracy_sd": [float(accuracy.std())],
+            "cv_auc": [float(auc_cv.mean())],
+            "in_sample_auc": [float(auc)],
+            "majority_baseline": [float(baseline)],
+            "n": [frame.height],
+        }
+    )
+    probe_table.write_csv(paths.table_home / f"site_lda_anchor-{anchor}.csv")
+
+    # AGE/SEX/RACE/ETHN/ADMN/BOS/EOS occur once per patient, so their share is
+    # 1/n_tokens -- a restatement of sequence length that would otherwise
+    # dominate the coefficients and hide the families that vary per patient
+    once_per_patient = {"AGE", "SEX", "RACE", "ETHN", "ADMN", "BOS", "EOS", "DSCG"}
+    family_order = sorted({f for f in families.values()} - once_per_patient)
     counts = family_matrix(tokens, families, family_order)
     n_tokens = counts.sum(axis=1)
     duration_h = np.asarray(
@@ -429,6 +466,89 @@ def stage_matched(frame: pl.DataFrame, anchor: str, sites, logger) -> pl.DataFra
 # =============================================================== plotting
 
 
+def plot_token_tornado(
+    counts: pl.DataFrame,
+    site_sizes: dict[str, int],
+    sites,
+    out_path,
+    anchor,
+    logger,
+    top_n: int = 18,
+    rank: str = "difference",
+) -> None:
+    """
+    diverging bar chart of the tokens that most distinguish the sites
+
+    Rates per patient, not raw counts: the sites contribute very different
+    numbers of patients (9,135 vs 25,007) and raw totals would make the larger
+    site look systematically more verbose. Tokens are ranked by the absolute
+    difference in per-patient rate, which surfaces both the structural zeros
+    and the merely lopsided tokens in one view.
+    """
+    left, right = sites[0], sites[1]
+    wide = (
+        counts.pivot(on="site", index="token", values="n")
+        .fill_null(0)
+        .with_columns(
+            left_rate=pl.col(left) / site_sizes[left],
+            right_rate=pl.col(right) / site_sizes[right],
+        )
+        .with_columns(difference=(pl.col("left_rate") - pl.col("right_rate")))
+        .filter(pl.col("token") != "UNK")
+        .with_columns(magnitude=pl.col("difference").abs())
+    )
+    if rank == "exclusive":
+        # tokens one site never emits at all; ranked by how often the other
+        # site uses them, since those are the ones a probe can key on
+        wide = wide.filter((pl.col(left) == 0) | (pl.col(right) == 0))
+    wide = wide.sort("magnitude", descending=True).head(top_n).sort("difference")
+
+    labels = wide["token"].to_list()
+    left_rate = np.asarray(wide["left_rate"].to_list())
+    right_rate = np.asarray(wide["right_rate"].to_list())
+    y = np.arange(len(labels))
+    colors = site_colors(sites)
+
+    figure, ax = plt.subplots(figsize=(7.4, 0.32 * len(labels) + 1.6))
+    ax.barh(y, -left_rate, color=colors[left], linewidth=0, height=0.68)
+    ax.barh(y, right_rate, color=colors[right], linewidth=0, height=0.68)
+
+    span = max(left_rate.max(), right_rate.max())
+    for i, (lv, rv) in enumerate(zip(left_rate, right_rate)):
+        if lv > span * 0.06:
+            ax.text(-lv / 2, i, f"{lv:.1f}", ha="center", va="center",
+                    color="white", fontsize=6.5)
+        if rv > span * 0.06:
+            ax.text(rv / 2, i, f"{rv:.1f}", ha="center", va="center",
+                    color="white", fontsize=6.5)
+
+    ax.set_yticks(y, labels, fontsize=6.5)
+    ax.axvline(0, color=INK_SECONDARY, linewidth=0.8)
+    ax.set_xlim(-span * 1.12, span * 1.12)
+    ax.set_xlabel("mean occurrences per patient before the anchor")
+    ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{abs(v):g}"))
+
+    ax.text(-span * 0.55, len(labels) - 0.1, left, ha="center", va="bottom",
+            color=colors[left], fontsize=9, fontweight="bold")
+    ax.text(span * 0.55, len(labels) - 0.1, right, ha="center", va="bottom",
+            color=colors[right], fontsize=9, fontweight="bold")
+    headline = (
+        "Tokens one site never records"
+        if rank == "exclusive"
+        else "Tokens that most distinguish the sites"
+    )
+    ax.set_title(f"{headline}, {anchor} anchor", loc="left", pad=22)
+    ax.grid(True, axis="x", color=GRID, linewidth=0.4)
+    ax.set_axisbelow(True)
+    for side in ("top", "right", "left"):
+        ax.spines[side].set_visible(False)
+    ax.set_ylim(-0.8, len(labels) + 0.2)
+
+    figure.savefig(out_path, dpi=DPI, bbox_inches="tight")
+    plt.close(figure)
+    logger.info(f"wrote {out_path}")
+
+
 def plot_family_mix(family_mix: pl.DataFrame, sites, out_path, anchor, logger) -> None:
     """per-site token-family share, the most direct picture of what differs"""
     present = [s for s in sites if s in family_mix.columns]
@@ -485,25 +605,38 @@ def main() -> None:
 
     for anchor in anchors:
         frame = load_embeddings(paths, anchor, logger)
-        sites = sorted(frame["site"].unique().to_list())
+        # paths.yaml order, not alphabetical: it is the order the plots read
+        # left-to-right, and the reader expects the index site first
+        present = set(frame["site"].unique().to_list())
+        sites = [s for s in paths.sites if s in present] + sorted(
+            present - set(paths.sites)
+        )
         if len(sites) < 2:
             logger.warning(f"[{anchor}] only one site present; nothing to compare")
             continue
         logger.info(f"[{anchor}] model {paths.model_key}, sites {sites}")
 
-        family_mix, discriminative = stage_tokens(paths, anchor, sites, logger)
+        family_mix, discriminative, counts = stage_tokens(paths, anchor, sites, logger)
         family_mix.write_csv(paths.table_home / f"site_token_families_anchor-{anchor}.csv")
         if discriminative.height:
             discriminative.write_csv(
                 paths.table_home / f"site_discriminative_tokens_anchor-{anchor}.csv"
             )
+        figures = paths.figure_home / f"anchor-{anchor}"
+        figures.mkdir(parents=True, exist_ok=True)
         plot_family_mix(
-            family_mix,
-            sites,
-            paths.figure_home / f"anchor-{anchor}" / "site_token_families.png",
-            anchor,
-            logger,
+            family_mix, sites, figures / "site_token_families.png", anchor, logger
         )
+        site_sizes = dict(
+            frame.group_by("site").agg(pl.len().alias("n")).iter_rows()
+        )
+        for mode, name in (
+            ("difference", "site_token_tornado.png"),
+            ("exclusive", "site_token_tornado_exclusive.png"),
+        ):
+            plot_token_tornado(
+                counts, site_sizes, sites, figures / name, anchor, logger, rank=mode
+            )
 
         axis_tables.append(stage_axis(paths, frame, anchor, sites, logger))
         frame, regions = stage_regions(frame, anchor, sites, logger)
