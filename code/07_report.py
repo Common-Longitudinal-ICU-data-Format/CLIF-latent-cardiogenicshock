@@ -470,21 +470,91 @@ def section_downstream(paths, out: list, logger) -> None:
         "orthogonal, so a supervised model ignores site without being told to."))
 
     if has_head:
-        out.append("<h3>Linear vs non-linear head</h3>")
-        heads = (
-            results.filter(pl.col("evaluation").str.contains("->"))
-            .group_by("task", "features", "classifier")
-            .agg(auroc=pl.col("auroc").mean())
-            .pivot(on="classifier", index=["task", "features"], values="auroc")
-            .sort("task", "features")
+        arm_label = (
+            pl.when(pl.col("features") != "embedding")
+            .then(pl.lit("clinical baseline"))
+            .when(pl.col("correction") == "raw")
+            .then(pl.lit("embedding, uncorrected"))
+            .when(pl.col("correction") == "site-standardized")
+            .then(pl.lit("embedding, site-standardized"))
+            .otherwise(pl.lit("embedding, LEACE"))
         )
-        out.append(table(heads, {c: num(3) for c in heads.columns
-                                 if c not in ("task", "features")}, key_column="task"))
-        out.append(
-            "<p>Mean cross-site AUROC. The gap between heads is the part of the "
-            "signal that is not linearly decodable.</p>"
-        )
+        order = {
+            "clinical baseline": 0,
+            "embedding, uncorrected": 1,
+            "embedding, site-standardized": 2,
+            "embedding, LEACE": 3,
+        }
 
+        def head_table(frame: pl.DataFrame, index: list[str]) -> pl.DataFrame:
+            wide = (
+                frame.with_columns(arm=arm_label)
+                .group_by(*index, "arm", "classifier")
+                .agg(auroc=pl.col("auroc").mean())
+                .pivot(on="classifier", index=index + ["arm"], values="auroc")
+            )
+            if "gbm" not in wide.columns or "logistic" not in wide.columns:
+                return wide
+            # pivot orders columns by first appearance in the data, so the two
+            # heads can swap places between tables; pin the order explicitly
+            return (
+                wide.with_columns(
+                    _o=pl.col("arm").replace_strict(order, default=9),
+                )
+                .sort(*index, "_o")
+                .select(
+                    *index,
+                    "arm",
+                    "logistic",
+                    "gbm",
+                    (pl.col("gbm") - pl.col("logistic")).alias("gbm - logistic"),
+                )
+            )
+
+        cross = results.filter(pl.col("evaluation").str.contains("->"))
+        within = results.filter(pl.col("evaluation").str.starts_with("within:"))
+
+        out.append("<h3>Linear vs non-linear head, by correction</h3>")
+        out.append(
+            "<p>Mean AUROC over both transfer directions and all three "
+            "checkpoints. Rows are the feature set and the correction applied "
+            "to it; columns are the prediction head on top.</p>"
+        )
+        table_cross = head_table(cross, ["task"])
+        value_cols = {c: num(3) for c in table_cross.columns if c not in ("task", "arm")}
+        out.append(table(table_cross, value_cols, key_column="arm"))
+
+        out.append(callout(
+            "<b>Non-linearity helps the clinical baseline and hurts the "
+            "embedding.</b> On raw labs and vitals a tree gains a great deal "
+            "&mdash; most of all for new intubation, where a linear model on "
+            "tabular features is close to useless. On the embedding it is never "
+            "better. The reading is that the model has already done the "
+            "non-linear work: the representation arrives with the interactions "
+            "folded in, so a linear head reads it cleanly and a tree only adds "
+            "variance. Note this is the opposite of what holds for site, which "
+            "after LEACE is recoverable <i>only</i> non-linearly &mdash; outcome "
+            "information in these embeddings is linearly accessible while site "
+            "information is not, which is why a linear downstream model ignores "
+            "site for free. Correction moves nothing in either column."))
+
+        out.append("<h3>Same, within site</h3>")
+        out.append(
+            "<p>Train and test inside one hospital, averaged over both sites "
+            "and all three checkpoints &mdash; free of any site confounding.</p>"
+        )
+        table_within = head_table(within, ["task"])
+        out.append(table(table_within,
+                         {c: num(3) for c in table_within.columns
+                          if c not in ("task", "arm")},
+                         key_column="arm"))
+
+        out.append("<h3>By checkpoint, cross-site</h3>")
+        detail = head_table(cross, ["task", "model"])
+        out.append(table(detail,
+                         {c: num(3) for c in detail.columns
+                          if c not in ("task", "model", "arm")},
+                         key_column="arm"))
 
 def section_methods(paths, cfg, out: list) -> None:
     out.append('<h2 id="methods">Methods &amp; caveats</h2>')
