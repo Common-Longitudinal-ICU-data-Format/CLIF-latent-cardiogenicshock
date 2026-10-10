@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+
+"""
+affine corrections for the site effect
+
+Both methods here are affine maps on the embedding, fitted on a training split
+and applied unchanged to held-out data. Neither touches the tokens or the
+model; they act only on the 1024-d representation.
+
+What they can and cannot do is worth stating plainly. 04 shows the sites are
+separable at CV accuracy 0.995 because each emits token types the other never
+does -- 96.5% of UCMC patients carry at least one token NU never produces. An
+affine map on the output can remove the directions along which that difference
+is *linearly* readable, and LEACE does so provably. It cannot make two
+representations equal when the inputs that produced them were different. So
+treat a drop in site-probe AUC as evidence the linear channel is closed, not
+as evidence the representations have been made exchangeable.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+
+import numpy as np
+
+
+@dataclasses.dataclass
+class AffineCorrection:
+    """x -> shift + scale * (x - centre), optionally per site"""
+
+    name: str
+    centre: np.ndarray
+    transform: np.ndarray | None = None
+    per_site: dict[str, tuple[np.ndarray, np.ndarray]] | None = None
+
+    def apply(self, x: np.ndarray, sites: np.ndarray | None = None) -> np.ndarray:
+        if self.per_site is not None:
+            if sites is None:
+                raise ValueError(f"{self.name} needs site labels at apply time")
+            out = np.empty_like(x, dtype=np.float64)
+            for site, (mean, scale) in self.per_site.items():
+                mask = sites == site
+                if mask.any():
+                    out[mask] = (x[mask] - mean) / scale
+            unseen = ~np.isin(sites, list(self.per_site))
+            if unseen.any():
+                # a site absent from the fit has no statistics of its own; fall
+                # back to the pooled centre rather than silently leaving it on a
+                # different scale from everything else
+                out[unseen] = x[unseen] - self.centre
+            return out
+        return (x - self.centre) @ self.transform.T + self.centre
+
+
+def fit_identity(x: np.ndarray) -> AffineCorrection:
+    """no-op, so "raw" can travel through the same code path as the corrections"""
+    return AffineCorrection(
+        name="raw", centre=np.zeros(x.shape[1]), transform=np.eye(x.shape[1])
+    )
+
+
+def fit_site_standardize(
+    x: np.ndarray, sites: np.ndarray, eps: float = 1e-8
+) -> AffineCorrection:
+    """
+    z-score within each site
+
+    The crude baseline: it removes any difference in per-feature location and
+    scale between sites, and nothing else. Any site structure that lives in the
+    correlations between features survives it, which is most of the point of
+    comparing it against LEACE.
+    """
+    per_site = {}
+    for site in np.unique(sites):
+        part = x[sites == site]
+        per_site[site] = (part.mean(axis=0), part.std(axis=0) + eps)
+    return AffineCorrection(
+        name="site-standardized", centre=x.mean(axis=0), per_site=per_site
+    )
+
+
+def fit_leace(x: np.ndarray, z: np.ndarray, eps: float = 1e-6) -> AffineCorrection:
+    """
+    LEACE: least-squares concept erasure (Belrose et al., 2023)
+
+    Returns the affine map that removes all linearly-decodable information
+    about `z` while changing the representation as little as possible in the
+    least-squares sense. For a binary site indicator the erased subspace is
+    rank 1: a single direction, found in the whitened space so that the
+    deletion is orthogonal with respect to the data's own covariance rather
+    than to the raw axes.
+
+        r(x) = x - Sxx^(1/2) u u' Sxx^(-1/2) (x - mu),  u = unit(Sxx^(-1/2) Sxz)
+
+    Guarantee: after this, Cov(r(X), z) = 0, so no linear probe can recover the
+    site above chance. Non-linear probes can still succeed, and routinely do.
+    """
+    n, d = x.shape
+    centre = x.mean(axis=0)
+    xc = x - centre
+    zc = z.astype(np.float64)
+    zc = zc - zc.mean(axis=0)
+    if zc.ndim == 1:
+        zc = zc[:, None]
+
+    covariance = (xc.T @ xc) / (n - 1)
+    cross = (xc.T @ zc) / (n - 1)
+
+    # symmetric whitening, with the spectrum floored so a rank-deficient
+    # covariance cannot blow up the inverse square root
+    values, vectors = np.linalg.eigh(covariance)
+    values = np.clip(values, eps, None)
+    whiten = vectors @ np.diag(values**-0.5) @ vectors.T
+    unwhiten = vectors @ np.diag(values**0.5) @ vectors.T
+
+    basis = whiten @ cross
+    q, _ = np.linalg.qr(basis)
+    projection = q @ q.T
+
+    transform = np.eye(d) - unwhiten @ projection @ whiten
+    return AffineCorrection(name="leace", centre=centre, transform=transform)
+
+
+def fit(method: str, x: np.ndarray, sites: np.ndarray, reference: str) -> AffineCorrection:
+    """dispatch by name; `reference` is the site treated as the positive class"""
+    if method == "raw":
+        return fit_identity(x)
+    if method == "site-standardized":
+        return fit_site_standardize(x, sites)
+    if method == "leace":
+        return fit_leace(x, (sites == reference).astype(np.float64))
+    raise ValueError(f"unknown correction {method!r}")
+
+
+METHODS = ("raw", "site-standardized", "leace")

@@ -182,3 +182,22 @@ outcomes:
   mortality_discharge_categories:
     - Expired
   icu_location_category: icu
+
+# ------------------------------------------------------- downstream tasks (06)
+# Prediction targets anchored at the moment the model read the patient.
+downstream:
+  horizon_hours: !!float 24.0
+  tasks:
+    - mortality_24h
+    - new_imv_24h
+    - pressor_escalation_24h
+
+  pressor_escalation:
+    # rise in total norepinephrine-equivalent dose, mcg/kg/min, over the dose
+    # running at the anchor. 0.1 is roughly the smallest change a clinician
+    # would call an escalation rather than titration noise.
+    threshold_nee: !!float 0.1
+
+  # minimum positives in a split before a task is scored there; below this an
+  # AUC is too unstable to report
+  min_positives: !!int 25
