@@ -38,7 +38,9 @@ class Paths:
     """resolved input and output locations"""
 
     site_data: dict[str, pathlib.Path]
+    model_key: str
     model_home: pathlib.Path
+    available_models: tuple[str, ...]
     tokenizer_yaml: pathlib.Path
     output_home: pathlib.Path
     scratch_home: pathlib.Path
@@ -63,15 +65,15 @@ class Paths:
     @property
     def patient_level_home(self) -> pathlib.Path:
         """one row per patient: embedding location plus covariates"""
-        return self.output_home / "patient_level_data"
+        return self.output_home / "patient_level_data" / self.model_key
 
     @property
     def figure_home(self) -> pathlib.Path:
-        return self.output_home / "figures"
+        return self.output_home / "figures" / self.model_key
 
     @property
     def table_home(self) -> pathlib.Path:
-        return self.output_home / "tables"
+        return self.output_home / "tables" / self.model_key
 
     @property
     def log_home(self) -> pathlib.Path:
@@ -90,6 +92,28 @@ class Paths:
         """per-anchor view of a site's timelines, ready for `cotorra extract`"""
         return self.processed(site) / f"anchor-{anchor}"
 
+    @property
+    def id_salt_file(self) -> pathlib.Path:
+        """
+        salt for pseudonymizing record numbers on export
+
+        Deliberately above the per-model directories: a patient must get the
+        same pseudonym whichever model embedded them, or the same person
+        cannot be matched across models in a pooled analysis.
+        """
+        return self.output_home / "patient_level_data" / ".id_salt"
+
+    def features_home(self, site: str, anchor: str) -> pathlib.Path:
+        """
+        where `cotorra extract` writes its raw feature shards
+
+        Model-scoped, because cotorra names those files after
+        `model_home.name` -- which is "mdl-cotorra" for every GEM checkpoint.
+        Left in the shared anchor directory they would overwrite each other.
+        The tokenized inputs stay shared: the models read identical data.
+        """
+        return self.anchored(site, anchor) / self.model_key
+
     def mkdirs(self) -> None:
         for p in (
             self.cohort_home,
@@ -102,8 +126,15 @@ class Paths:
             p.mkdir(parents=True, exist_ok=True)
 
 
-def load_paths(config: pathlib.Path | str | None = None) -> Paths:
-    """resolve paths.yaml into absolute, existence-checked locations"""
+def load_paths(
+    config: pathlib.Path | str | None = None, model: str | None = None
+) -> Paths:
+    """
+    resolve paths.yaml into absolute, existence-checked locations
+
+    `model` selects which checkpoint's outputs this run reads and writes;
+    it defaults to `default_model` in the config.
+    """
     path = pathlib.Path(config or CONFIG_HOME / "paths.yaml")
     if not path.is_file():
         raise FileNotFoundError(
@@ -122,19 +153,27 @@ def load_paths(config: pathlib.Path | str | None = None) -> Paths:
     if not site_data:
         raise ValueError(f"no sites configured in {path}")
 
-    # the model directory name contains a non-ASCII character; glob for it so the
-    # literal byte sequence never has to be reproduced in a config file
-    matches = sorted(glob.glob(str(cfg.model.home_glob)))
+    available = tuple(cfg.models)
+    if not available:
+        raise ValueError(f"no models configured in {path}")
+    key = model or cfg.get("default_model") or available[0]
+    if key not in available:
+        raise KeyError(f"model {key!r} not in paths.yaml; have {available}")
+
+    # the weights directory names contain a non-ASCII character, so they are
+    # globbed rather than written out literally
+    pattern = str(cfg.models[key].home_glob)
+    matches = sorted(glob.glob(pattern))
     if len(matches) != 1:
         raise FileNotFoundError(
-            f"model.home_glob matched {len(matches)} directories "
-            f"(expected exactly 1): {cfg.model.home_glob} -> {matches}"
+            f"models.{key}.home_glob matched {len(matches)} directories "
+            f"(expected exactly 1): {pattern} -> {matches}"
         )
     model_home = pathlib.Path(matches[0]).resolve()
     if not (model_home / "config.json").is_file():
         raise FileNotFoundError(f"no config.json under {model_home}")
 
-    tokenizer_yaml = pathlib.Path(cfg.model.tokenizer_yaml).expanduser().resolve()
+    tokenizer_yaml = pathlib.Path(cfg.tokenizer_yaml).expanduser().resolve()
     if not tokenizer_yaml.is_file():
         raise FileNotFoundError(
             "the training-time cocoa tokenizer is required to make the model's "
@@ -143,7 +182,9 @@ def load_paths(config: pathlib.Path | str | None = None) -> Paths:
 
     return Paths(
         site_data=site_data,
+        model_key=key,
         model_home=model_home,
+        available_models=available,
         tokenizer_yaml=tokenizer_yaml,
         output_home=pathlib.Path(cfg.output_home).expanduser().resolve(),
         scratch_home=pathlib.Path(cfg.scratch_home).expanduser().resolve(),

@@ -17,23 +17,34 @@ sites:
   # RUSH:
   #   data_dir: /path/to/CLIF_RUSH_2_1
 
-model:
-  # The frozen foundation model checkpoint directory: the one holding
-  # config.json and model.safetensors. A glob is accepted (and needed for
-  # GEM*-all, whose directory name contains a non-ASCII character), but it must
-  # match exactly one directory.
-  home_glob: /path/to/GEM-weights-FL-manuscript/GEM*-all/mdl-cotorra
+# Frozen foundation models. Each key is the label used in output paths, so the
+# same cohort can be embedded by several models without their results
+# colliding. All the GEM checkpoints share one architecture and one 1344-token
+# vocabulary, so they all read the same tokenized data.
+#
+# NOTE the single-character wildcard. The weights directory holds both
+# `GEM-mimic-icu` and `GEM<star>-mimic-icu`; `GEM?-` matches only the second
+# (the 5-epoch "star" run), while `GEM*-` would match both and be ambiguous.
+models:
+  GEM-all:
+    home_glob: /path/to/GEM-weights-FL-manuscript/GEM?-all/mdl-cotorra
+  GEM-mimic-icu:
+    home_glob: /path/to/GEM-weights-FL-manuscript/GEM?-mimic-icu/mdl-cotorra
+  GEM-ucmc-icu:
+    home_glob: /path/to/GEM-weights-FL-manuscript/GEM?-ucmc-icu/mdl-cotorra
 
-  # The fitted cocoa tokenizer the model was TRAINED with.
-  #
-  # This is not interchangeable. The model's embedding table has one row per
-  # token id, and the numeric bin edges are baked into the token names, so a
-  # tokenizer learned anywhere else maps the same clinical event to a different
-  # id and the representations become meaningless. Ship this file alongside the
-  # weights; 02 refuses to run if its vocabulary size does not match the model's.
-  tokenizer_yaml: /path/to/GEM-weights-FL-manuscript/tokenizer.yaml
+default_model: GEM-all
 
-# Results: cohort tables, embeddings, figures. Small enough to keep with the repo.
+# The fitted cocoa tokenizer the models were TRAINED with, shared by all of
+# them.
+#
+# This is not interchangeable. A model's embedding table has one row per token
+# id and the numeric bin edges are baked into the token names, so a tokenizer
+# learned anywhere else maps the same clinical event to a different id and the
+# representations become meaningless. 02 refuses to run if the vocabulary size
+# does not match the model's.
+tokenizer_yaml: /path/to/GEM-weights-FL-manuscript/tokenizer.yaml
+
 output_home: ./output
 
 # Intermediates: cohort-restricted CLIF tables, token streams, raw feature

@@ -82,6 +82,7 @@ def describe_model(paths, logger) -> dict:
     vocab = len(tokenizer_cfg.lookup)
 
     info = {
+        "model_key": paths.model_key,
         "model_home": str(paths.model_home),
         "base_model": raw_config.get("_name_or_path"),
         "architecture": config.architectures[0] if config.architectures else None,
@@ -180,7 +181,7 @@ def report_overflow(processed: pathlib.Path, site, anchor, max_len, keep, logger
     )
 
 
-def build_extractor(paths, processed, cfg_path, keep):
+def build_extractor(paths, processed, features_home, cfg_path, keep):
     """
     cotorra's Extractor, with a configurable overflow policy
 
@@ -209,7 +210,7 @@ def build_extractor(paths, processed, cfg_path, keep):
         extraction_cfg=cfg_path,
         processed_data_home=processed,
         model_home=paths.model_home,
-        output_home=processed,
+        output_home=features_home,
     )
 
 
@@ -226,11 +227,13 @@ def extract_site_anchor(paths, site, anchor, batch_size, logger) -> pl.DataFrame
     a silent length mismatch here would mislabel every patient.
     """
     processed = paths.anchored(site, anchor)
+    features_home = paths.features_home(site, anchor)
+    features_home.mkdir(parents=True, exist_ok=True)
     extraction_cfg = OmegaConf.load(CONFIG_HOME / "extraction.yaml")
     if batch_size is not None:
         extraction_cfg.extract.batch_size = int(batch_size)
 
-    cfg_path = processed / "extraction-resolved.yaml"
+    cfg_path = features_home / "extraction-resolved.yaml"
     OmegaConf.save(extraction_cfg, cfg_path)
 
     keep = OVERFLOW_POLICY[anchor]
@@ -243,15 +246,15 @@ def extract_site_anchor(paths, site, anchor, batch_size, logger) -> pl.DataFrame
         f"{extraction_cfg.extract.batch_size}, max_len={extraction_cfg.extract.max_len})"
     )
     t0 = time.perf_counter()
-    extractor = build_extractor(paths, processed, cfg_path, keep)
-    logger.info(f"[{site}/{anchor}] device: {extractor.device}")
+    extractor = build_extractor(paths, processed, features_home, cfg_path, keep)
+    logger.info(f"[{site}/{anchor}] model {paths.model_key}, device {extractor.device}")
     extractor.extract()
     logger.info(f"[{site}/{anchor}] extraction took {time.perf_counter() - t0:.1f}s")
 
     frames = []
     for split in SPLITS:
         feature_files = sorted(
-            processed.glob(f"features-{split}*-{paths.model_home.name}.parquet")
+            features_home.glob(f"features-{split}*-{paths.model_home.name}.parquet")
         )
         if not feature_files:
             logger.warning(f"[{site}/{anchor}] no features for split {split}")
@@ -306,7 +309,9 @@ _DIRECT_IDENTIFIERS = ("patient_id", "hospitalization_id")
 _DATE_COLUMNS = ("cs_onset_dttm",)
 
 
-def write_share_safe(frame: pl.DataFrame, source: pathlib.Path, logger) -> pathlib.Path:
+def write_share_safe(
+    frame: pl.DataFrame, source: pathlib.Path, salt_file: pathlib.Path, logger
+) -> pathlib.Path:
     """
     write a copy with direct identifiers and raw dates removed
 
@@ -326,7 +331,7 @@ def write_share_safe(frame: pl.DataFrame, source: pathlib.Path, logger) -> pathl
     the export as limited-data-set-grade at best, and move it under the same
     agreement you would use for patient-level clinical data.
     """
-    salt_file = source.parent / ".id_salt"
+    salt_file.parent.mkdir(parents=True, exist_ok=True)
     if not salt_file.is_file():
         salt_file.write_text(secrets.token_hex(32), encoding="utf-8")
         logger.info(
@@ -375,6 +380,12 @@ def main() -> None:
     parser.add_argument("--anchor", choices=ANCHORS, default=None, help="one anchor only")
     parser.add_argument("--site", default=None, help="one site only")
     parser.add_argument(
+        "--model",
+        default=None,
+        help="which checkpoint from paths.yaml to embed with "
+        "(default: default_model). Outputs are written under that name.",
+    )
+    parser.add_argument(
         "--batch-size",
         type=int,
         default=8,
@@ -395,7 +406,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    paths = load_paths()
+    paths = load_paths(model=args.model)
     paths.mkdirs()
     logger = get_logger("02_model_embedding", paths.log_home / "02_model_embedding.log")
 
@@ -405,7 +416,7 @@ def main() -> None:
             if "_share-safe" in source.name:
                 continue
             regenerated.append(
-                write_share_safe(pl.read_parquet(source), source, logger)
+                write_share_safe(pl.read_parquet(source), source, paths.id_salt_file, logger)
             )
         logger.info(
             "02 done; regenerated " + ", ".join(p.name for p in regenerated)
@@ -415,6 +426,7 @@ def main() -> None:
     if not torch.cuda.is_available():
         logger.warning("CUDA not available; extraction will run on CPU and be slow")
 
+    logger.info(f"model: {paths.model_key}  (available: {', '.join(paths.available_models)})")
     info = describe_model(paths, logger)
     paths.table_home.mkdir(parents=True, exist_ok=True)
     (paths.table_home / "model_summary.json").write_text(
@@ -473,7 +485,7 @@ def main() -> None:
             )
 
             if args.share_safe:
-                safe = write_share_safe(frame, out, logger)
+                safe = write_share_safe(frame, out, paths.id_salt_file, logger)
                 written.append(safe)
 
     logger.info("02 done; wrote " + ", ".join(p.name for p in written))

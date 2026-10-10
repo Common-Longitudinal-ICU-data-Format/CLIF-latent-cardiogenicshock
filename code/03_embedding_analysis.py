@@ -466,7 +466,7 @@ def analyse_anchor(paths, anchor: str, args, logger) -> pl.DataFrame:
     }[anchor]
 
     for key, x, y, xlabel, ylabel, pretty in projections:
-        base = f"{pretty} of GEM*-all embeddings, {anchor_label}"
+        base = f"{pretty} of {paths.model_key} embeddings, {anchor_label}"
 
         plot_categorical(
             frame,
@@ -663,6 +663,11 @@ def summarize_anchor(frame: pl.DataFrame, anchor: str) -> pl.DataFrame:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--anchor", choices=ANCHORS, default=None)
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="which checkpoint's embeddings to analyse (default: default_model)",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--max-points",
@@ -672,7 +677,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    paths = load_paths()
+    paths = load_paths(model=args.model)
     paths.mkdirs()
     logger = get_logger(
         "03_embedding_analysis", paths.log_home / "03_embedding_analysis.log"
