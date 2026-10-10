@@ -154,6 +154,38 @@ def callout(text: str, kind: str = "") -> str:
     return f'<div class="callout {kind}"><p>{text}</p></div>'
 
 
+def read_model_tables(
+    paths, name: str, required: tuple[str, ...], logger
+) -> tuple[pl.DataFrame | None, list[str]]:
+    """
+    collect one table across models, refusing to merge mismatched schemas
+
+    A plain diagonal concat fills a column missing from one file with nulls,
+    which renders as "None" in the report and looks like a result rather than
+    a stale file. This happened: a report built before a rerun finished showed
+    `classifier: None` for two of three models. Any file lacking a required
+    column is dropped and named instead.
+    """
+    frames, stale = [], []
+    for model in MODELS:
+        f = paths.output_home / "tables" / model / name
+        if not f.is_file():
+            continue
+        frame = pl.read_csv(f)
+        missing = [c for c in required if c not in frame.columns]
+        if missing:
+            stale.append(f"{model} ({', '.join(missing)} absent)")
+            logger.warning(
+                f"{f} lacks {missing}; excluded from the report. Rerun the "
+                "stage that writes it."
+            )
+            continue
+        frames.append(frame.with_columns(model=pl.lit(model)))
+    if not frames:
+        return None, stale
+    return pl.concat(frames, how="diagonal_relaxed"), stale
+
+
 # ------------------------------------------------------------------ sections
 
 
@@ -389,16 +421,16 @@ def section_correction(paths, out: list) -> None:
     )
 
 
-def section_downstream(paths, out: list) -> None:
-    rows = []
-    for model in MODELS:
-        f = paths.output_home / "tables" / model / "downstream_tasks.csv"
-        if f.is_file():
-            rows.append(pl.read_csv(f).with_columns(model=pl.lit(model)))
-    if not rows:
+def section_downstream(paths, out: list, logger) -> None:
+    results, stale = read_model_tables(
+        paths,
+        "downstream_tasks.csv",
+        ("task", "evaluation", "auroc", "classifier"),
+        logger,
+    )
+    if results is None:
         return
-    results = pl.concat(rows, how="diagonal_relaxed")
-    has_head = "classifier" in results.columns
+    has_head = True
     out.append('<h2 id="downstream">6 &middot; Downstream prediction</h2>')
     out.append(
         "<p>Three tasks, each anchored at the moment the model read the patient "
@@ -406,6 +438,11 @@ def section_downstream(paths, out: list) -> None:
         "age, sex, the last labs and vitals recorded before the anchor, and "
         "vasopressor burden &mdash; nothing from the prediction window.</p>"
     )
+    if stale:
+        out.append(callout(
+            "<b>Excluded from this section:</b> " + esc("; ".join(stale))
+            + ". Those files predate the current schema; rerun 06 for them.",
+            "warn"))
 
     arm = (
         pl.when(pl.col("features") != "embedding").then(pl.lit("clinical baseline"))
@@ -495,7 +532,7 @@ def main() -> None:
     section_embedding(paths, out)
     section_site_effect(paths, out)
     section_correction(paths, out)
-    section_downstream(paths, out)
+    section_downstream(paths, out, logger)
     section_methods(paths, cfg, out)
 
     stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
