@@ -40,6 +40,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import numpy as np
 import polars as pl
 from sklearn.decomposition import PCA
+from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
@@ -115,24 +116,38 @@ def bootstrap_auc(y: np.ndarray, score: np.ndarray, seed: int = 42) -> tuple[flo
     return float(np.percentile(values, 2.5)), float(np.percentile(values, 97.5))
 
 
-def classifier(kind: str):
-    """L2 logistic, matching how cotorra scores its own representations"""
-    if kind == "embedding":
-        return make_pipeline(
-            StandardScaler(),
-            PCA(n_components=PCA_COMPONENTS, random_state=42),
-            LogisticRegression(max_iter=5000, C=0.1),
-        )
-    return make_pipeline(
-        SimpleImputer(strategy="median"),
-        StandardScaler(),
-        LogisticRegression(max_iter=5000, C=1.0),
+#: the two heads compared on every feature set
+CLASSIFIERS = ("logistic", "gbm")
+
+
+def classifier(kind: str, head: str):
+    """
+    a linear and a non-linear head on identical features
+
+    Worth running both because 05 showed site is recoverable non-linearly but
+    not linearly: if the same asymmetry holds for outcome, a logistic probe
+    would understate what the embedding knows, and the gap between the heads
+    is the part of the signal that is not linearly decodable.
+    """
+    steps = (
+        [StandardScaler(), PCA(n_components=PCA_COMPONENTS, random_state=42)]
+        if kind == "embedding"
+        else [SimpleImputer(strategy="median"), StandardScaler()]
     )
+    head_model = (
+        LogisticRegression(max_iter=5000, C=0.1 if kind == "embedding" else 1.0)
+        if head == "logistic"
+        else HistGradientBoostingClassifier(
+            max_iter=150, learning_rate=0.1, random_state=42
+        )
+    )
+    return make_pipeline(*steps, head_model)
 
 
 def score_split(
     name: str,
     kind: str,
+    head: str,
     train_x,
     train_y,
     test_x,
@@ -143,11 +158,12 @@ def score_split(
         return None
     if len(np.unique(train_y)) < 2 or len(np.unique(test_y)) < 2:
         return None
-    model = classifier(kind).fit(train_x, train_y)
+    model = classifier(kind, head).fit(train_x, train_y)
     score = model.predict_proba(test_x)[:, 1]
     low, high = bootstrap_auc(test_y, score)
     return {
         "evaluation": name,
+        "classifier": head,
         "auroc": roc_auc_score(test_y, score),
         "auroc_lo": low,
         "auroc_hi": high,
@@ -181,32 +197,32 @@ def run_task(
     splits = _splits(sites, present, np.random.default_rng(42))
     rows = []
 
-    # the clinical baseline, the same three ways, so it is comparable
-    for name, train_mask, test_mask in splits:
-        got = score_split(
-            name, "baseline", baseline[train_mask], y[train_mask],
-            baseline[test_mask], y[test_mask], min_positives,
-        )
-        if got:
-            rows.append({**got, "task": task, "anchor": anchor,
-                         "features": "clinical baseline", "correction": "-"})
-
-    for method in METHODS:
+    # the clinical baseline, the same ways, so it is comparable
+    for head in CLASSIFIERS:
         for name, train_mask, test_mask in splits:
-            # the correction is fitted on this split's training patients only
-            correction = fit(method, x[train_mask], sites[train_mask], reference)
             got = score_split(
-                name,
-                "embedding",
-                correction.apply(x[train_mask], sites[train_mask]),
-                y[train_mask],
-                correction.apply(x[test_mask], sites[test_mask]),
-                y[test_mask],
-                min_positives,
+                name, "baseline", head, baseline[train_mask], y[train_mask],
+                baseline[test_mask], y[test_mask], min_positives,
             )
             if got:
                 rows.append({**got, "task": task, "anchor": anchor,
-                             "features": "embedding", "correction": method})
+                             "features": "clinical baseline", "correction": "-"})
+
+    for method in METHODS:
+        for name, train_mask, test_mask in splits:
+            # the correction is fitted on this split's training patients only,
+            # then reused by both heads so they see identical features
+            correction = fit(method, x[train_mask], sites[train_mask], reference)
+            train_c = correction.apply(x[train_mask], sites[train_mask])
+            test_c = correction.apply(x[test_mask], sites[test_mask])
+            for head in CLASSIFIERS:
+                got = score_split(
+                    name, "embedding", head, train_c, y[train_mask],
+                    test_c, y[test_mask], min_positives,
+                )
+                if got:
+                    rows.append({**got, "task": task, "anchor": anchor,
+                                 "features": "embedding", "correction": method})
     return rows
 
 
@@ -285,7 +301,7 @@ def main() -> None:
         return
 
     table = pl.DataFrame(rows).select(
-        "anchor", "task", "features", "correction", "evaluation",
+        "anchor", "task", "features", "correction", "classifier", "evaluation",
         "auroc", "auroc_lo", "auroc_hi", "auprc", "prevalence", "n_train", "n_test",
     )
     out = paths.table_home / "downstream_tasks.csv"
@@ -295,12 +311,12 @@ def main() -> None:
     for task in table["task"].unique(maintain_order=True):
         logger.info(f"--- {task}")
         part = table.filter(pl.col("task") == task)
-        for row in part.sort("evaluation", "features", "correction").iter_rows(named=True):
+        for row in part.sort("evaluation", "features", "correction", "classifier").iter_rows(named=True):
             label = (
                 "clinical baseline"
                 if row["features"] != "embedding"
                 else f"embedding/{row['correction']}"
-            )
+            ) + f" [{row['classifier']}]"
             logger.info(
                 f"    {row['anchor']:<6} {row['evaluation']:<14} {label:<28} "
                 f"AUROC {row['auroc']:.3f} [{row['auroc_lo']:.3f}-{row['auroc_hi']:.3f}]  "

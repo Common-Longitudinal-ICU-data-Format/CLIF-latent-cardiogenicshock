@@ -96,11 +96,12 @@ end_organ:
 # included. That is why the cohort comes out large (tens of thousands rather
 # than the hundreds a cardiogenic-shock registry would hold).
 #
-# The flag below is computed and reported for every patient regardless, so the
-# effect of requiring cardiac origin is visible in the filter ledger without a
-# rerun. Set `enabled: true` to actually restrict the cohort to it.
+# Applied as an enrollment criterion. The flag is computed for every patient
+# reaching criterion 2 and then used to filter, so the ledger still shows what
+# each arm contributed before the restriction. Set `enabled: false` to go back
+# to reporting it without subsetting.
 cardiac_origin:
-  enabled: !!bool false
+  enabled: !!bool true
   # satisfied by either an inotrope infusion or a mechanical circulatory
   # support procedure. Diagnosis codes are deliberately not used: an ICD
   # diagnosis records an assertion about the patient, whereas an inotrope

@@ -96,6 +96,20 @@ def load_embeddings(paths, anchor: str, logger) -> pl.DataFrame:
             f"no embeddings for anchor {anchor} under {paths.patient_level_home}"
         )
     frame = pl.concat([pl.read_parquet(p) for p in sources], how="diagonal_relaxed")
+
+    # Restrict to the current cohort. 02 embeds everyone present in the
+    # winnowed data, which is a superset once an enrollment criterion is
+    # tightened (cardiac origin, say). Without this join 04 and 05 would keep
+    # describing the old cohort while 03 and 06 described the new one.
+    cohort_file = paths.cohort_home / "cohort.parquet"
+    if cohort_file.is_file():
+        keep = pl.read_parquet(cohort_file).select("hospitalization_id", "site")
+        before = frame.height
+        frame = frame.join(keep, on=["hospitalization_id", "site"], how="inner")
+        if frame.height != before:
+            logger.info(
+                f"[{anchor}] restricted to the cohort: {before} -> {frame.height}"
+            )
     logger.info(f"[{anchor}] {frame.height} patients from {len(sources)} site files")
     return frame
 
