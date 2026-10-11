@@ -342,9 +342,47 @@ def plot_scatter(frame, x, y, column, colors, order, title, label, out, logger,
     logger.info(f"wrote {out}")
 
 
-def plot_flow(frame, x, y, out, title, subtitle, logger):
+def cell_coherence(frame: pl.DataFrame, x: str, y: str, bins: int = 26) -> float:
+    """median over cells of |sum of displacements| / sum of |displacements|"""
+    ordered = frame.sort("hospitalization_id", "offset_hours")
+    dx = (
+        ordered.with_columns(
+            next_x=pl.col(x).shift(-1).over("hospitalization_id"),
+            next_y=pl.col(y).shift(-1).over("hospitalization_id"),
+        )
+        .drop_nulls(["next_x", "next_y"])
+        .with_columns(vx=pl.col("next_x") - pl.col(x), vy=pl.col("next_y") - pl.col(y))
+    )
+    px, py = dx[x].to_numpy(), dx[y].to_numpy()
+    vx, vy = dx["vx"].to_numpy(), dx["vy"].to_numpy()
+    speed = np.hypot(vx, vy)
+    edges_x = np.linspace(*np.percentile(frame[x].to_numpy(), [0.5, 99.5]), bins + 1)
+    edges_y = np.linspace(*np.percentile(frame[y].to_numpy(), [0.5, 99.5]), bins + 1)
+    counts, _, _ = np.histogram2d(px, py, [edges_x, edges_y])
+    sum_x, _, _ = np.histogram2d(px, py, [edges_x, edges_y], weights=vx)
+    sum_y, _, _ = np.histogram2d(px, py, [edges_x, edges_y], weights=vy)
+    sum_speed, _, _ = np.histogram2d(px, py, [edges_x, edges_y], weights=speed)
+    ok = counts >= 5
+    if not ok.any():
+        return float("nan")
+    return float(
+        np.median(np.hypot(sum_x[ok], sum_y[ok]) / np.maximum(sum_speed[ok], 1e-9))
+    )
+
+
+def plot_flow(frame, x, y, out, title, subtitle, logger, labels=None):
     """streamplot of the displacement field over the point cloud"""
     cx, cy, vx, vy, counts, n_vectors = displacement_field(frame, x, y)
+
+    # Coherence per cell: |sum of vectors| / sum of |vectors|. Near 1 the
+    # patients in a cell move the same way; near 0 they cancel and the
+    # streamlines are an integration drawn through noise. Pure noise over
+    # n vectors gives roughly 1/sqrt(n), so a few tenths is already real
+    # structure -- but the streamplot renders the directional part only, and
+    # looks far more orderly than the underlying scatter, so the number
+    # belongs on the figure.
+    coherence = cell_coherence(frame, x, y)
+
     figure, ax = plt.subplots(figsize=(6.0, 5.2))
 
     ax.scatter(frame[x].to_numpy(), frame[y].to_numpy(), s=1.0,
@@ -364,19 +402,29 @@ def plot_flow(frame, x, y, out, title, subtitle, logger):
     )
 
     ax.set_title(title, loc="left", pad=8)
-    ax.set_xlabel("UMAP-1")
-    ax.set_ylabel("UMAP-2")
+    # labelled from the columns actually plotted: this said "UMAP" on the PCA
+    # panel, which is the one figure whose whole purpose is to not be the UMAP
+    xlabel, ylabel = labels or (x, y)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
     ax.set_aspect("equal", adjustable="datalim")
     for side in ("top", "right"):
         ax.spines[side].set_visible(False)
     ax.grid(True, color=GRID, linewidth=0.4, alpha=0.6)
     ax.set_axisbelow(True)
-    figure.text(0.02, -0.01, subtitle, fontsize=7, color=INK_SECONDARY)
+    figure.text(
+        0.02, -0.01,
+        f"{subtitle}; directional coherence {coherence:.2f} "
+        f"(1 = patients in a cell all move alike, 0 = they cancel)",
+        fontsize=7, color=INK_SECONDARY,
+    )
     save_figure(figure, out)
     plt.close(figure)
-    logger.info(f"wrote {out} ({n_vectors:,} displacement vectors, "
-                f"{int((counts >= 5).sum())} populated cells)")
-    return speed
+    logger.info(
+        f"wrote {out.name} ({n_vectors:,} displacement vectors, "
+        f"{int((counts >= 5).sum())} populated cells, coherence {coherence:.3f})"
+    )
+    return coherence
 
 
 # =================================================================== driver
@@ -438,11 +486,12 @@ def main() -> None:
     plot_flow(frame, "umap_1", "umap_2", home / "trajectory_flow_umap.png",
               f"{paths.model_key}: latent flow around shock onset",
               f"mean observed displacement between consecutive {args.step_hours:g}h "
-              "timepoints; cells with <5 vectors blank", logger)
+              "timepoints; cells with <5 vectors blank", logger,
+              labels=("UMAP-1", "UMAP-2"))
     plot_flow(frame, "pca_1", "pca_2", home / "trajectory_flow_pca.png",
               f"{paths.model_key}: latent flow, PCA space",
               "the same field in a linear space, where distances are metric — "
-              "a cross-check on the UMAP field", logger)
+              "a cross-check on the UMAP field", logger, labels=("PC1", "PC2"))
 
     for survived, name in ((False, "died"), (True, "survived")):
         part = frame.filter(pl.col("in_hospital_mortality") != survived)
@@ -451,7 +500,7 @@ def main() -> None:
                       home / f"trajectory_flow_{name}.png",
                       f"{paths.model_key}: latent flow, patients who {name}",
                       f"{part['hospitalization_id'].n_unique():,} patients",
-                      logger)
+                      logger, labels=("UMAP-1", "UMAP-2"))
 
     frame.select(
         "hospitalization_id", "site", "offset_hours", "last_valid",
