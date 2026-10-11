@@ -391,22 +391,36 @@ def load_anchor(paths, anchor: str, logger) -> pl.DataFrame:
 
     frame = pl.concat(frames, how="diagonal_relaxed")
 
-    # Refresh covariates from the local cohort table where it has them. 02
-    # writes a copy into each file so it travels, but for sites processed on
-    # this machine a cohort-level correction should not require re-running a
-    # 45-minute GPU extraction to take effect.
+    # Refresh covariates from the local cohort table where it has them, and
+    # drop locally-processed patients the cohort no longer contains. 02 embeds
+    # everyone in the winnowed stream, which becomes a superset the moment an
+    # enrollment criterion is tightened, so without the drop this would keep
+    # describing the old cohort. A patient from a site this machine does not
+    # hold data for is a contribution from elsewhere: it is kept, on the
+    # covariates shipped with it.
     cohort_file = paths.cohort_home / "cohort.parquet"
     if cohort_file.is_file() and "hospitalization_id" in frame.columns:
         local = pl.read_parquet(cohort_file).select(
             "hospitalization_id",
             "site",
-            *(f"{c}_local" for c in ()),
             cs_phenotype_local=pl.col("cs_phenotype"),
             icu_los_days_local=pl.col("icu_los_days"),
             in_hospital_mortality_local=pl.col("in_hospital_mortality"),
             cardiac_origin_local=pl.col("cardiac_origin"),
         )
         frame = frame.join(local, on=["hospitalization_id", "site"], how="left")
+
+        local_sites = set(paths.sites)
+        before = frame.height
+        frame = frame.filter(
+            ~pl.col("site").is_in(list(local_sites))
+            | pl.col("cs_phenotype_local").is_not_null()
+        )
+        if frame.height != before:
+            logger.info(
+                f"[{anchor}] dropped {before - frame.height} patients no longer "
+                f"in the cohort: {before} -> {frame.height}"
+            )
         n_refreshed = int(frame["cs_phenotype_local"].is_not_null().sum())
         frame = frame.with_columns(
             cs_phenotype=pl.coalesce("cs_phenotype_local", "cs_phenotype"),
