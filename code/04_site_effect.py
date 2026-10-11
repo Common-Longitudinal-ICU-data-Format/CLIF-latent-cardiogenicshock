@@ -45,6 +45,7 @@ from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import StandardScaler
 
 from clifcs import ANCHORS, get_logger, load_paths
+from clifcs.figures import save_figure
 from clifcs.palette import GRID, INK_PRIMARY, INK_SECONDARY, SURFACE, site_colors
 from clifcs.tokens import (
     family_matrix,
@@ -558,7 +559,7 @@ def plot_token_tornado(
         ax.spines[side].set_visible(False)
     ax.set_ylim(-0.8, len(labels) + 0.2)
 
-    figure.savefig(out_path, dpi=DPI, bbox_inches="tight")
+    save_figure(figure, out_path)
     plt.close(figure)
     logger.info(f"wrote {out_path}")
 
@@ -595,7 +596,7 @@ def plot_family_mix(family_mix: pl.DataFrame, sites, out_path, anchor, logger) -
     for side in ("top", "right", "left"):
         ax.spines[side].set_visible(False)
     ax.legend(loc="lower right", labelcolor=INK_SECONDARY, fontsize=7)
-    figure.savefig(out_path, dpi=DPI, bbox_inches="tight")
+    save_figure(figure, out_path)
     plt.close(figure)
     logger.info(f"wrote {out_path}")
 

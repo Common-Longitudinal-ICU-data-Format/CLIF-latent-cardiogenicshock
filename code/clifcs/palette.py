@@ -24,8 +24,28 @@ import math
 
 # ---------------------------------------------------------------- the palette
 
-#: categorical slots 1-3 of the reference palette (blue, orange, aqua)
+#: categorical slots 1-3 of the reference palette (blue, orange, aqua).
+#: These are the only three that clear the all-pairs colourblind gate, which is
+#: the one that applies to a scatter, so this is what scatter series use.
 CATEGORICAL = ("#2a78d6", "#eb6834", "#1baf7a")
+
+#: The full eight-slot reference order.
+#:
+#: Clears the *adjacent*-pairs gate (worst CVD dE 9.1 light) but NOT all-pairs
+#: -- slot 4 puts yellow beside orange, which fails the floors when every
+#: series is on screen together. Use it in a scatter only where identity is
+#: also carried by something other than colour: a per-panel legend over a
+#: zoomed, well-separated layout, or direct labels. Never as the sole channel.
+CATEGORICAL_8 = (
+    "#2a78d6",  # blue
+    "#eb6834",  # orange
+    "#1baf7a",  # aqua
+    "#eda100",  # yellow
+    "#e87ba4",  # magenta
+    "#008300",  # green
+    "#4a3aa7",  # violet
+    "#e34948",  # red
+)
 
 def site_colors(sites) -> dict[str, str]:
     """

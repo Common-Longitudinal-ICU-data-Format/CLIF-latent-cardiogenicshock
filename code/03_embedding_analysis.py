@@ -40,6 +40,7 @@ from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
 from clifcs import ANCHORS, get_logger, load_paths
+from clifcs.figures import save_figure
 from clifcs.palette import (
     GRID,
     INK_PRIMARY,
@@ -168,30 +169,6 @@ def _finish(scatter_ax, title: str, xlabel: str, ylabel: str) -> None:
     # equal data aspect: one unit on x is one unit on y, so the projection is
     # not stretched along either axis
     scatter_ax.set_aspect("equal", adjustable="datalim")
-
-
-def save_figure(figure, out_path: pathlib.Path, attempts: int = 6) -> None:
-    """
-    save a figure, retrying if the destination is locked
-
-    output_home normally sits on a synced drive (Box, OneDrive, Dropbox). When
-    the sync client is mid-upload on a file being overwritten, the open fails
-    with EINVAL/EACCES rather than blocking, which kills a run several minutes
-    in and leaves half the figures regenerated. Writing to a temporary name
-    first keeps the existing file intact if every attempt fails.
-    """
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    staged = out_path.with_suffix(".tmp.png")
-    figure.savefig(staged, dpi=DPI, bbox_inches="tight")
-
-    for attempt in range(attempts):
-        try:
-            staged.replace(out_path)
-            return
-        except OSError:
-            if attempt == attempts - 1:
-                raise
-            time.sleep(0.5 * 2**attempt)
 
 
 def _marker_size(n: int) -> float:

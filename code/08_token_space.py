@@ -41,7 +41,15 @@ import polars as pl
 from safetensors.numpy import load_file
 
 from clifcs import get_logger, load_paths
-from clifcs.palette import CATEGORICAL, GRID, INK_PRIMARY, INK_SECONDARY, SURFACE
+from clifcs.figures import save_figure
+from clifcs.palette import (
+    CATEGORICAL,
+    CATEGORICAL_8,
+    GRID,
+    INK_PRIMARY,
+    INK_SECONDARY,
+    SURFACE,
+)
 from clifcs.tokens import load_pre_anchor_tokens, token_counts_by_site, vocabulary
 
 DPI = 500
@@ -146,60 +154,106 @@ def plot_token_space(
     """
     small multiples of the token space, one panel per clinical family
 
-    All points are drawn in every panel so the overall shape stays visible;
-    the panel's own family is lifted out of the grey. Point area follows log
-    frequency, so a cluster of common tokens reads as more substantial than a
-    cluster of rare ones.
+    Within a panel, points are coloured by *measurement* rather than by family
+    -- `RESP//peep_set` apart from `RESP//imv` -- because the question a reader
+    has in front of a family panel is which concepts it contains and whether
+    they separate, and a single colour cannot answer that.
+
+    Each panel zooms to its own family's extent. Without that, a family
+    occupying a small corner of the global layout collapses into one blob and
+    the 15 measurements inside it are indistinguishable.
+
+    Identity is carried by the legend over a zoomed layout, not by hue alone:
+    eight slots exceed what the all-pairs colour gate supports in a scatter,
+    so the legend is the secondary encoding that makes them legible.
     """
     groups = [g for g in list(FAMILY_GROUPS) + ["other"]
               if (meta["group"] == g).any()]
     columns = 3
     rows = int(np.ceil(len(groups) / columns))
     figure, axes = plt.subplots(
-        rows, columns, figsize=(3.0 * columns, 2.9 * rows), squeeze=False
+        rows, columns, figsize=(4.0 * columns, 3.5 * rows), squeeze=False
     )
-    sizes = 3 + 22 * (
+    sizes = 6 + 30 * (
         np.log1p(meta["n"].to_numpy()) / np.log1p(meta["n"].max())
     ) ** 2
     group_values = np.asarray(meta["group"].to_list())
     counts = meta["n"].to_numpy()
+    stems = np.asarray(
+        meta.with_columns(stem=pl.col("token").str.replace(r"_Q\d+$", ""))["stem"]
+        .to_list()
+    )
 
     for position, group in enumerate(groups):
         ax = axes[position // columns][position % columns]
         mask = group_values == group
-        ax.scatter(coords[~mask, 0], coords[~mask, 1], s=2.0, c=CONTEXT,
-                   linewidths=0, rasterized=True)
-        ax.scatter(coords[mask, 0], coords[mask, 1], s=sizes[mask], c=HIGHLIGHT,
-                   linewidths=0, alpha=0.85, rasterized=True)
-
-        # two labels per panel, the most frequent members, placed apart
         local = np.flatnonzero(mask)
-        # alternate the offset: the two most frequent tokens of a family are
-        # usually adjacent, so a fixed offset collides them
-        for rank, i in enumerate(local[np.argsort(counts[local])[-2:]]):
-            ax.annotate(
-                meta["token"][int(i)], (coords[i, 0], coords[i, 1]),
-                fontsize=5, color=INK_PRIMARY,
-                xytext=(4, 4) if rank % 2 else (4, -8),
-                textcoords="offset points",
+
+        # rank this family's measurements by how often they occur, colour the
+        # leading few, and fold the tail into one grey series
+        by_stem: dict[str, np.ndarray] = {}
+        for stem in dict.fromkeys(stems[local]):
+            by_stem[stem] = local[stems[local] == stem]
+        ranked = sorted(by_stem, key=lambda s: -counts[by_stem[s]].sum())
+        shown, folded = ranked[: len(CATEGORICAL_8)], ranked[len(CATEGORICAL_8):]
+
+        ax.scatter(coords[~mask, 0], coords[~mask, 1], s=3.0, c=CONTEXT,
+                   linewidths=0, rasterized=True)
+
+        handles = []
+        if folded:
+            index = np.concatenate([by_stem[s] for s in folded])
+            ax.scatter(coords[index, 0], coords[index, 1], s=sizes[index],
+                       c="#8a8980", linewidths=0, alpha=0.7, rasterized=True)
+            handles.append(
+                plt.Line2D([], [], marker="o", linestyle="none", markersize=4,
+                           markerfacecolor="#8a8980", markeredgecolor="none",
+                           label=f"{len(folded)} others")
             )
-        ax.set_title(f"{group}  ({int(mask.sum())})", loc="left",
-                     fontsize=8, pad=4)
+        for colour, stem in zip(CATEGORICAL_8, shown):
+            index = by_stem[stem]
+            ax.scatter(coords[index, 0], coords[index, 1], s=sizes[index],
+                       c=colour, linewidths=0, alpha=0.9, rasterized=True)
+            handles.insert(
+                len(handles) - (1 if folded else 0),
+                plt.Line2D([], [], marker="o", linestyle="none", markersize=4,
+                           markerfacecolor=colour, markeredgecolor="none",
+                           # the full stem, not just the suffix: a group can
+                           # span families, and LAB-ORD//sodium (the order)
+                           # and LAB-RES//sodium (the result) are different
+                           # concepts that both end in "sodium"
+                           label=stem[:30]),
+            )
+
+        # zoom to this family, with padding, so its members actually separate
+        px, py = coords[local, 0], coords[local, 1]
+        pad = max(np.ptp(px), np.ptp(py), 1.0) * 0.18
+        ax.set_xlim(px.min() - pad, px.max() + pad)
+        ax.set_ylim(py.min() - pad, py.max() + pad)
+
+        ax.set_title(
+            f"{group}  ({int(mask.sum())} tokens, {len(by_stem)} measurements)",
+            loc="left", fontsize=8, pad=4,
+        )
+        ax.legend(handles=handles, loc="upper left", bbox_to_anchor=(1.0, 1.0),
+                  fontsize=5.4, labelcolor=INK_SECONDARY, handletextpad=0.5,
+                  borderpad=0, labelspacing=0.35)
         ax.set_xticks([])
         ax.set_yticks([])
-        ax.set_aspect("equal", adjustable="datalim")
         for side in ("top", "right", "bottom", "left"):
             ax.spines[side].set_visible(False)
 
     for position in range(len(groups), rows * columns):
         axes[position // columns][position % columns].axis("off")
 
-    figure.suptitle(title, x=0.02, ha="left", fontsize=10, y=0.995)
-    figure.text(0.02, 0.005, "UMAP of the embedding table; grey = all other tokens; "
-                "point area follows log frequency in the cohort",
+    figure.suptitle(title, x=0.02, ha="left", fontsize=10, y=0.997)
+    figure.text(0.02, 0.004,
+                "UMAP of the embedding table, one panel per family, each zoomed to its own "
+                "extent; colour distinguishes measurements within the family, grey are the "
+                "rest of the vocabulary; point area follows log frequency in the cohort",
                 fontsize=7, color=INK_SECONDARY)
     figure.tight_layout(rect=(0, 0.02, 1, 0.97))
-    figure.savefig(out_path, dpi=DPI, bbox_inches="tight")
+    save_figure(figure, out_path)
     plt.close(figure)
     logger.info(f"wrote {out_path}")
 

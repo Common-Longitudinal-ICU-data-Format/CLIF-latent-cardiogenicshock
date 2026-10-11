@@ -53,6 +53,7 @@ from sklearn.preprocessing import StandardScaler
 from clifcs import get_logger, load_paths
 from clifcs.config import CONFIG_HOME
 from clifcs.grid_winnower import GridWinnower
+from clifcs.figures import save_figure
 from clifcs.palette import (
     GRID,
     INK_PRIMARY,
@@ -336,7 +337,7 @@ def plot_scatter(frame, x, y, column, colors, order, title, label, out, logger,
     ax.set_aspect("equal", adjustable="datalim")
     for side in ("top", "right"):
         ax.spines[side].set_visible(False)
-    figure.savefig(out, dpi=DPI, bbox_inches="tight")
+    save_figure(figure, out)
     plt.close(figure)
     logger.info(f"wrote {out}")
 
@@ -371,7 +372,7 @@ def plot_flow(frame, x, y, out, title, subtitle, logger):
     ax.grid(True, color=GRID, linewidth=0.4, alpha=0.6)
     ax.set_axisbelow(True)
     figure.text(0.02, -0.01, subtitle, fontsize=7, color=INK_SECONDARY)
-    figure.savefig(out, dpi=DPI, bbox_inches="tight")
+    save_figure(figure, out)
     plt.close(figure)
     logger.info(f"wrote {out} ({n_vectors:,} displacement vectors, "
                 f"{int((counts >= 5).sum())} populated cells)")
