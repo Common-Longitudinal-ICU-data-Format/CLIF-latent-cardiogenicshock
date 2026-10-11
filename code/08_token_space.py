@@ -204,7 +204,9 @@ def plot_token_space(
     logger.info(f"wrote {out_path}")
 
 
-def quantile_coherence(coords: np.ndarray, meta: pl.DataFrame, logger) -> pl.DataFrame:
+def quantile_coherence(
+    vectors: np.ndarray, coords: np.ndarray, meta: pl.DataFrame, logger
+) -> pl.DataFrame:
     """
     do the quantile bins of one measurement lie on an ordered path?
 
@@ -212,7 +214,13 @@ def quantile_coherence(coords: np.ndarray, meta: pl.DataFrame, logger) -> pl.Dat
     `_Q9` are ten separate tokens the model had to relate on its own. If it
     learned the ordering, consecutive quantiles sit closer than distant ones.
     Reported as the Spearman correlation between |quantile difference| and
-    distance in the token space, per measurement with at least five bins.
+    distance between the tokens, per measurement with at least five bins.
+
+    Measured in the native 1024-d space, under the cosine distance the UMAP
+    was built on. The projection is reported alongside but is not the claim:
+    a correlation computed on 2-d coordinates cannot separate what the model
+    learned from how UMAP chose to lay it out, and would overstate the result
+    whenever the layout happens to be kind.
     """
     rows = []
     base = (
@@ -229,28 +237,47 @@ def quantile_coherence(coords: np.ndarray, meta: pl.DataFrame, logger) -> pl.Dat
             continue
         index = part["row"].to_numpy()
         q = part["quantile"].to_numpy()
-        points = coords[index]
-        dq, dd = [], []
+        native = vectors[index]
+        native = native / np.linalg.norm(native, axis=1, keepdims=True)
+        flat = coords[index]
+        dq, d_native, d_flat = [], [], []
         for i in range(len(index)):
             for j in range(i + 1, len(index)):
                 dq.append(abs(q[i] - q[j]))
-                dd.append(float(np.linalg.norm(points[i] - points[j])))
+                d_native.append(1.0 - float(native[i] @ native[j]))
+                d_flat.append(float(np.linalg.norm(flat[i] - flat[j])))
         if len(dq) < 6:
             continue
-        dq_rank = np.argsort(np.argsort(dq))
-        dd_rank = np.argsort(np.argsort(dd))
-        rho = float(np.corrcoef(dq_rank, dd_rank)[0, 1])
-        rows.append({"measurement": stem, "n_bins": part.height, "spearman": rho})
+
+        def spearman(a, b):
+            ra, rb = np.argsort(np.argsort(a)), np.argsort(np.argsort(b))
+            return float(np.corrcoef(ra, rb)[0, 1])
+
+        rows.append({
+            "measurement": stem,
+            "n_bins": part.height,
+            "spearman": spearman(dq, d_native),
+            "spearman_umap": spearman(dq, d_flat),
+        })
 
     table = pl.DataFrame(rows).sort("spearman", descending=True)
     if table.height:
         logger.info(
-            f"quantile ordering across {table.height} binned measurements: "
-            f"median Spearman {table['spearman'].median():.3f}, "
+            f"quantile ordering across {table.height} binned measurements, "
+            f"in the native 1024-d space (cosine): median Spearman "
+            f"{table['spearman'].median():.3f}, "
             f"{(table['spearman'] > 0).mean():.0%} positive"
         )
+        logger.info(
+            f"    for comparison, in the 2-d UMAP projection: median "
+            f"{table['spearman_umap'].median():.3f}, "
+            f"{(table['spearman_umap'] > 0).mean():.0%} positive"
+        )
         for row in table.head(5).iter_rows(named=True):
-            logger.info(f"    {row['measurement']:<34} rho {row['spearman']:+.3f}")
+            logger.info(
+                f"    {row['measurement']:<34} native {row['spearman']:+.3f}  "
+                f"umap {row['spearman_umap']:+.3f}"
+            )
     return table
 
 
@@ -308,7 +335,7 @@ def main() -> None:
         logger,
     )
 
-    coherence = quantile_coherence(coords, meta, logger)
+    coherence = quantile_coherence(vectors, coords, meta, logger)
     if coherence.height:
         coherence.write_csv(paths.table_home / "token_quantile_ordering.csv")
     meta.with_columns(

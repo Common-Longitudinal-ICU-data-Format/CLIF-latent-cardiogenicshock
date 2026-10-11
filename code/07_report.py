@@ -98,6 +98,18 @@ code {{
   display: inline-block; font-size: 11px; padding: 2px 7px; border-radius: 3px;
   background: #f2f1ee; color: var(--ink-2); margin-right: 6px;
 }}
+dl.defs {{ margin: 16px 0; }}
+dl.defs dt {{
+  font-weight: 600; color: var(--ink); font-size: 13.5px; margin-top: 14px;
+}}
+dl.defs dd {{
+  margin: 4px 0 0 0; color: var(--ink-2); font-size: 13.5px; max-width: 78ch;
+}}
+pre.formula {{
+  font: 12.5px ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: #f2f1ee; padding: 10px 14px; border-radius: 4px;
+  color: var(--ink); margin: 8px 0; overflow-x: auto; max-width: 78ch;
+}}
 .toc {{ margin: 28px 0 0; padding: 0; list-style: none; columns: 2; }}
 .toc li {{ margin: 3px 0; }}
 .toc a {{ color: var(--s1); text-decoration: none; font-size: 13.5px; }}
@@ -152,6 +164,11 @@ def figure(path: pathlib.Path, caption: str) -> str:
 
 def callout(text: str, kind: str = "") -> str:
     return f'<div class="callout {kind}"><p>{text}</p></div>'
+
+
+def formula(*lines: str) -> str:
+    """a monospaced block; lines are passed separately to keep escapes out"""
+    return '<pre class="formula">' + esc("\n".join(lines)) + "</pre>"
 
 
 def read_model_tables(
@@ -393,9 +410,38 @@ def section_correction(paths, out: list) -> None:
     out.append(
         "<p>Two affine maps fitted on a training split and judged on held-out "
         "patients. <b>The AUCs below predict site</b> &mdash; which hospital a "
-        "patient came from &mdash; not any clinical outcome. LEACE is the "
-        "closed-form map that provably removes all linearly-decodable site "
-        "information with minimal distortion.</p>"
+        "patient came from &mdash; not any clinical outcome.</p>"
+    )
+    out.append(
+        "<dl class=\"defs\">"
+        "<dt>raw</dt><dd>No correction. The embedding as 02 produced it, "
+        "included so the other two have a reference point.</dd>"
+        "<dt>site-standardized</dt><dd>Per-site z-scoring: for each hospital, "
+        "subtract that hospital's per-dimension mean and divide by its "
+        "standard deviation, both computed on <i>training patients from that "
+        "hospital only</i>. Each site's cloud is independently recentred on "
+        "the origin and rescaled to unit variance in every dimension. It needs "
+        "the site label at apply time, and it removes differences in "
+        "per-feature <i>location and scale</i> and nothing else &mdash; any "
+        "site structure living in the correlations <i>between</i> dimensions "
+        "survives it untouched. It is here as the crude baseline LEACE ought "
+        "to beat.</dd>"
+        "<dt>LEACE</dt><dd>Least-squares concept erasure (Belrose et al., "
+        "2023). The affine map that provably removes all linearly-decodable "
+        "information about site while perturbing the representation as little "
+        "as possible in the least-squares sense. For two sites the erased "
+        "subspace is rank 1 &mdash; a single direction, found in the whitened "
+        "space so the deletion is orthogonal with respect to the data's own "
+        "covariance rather than to the raw axes. Unlike site-standardization "
+        "it is one fixed matrix, applied without knowing the site."
+        + formula(
+            "r(x) = x - S^(1/2) u u' S^(-1/2) (x - mu)",
+            "    u = unit( S^(-1/2) Cov(x, site) ),   S = Cov(x)",
+            "",
+            "guarantee:  Cov(r(X), site) = 0",
+        )
+        + "</dd>"
+        "</dl>"
     )
     show = correction.select(
         "model", "correction", "linear_probe_auc", "nonlinear_probe_auc", "purity_lift"
@@ -434,9 +480,29 @@ def section_downstream(paths, out: list, logger) -> None:
     out.append('<h2 id="downstream">6 &middot; Downstream prediction</h2>')
     out.append(
         "<p>Three tasks, each anchored at the moment the model read the patient "
-        "and asking what happens in the next 24 hours. The clinical baseline uses "
-        "age, sex, the last labs and vitals recorded before the anchor, and "
-        "vasopressor burden &mdash; nothing from the prediction window.</p>"
+        "and asking what happens in the next 24 hours.</p>"
+    )
+    out.append(
+        "<dl class=\"defs\">"
+        "<dt>clinical baseline</dt><dd>The comparator feature set, so an "
+        "embedding AUROC has something to be judged against. <b>14 features</b>, "
+        "every one the last value recorded <i>at or before</i> the anchor: "
+        "five labs (creatinine, BUN, bicarbonate, platelet count, lactate), "
+        "five vitals (heart rate, SpO<sub>2</sub>, SBP, MAP, respiratory rate), "
+        "norepinephrine-equivalent dose running at the anchor and the number of "
+        "vasoactive agents, plus age and sex. Median-imputed and standardized, "
+        "then the same head as the embedding. Missingness is 6&ndash;8% except "
+        "lactate (19.8%) and MAP (14.0%).<br><br>"
+        "It is strictly leak-free, and it deliberately does <i>not</i> reuse the "
+        "phenotype labs on the cohort table, which are drawn around shock onset "
+        "and for the 24h anchor can fall after it. What it lacks is worth "
+        "weighing against the embedding's margin: no SOFA, no GCS, no urine "
+        "output, and <b>only last values, no trends</b> &mdash; a lactate of 4 "
+        "rising and one falling are identical to it.</dd>"
+        "<dt>eligibility</dt><dd>Each task drops patients for whom it is "
+        "meaningless rather than scoring them as negatives: already ventilated "
+        "for new IMV, on no vasopressor for escalation.</dd>"
+        "</dl>"
     )
     if stale:
         out.append(callout(
@@ -556,6 +622,108 @@ def section_downstream(paths, out: list, logger) -> None:
                           if c not in ("task", "model", "arm")},
                          key_column="arm"))
 
+def section_token_space(paths, out: list) -> None:
+    figure_file = paths.output_home / "figures" / "GEM-all" / "token_space_umap.png"
+    ordering_file = paths.output_home / "tables" / "GEM-all" / "token_quantile_ordering.csv"
+    if not figure_file.is_file():
+        return
+    out.append('<h2 id="tokens">7 &middot; What the model learned about clinical concepts</h2>')
+    out.append(
+        "<p>A UMAP of the embedding table itself &mdash; one point per "
+        "vocabulary entry, not per patient. It asks whether the model "
+        "organised clinical concepts coherently during training, which is a "
+        "precondition for reading anything into the patient representations "
+        "built from them. Drawn as small multiples because nine families "
+        "cannot be told apart by colour in a single scatter.</p>"
+    )
+    out.append(figure(figure_file, "Learned token embeddings by clinical family"))
+
+    if ordering_file.is_file():
+        ordering = pl.read_csv(ordering_file)
+        out.append("<h3>Did it learn that quantile bins are ordered?</h3>")
+        out.append(
+            "<p>cocoa splits every numeric measurement into deciles, so "
+            "<code>lactate_Q0</code> through <code>_Q9</code> reach the model as "
+            "ten unrelated symbols. Nothing tells it they are ordered, or even "
+            "that they belong together. Below is the Spearman correlation "
+            "between quantile distance and cosine distance between the token "
+            "vectors, measured in the native 1024-d space.</p>"
+        )
+        out.append(callout(
+            f"<b>It recovered the ordering from context alone.</b> Across "
+            f"{ordering.height} binned measurements the median Spearman is "
+            f"<b>{ordering['spearman'].median():.3f}</b>, positive for "
+            f"{(ordering['spearman'] > 0).mean():.0%} of them. This is the "
+            "clearest evidence here that the model learned real physiology and "
+            "not only bookkeeping &mdash; and it sits awkwardly beside section "
+            "4, since it evidently learned both the clinical structure and "
+            "which hospital it was reading."))
+        out.append(
+            "<p>Measured in the projection instead, the same statistic reads "
+            f"{ordering['spearman_umap'].median():.3f} "
+            f"({(ordering['spearman_umap'] > 0).mean():.0%} positive) &mdash; "
+            "lower, because UMAP discards ordering it has no room for rather "
+            "than inventing it. <code>troponin_t</code> is the extreme case at "
+            "0.971 natively against 0.214 in two dimensions. The figure above "
+            "is therefore a conservative view of the structure; the table below "
+            "is the measurement.</p>"
+        )
+        top = ordering.head(8).select(
+            "measurement", "n_bins", "spearman", "spearman_umap"
+        )
+        out.append(table(top, {"n_bins": thousands, "spearman": num(3),
+                               "spearman_umap": num(3)},
+                         key_column="measurement"))
+
+
+def section_trajectories(paths, out: list) -> None:
+    home = paths.output_home / "figures" / "GEM-all" / "trajectory"
+    if not home.is_dir() or not any(home.glob("*.png")):
+        return
+    out.append('<h2 id="trajectories">8 &middot; Trajectories through the latent space</h2>')
+    out.append(
+        "<p>Each patient is embedded repeatedly, every 6 hours from 24 hours "
+        "before cardiogenic shock onset to 48 hours after, so one patient "
+        "becomes a path rather than a point. A patient who dies or is "
+        "discharged simply stops producing tokens, so their path ends rather "
+        "than being extrapolated.</p>"
+    )
+    out.append('<div class="grid2">')
+    for name, caption in (
+        ("trajectory_time.png", "Patient-timepoints coloured by hours from shock onset"),
+        ("trajectory_phenotype.png", "The same points coloured by phenotype"),
+        ("trajectory_site.png", "The same points coloured by contributing site"),
+    ):
+        out.append(figure(home / name, caption))
+    out.append("</div>")
+
+    out.append("<h3>Flow field</h3>")
+    out.append(
+        "<p>The mean displacement between consecutive timepoints, drawn as a "
+        "streamplot after scVelo's velocity embedding. One difference is worth "
+        "stating, and it favours this setting: RNA velocity must <i>infer</i> "
+        "direction from spliced and unspliced read ratios, because a cell is "
+        "destroyed when measured and only one snapshot per cell exists. We see "
+        "the same patient at t and t+6h, so the displacement is "
+        "<b>measured, not estimated</b>.</p>"
+    )
+    out.append(callout(
+        "The caveat is the projection, not the velocity. UMAP is not a metric "
+        "embedding, so a displacement in 2-d need not be proportional to the "
+        "displacement in 1024-d. The same field is therefore computed in PCA "
+        "space, where distances are linear; if the two disagree, the UMAP field "
+        "is an artefact of the layout rather than a feature of the data."))
+    out.append('<div class="grid2">')
+    for name, caption in (
+        ("trajectory_flow_umap.png", "Flow field in UMAP space"),
+        ("trajectory_flow_pca.png", "The same field in PCA space, as a cross-check"),
+        ("trajectory_flow_died.png", "Flow among patients who died in hospital"),
+        ("trajectory_flow_survived.png", "Flow among patients who survived"),
+    ):
+        out.append(figure(home / name, caption))
+    out.append("</div>")
+
+
 def section_methods(paths, cfg, out: list) -> None:
     out.append('<h2 id="methods">Methods &amp; caveats</h2>')
     out.append(
@@ -603,9 +771,20 @@ def main() -> None:
     section_site_effect(paths, out)
     section_correction(paths, out)
     section_downstream(paths, out, logger)
+    section_token_space(paths, out)
+    section_trajectories(paths, out)
     section_methods(paths, cfg, out)
 
     stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    cohort_file = paths.cohort_home / "cohort.parquet"
+    if cohort_file.is_file():
+        counted = pl.read_parquet(cohort_file, columns=["site"])
+        per_site = counted.group_by("site").agg(pl.len().alias("n")).sort("site")
+        headline = f"{counted.height:,} patients (" + " / ".join(
+            f"{r['site']} {r['n']:,}" for r in per_site.iter_rows(named=True)
+        ) + ")"
+    else:
+        headline = "no cohort table"
     toc = "".join(
         f'<li><a href="#{anchor}">{label}</a></li>'
         for anchor, label in (
@@ -615,6 +794,8 @@ def main() -> None:
             ("site", "4 &middot; Why the sites separate"),
             ("correction", "5 &middot; Can site be removed?"),
             ("downstream", "6 &middot; Downstream prediction"),
+            ("tokens", "7 &middot; Learned concepts"),
+            ("trajectories", "8 &middot; Trajectories"),
             ("methods", "Methods &amp; caveats"),
         )
     )
@@ -626,7 +807,7 @@ def main() -> None:
 <body><div class="wrap">
 <h1>Cardiogenic shock in the CLIF foundation-model latent space</h1>
 <p class="sub">UCMC and NU, CLIF 2.1 &middot; GEM frozen encoders &middot; two anchors</p>
-<p class="meta">Generated {stamp} &middot; 34,142 patients (UCMC 9,135 / NU 25,007)</p>
+<p class="meta">Generated {stamp} &middot; {headline}</p>
 <ul class="toc">{toc}</ul>
 {''.join(out)}
 </div></body></html>"""
