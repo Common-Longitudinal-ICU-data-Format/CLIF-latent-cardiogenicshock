@@ -267,11 +267,27 @@ def main() -> None:
 
     for anchor in ((args.anchor,) if args.anchor else ANCHORS):
         logger.info(f"=== {paths.model_key} / anchor {anchor}")
+        # The cache is keyed on nothing but the anchor, so a change to the
+        # enrollment criteria would silently reuse labels for the old cohort.
+        # Compare the patient sets and rebuild when they differ.
         label_file = paths.cohort_home / f"downstream_labels_anchor-{anchor}.parquet"
+        cohort_ids = set(
+            pl.read_parquet(
+                paths.cohort_home / "cohort.parquet", columns=["hospitalization_id"]
+            )["hospitalization_id"].to_list()
+        )
+        labels = None
         if label_file.is_file():
-            labels = pl.read_parquet(label_file)
-            logger.info(f"[{anchor}] reusing {label_file.name}")
-        else:
+            cached = pl.read_parquet(label_file)
+            if set(cached["hospitalization_id"].to_list()) == cohort_ids:
+                labels = cached
+                logger.info(f"[{anchor}] reusing {label_file.name}")
+            else:
+                logger.info(
+                    f"[{anchor}] {label_file.name} covers {cached.height} patients "
+                    f"but the cohort has {len(cohort_ids)}; rebuilding"
+                )
+        if labels is None:
             labels = build_labels(paths, cfg, anchor, logger)
             labels.write_parquet(label_file)
             logger.info(f"[{anchor}] wrote {label_file.name}")
