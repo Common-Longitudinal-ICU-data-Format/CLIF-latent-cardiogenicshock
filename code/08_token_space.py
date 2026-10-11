@@ -149,7 +149,12 @@ def group_of(family: str) -> str:
 
 
 def plot_token_space(
-    coords: np.ndarray, meta: pl.DataFrame, out_path: pathlib.Path, title: str, logger
+    coords: np.ndarray,
+    meta: pl.DataFrame,
+    out_path: pathlib.Path,
+    title: str,
+    logger,
+    zoom: bool = True,
 ) -> None:
     """
     small multiples of the token space, one panel per clinical family
@@ -159,9 +164,12 @@ def plot_token_space(
     has in front of a family panel is which concepts it contains and whether
     they separate, and a single colour cannot answer that.
 
-    Each panel zooms to its own family's extent. Without that, a family
-    occupying a small corner of the global layout collapses into one blob and
-    the 15 measurements inside it are indistinguishable.
+    Written in two versions, because one view cannot do both jobs. Zoomed,
+    each panel is cropped to its own family's extent and the measurements
+    inside separate; a family occupying a small corner of the global layout
+    would otherwise collapse into a single blob. Unzoomed, every panel spans
+    the whole space on common axes, so families are comparable with each other
+    and the rest of the vocabulary stays in view.
 
     Identity is carried by the legend over a zoomed layout, not by hue alone:
     eight slots exceed what the all-pairs colour gate supports in a scatter,
@@ -227,36 +235,18 @@ def plot_token_space(
                            label=stem[:30]),
             )
 
-        # zoom to this family, with padding, so its members actually separate
-        px, py = coords[local, 0], coords[local, 1]
-        pad = max(np.ptp(px), np.ptp(py), 1.0) * 0.18
-        window = (px.min() - pad, px.max() + pad, py.min() - pad, py.max() + pad)
-        ax.set_xlim(window[0], window[1])
-        ax.set_ylim(window[2], window[3])
-
-        # The zoom is what makes the measurements legible, but it crops most of
-        # the vocabulary out of view and with it any sense of where this family
-        # sits. The inset carries the whole space at a glance, with the main
-        # panel's window outlined on it.
-        inset = ax.inset_axes([0.73, 0.02, 0.26, 0.26])
-        inset.scatter(coords[:, 0], coords[:, 1], s=0.7, c=CONTEXT,
-                      linewidths=0, rasterized=True)
-        inset.scatter(coords[local, 0], coords[local, 1], s=1.6, c=HIGHLIGHT,
-                      linewidths=0, rasterized=True)
-        inset.add_patch(
-            plt.Rectangle(
-                (window[0], window[2]),
-                window[1] - window[0],
-                window[3] - window[2],
-                fill=False, edgecolor=INK_PRIMARY, linewidth=0.6,
-            )
-        )
-        inset.set_xticks([])
-        inset.set_yticks([])
-        inset.set_facecolor(SURFACE["light"])
-        for side in inset.spines.values():
-            side.set_edgecolor(GRID)
-            side.set_linewidth(0.5)
+        if zoom:
+            # crop to this family, with padding, so its members separate
+            px, py = coords[local, 0], coords[local, 1]
+            pad = max(np.ptp(px), np.ptp(py), 1.0) * 0.18
+            ax.set_xlim(px.min() - pad, px.max() + pad)
+            ax.set_ylim(py.min() - pad, py.max() + pad)
+        else:
+            # common axes across panels, so position is comparable
+            pad = max(np.ptp(coords[:, 0]), np.ptp(coords[:, 1])) * 0.04
+            ax.set_xlim(coords[:, 0].min() - pad, coords[:, 0].max() + pad)
+            ax.set_ylim(coords[:, 1].min() - pad, coords[:, 1].max() + pad)
+            ax.set_aspect("equal", adjustable="box")
 
         ax.set_title(
             f"{group}  ({int(mask.sum())} tokens, {len(by_stem)} measurements)",
@@ -275,10 +265,11 @@ def plot_token_space(
 
     figure.suptitle(title, x=0.02, ha="left", fontsize=10, y=0.997)
     figure.text(0.02, 0.004,
-                "UMAP of the embedding table, one panel per family, each zoomed to its own "
-                "extent; colour distinguishes measurements within the family, light grey are "
-                "the rest of the vocabulary; the inset shows the whole space with the zoom "
-                "window outlined; point area follows log frequency in the cohort",
+                "UMAP of the embedding table, one panel per family; colour distinguishes "
+                "measurements within the family, light grey are the rest of the vocabulary; "
+                + ("each panel is cropped to its own family's extent" if zoom
+                   else "all panels share the full extent of the space")
+                + "; point area follows log frequency in the cohort",
                 fontsize=7, color=INK_SECONDARY)
     figure.tight_layout(rect=(0, 0.02, 1, 0.97))
     save_figure(figure, out_path)
@@ -408,14 +399,19 @@ def main() -> None:
         random_state=args.seed,
     ).fit_transform(vectors)
 
-    plot_token_space(
-        coords,
-        meta,
-        paths.figure_home / "token_space_umap.png",
-        f"{paths.model_key}: learned token embeddings "
-        f"(>= {args.min_count} occurrences)",
-        logger,
-    )
+    for zoom, suffix, note in (
+        (True, "_zoom", "zoomed to each family"),
+        (False, "_full", "full embedding space"),
+    ):
+        plot_token_space(
+            coords,
+            meta,
+            paths.figure_home / f"token_space_umap{suffix}.png",
+            f"{paths.model_key}: learned token embeddings "
+            f"(>= {args.min_count} occurrences) — {note}",
+            logger,
+            zoom=zoom,
+        )
 
     coherence = quantile_coherence(vectors, coords, meta, logger)
     if coherence.height:

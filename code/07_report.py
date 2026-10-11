@@ -623,7 +623,8 @@ def section_downstream(paths, out: list, logger) -> None:
                          key_column="arm"))
 
 def section_token_space(paths, out: list) -> None:
-    figure_file = paths.output_home / "figures" / "GEM-all" / "token_space_umap.png"
+    figure_dir = paths.output_home / "figures" / "GEM-all"
+    figure_file = figure_dir / "token_space_umap_full.png"
     ordering_file = paths.output_home / "tables" / "GEM-all" / "token_quantile_ordering.csv"
     if not figure_file.is_file():
         return
@@ -634,9 +635,20 @@ def section_token_space(paths, out: list) -> None:
         "organised clinical concepts coherently during training, which is a "
         "precondition for reading anything into the patient representations "
         "built from them. Drawn as small multiples because nine families "
-        "cannot be told apart by colour in a single scatter.</p>"
+        "cannot be told apart by colour in a single scatter, and in two "
+        "versions because one view cannot do both jobs: the first shares "
+        "common axes so families can be compared with each other and with the "
+        "rest of the vocabulary, the second crops each panel to its own family "
+        "so the measurements inside it separate.</p>"
     )
-    out.append(figure(figure_file, "Learned token embeddings by clinical family"))
+    out.append(figure(
+        figure_dir / "token_space_umap_full.png",
+        "Full embedding space, all panels on common axes",
+    ))
+    out.append(figure(
+        figure_dir / "token_space_umap_zoom.png",
+        "The same panels, each cropped to its own family's extent",
+    ))
 
     if ordering_file.is_file():
         ordering = pl.read_csv(ordering_file)
