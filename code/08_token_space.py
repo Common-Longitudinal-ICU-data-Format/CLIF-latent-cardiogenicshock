@@ -70,7 +70,7 @@ FAMILY_GROUPS = {
 #: gets its own panel with the rest as grey context, which is the documented
 #: answer past three series.
 HIGHLIGHT = CATEGORICAL[0]
-CONTEXT = "#d9d8d3"
+CONTEXT = "#e2e1dc"
 
 
 def style() -> None:
@@ -197,8 +197,10 @@ def plot_token_space(
         ranked = sorted(by_stem, key=lambda s: -counts[by_stem[s]].sum())
         shown, folded = ranked[: len(CATEGORICAL_8)], ranked[len(CATEGORICAL_8):]
 
-        ax.scatter(coords[~mask, 0], coords[~mask, 1], s=3.0, c=CONTEXT,
-                   linewidths=0, rasterized=True)
+        # every other token, so the surrounding space stays visible inside
+        # the zoom window rather than the family floating on blank paper
+        ax.scatter(coords[~mask, 0], coords[~mask, 1], s=4.0, c=CONTEXT,
+                   linewidths=0, rasterized=True, zorder=1)
 
         handles = []
         if folded:
@@ -228,8 +230,33 @@ def plot_token_space(
         # zoom to this family, with padding, so its members actually separate
         px, py = coords[local, 0], coords[local, 1]
         pad = max(np.ptp(px), np.ptp(py), 1.0) * 0.18
-        ax.set_xlim(px.min() - pad, px.max() + pad)
-        ax.set_ylim(py.min() - pad, py.max() + pad)
+        window = (px.min() - pad, px.max() + pad, py.min() - pad, py.max() + pad)
+        ax.set_xlim(window[0], window[1])
+        ax.set_ylim(window[2], window[3])
+
+        # The zoom is what makes the measurements legible, but it crops most of
+        # the vocabulary out of view and with it any sense of where this family
+        # sits. The inset carries the whole space at a glance, with the main
+        # panel's window outlined on it.
+        inset = ax.inset_axes([0.73, 0.02, 0.26, 0.26])
+        inset.scatter(coords[:, 0], coords[:, 1], s=0.7, c=CONTEXT,
+                      linewidths=0, rasterized=True)
+        inset.scatter(coords[local, 0], coords[local, 1], s=1.6, c=HIGHLIGHT,
+                      linewidths=0, rasterized=True)
+        inset.add_patch(
+            plt.Rectangle(
+                (window[0], window[2]),
+                window[1] - window[0],
+                window[3] - window[2],
+                fill=False, edgecolor=INK_PRIMARY, linewidth=0.6,
+            )
+        )
+        inset.set_xticks([])
+        inset.set_yticks([])
+        inset.set_facecolor(SURFACE["light"])
+        for side in inset.spines.values():
+            side.set_edgecolor(GRID)
+            side.set_linewidth(0.5)
 
         ax.set_title(
             f"{group}  ({int(mask.sum())} tokens, {len(by_stem)} measurements)",
@@ -249,8 +276,9 @@ def plot_token_space(
     figure.suptitle(title, x=0.02, ha="left", fontsize=10, y=0.997)
     figure.text(0.02, 0.004,
                 "UMAP of the embedding table, one panel per family, each zoomed to its own "
-                "extent; colour distinguishes measurements within the family, grey are the "
-                "rest of the vocabulary; point area follows log frequency in the cohort",
+                "extent; colour distinguishes measurements within the family, light grey are "
+                "the rest of the vocabulary; the inset shows the whole space with the zoom "
+                "window outlined; point area follows log frequency in the cohort",
                 fontsize=7, color=INK_SECONDARY)
     figure.tight_layout(rect=(0, 0.02, 1, 0.97))
     save_figure(figure, out_path)
