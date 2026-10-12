@@ -47,32 +47,88 @@ CATEGORICAL_8 = (
     "#e34948",  # red
 )
 
-def site_colors(sites) -> dict[str, str]:
-    """
-    assign a categorical slot to each contributing site, in fixed order
-
-    Colour follows the site, not its rank or its size, so adding a third site
-    never repaints the first two -- and a figure from a two-site run stays
-    readable next to one from a three-site run.
-    """
-    sites = list(sites)
-    if len(sites) > len(CATEGORICAL):
-        raise ValueError(
-            f"{len(sites)} sites exceeds the {len(CATEGORICAL)} palette slots "
-            "that pass the all-pairs colour gate used for scatterplots; past "
-            "three, facet into small multiples instead of adding a hue"
-        )
-    return dict(zip(sites, CATEGORICAL))
-
-#: Zweck phenotypes, in the paper's order
-PHENOTYPE_COLORS = {
-    "I non-congested": CATEGORICAL[0],
-    "II cardiorenal": CATEGORICAL[1],
-    "III cardiometabolic": CATEGORICAL[2],
+#: Institutional colours, taken from each site's own branding. Fixed per site
+#: rather than assigned by position, so a site keeps its colour across every
+#: figure and however many other sites are present.
+#:
+#: UCMC and NU clear the colourblind gates comfortably against each other
+#: (protan dE 22.9, deutan 22.3, tritan 15.8). Both sit below the light-mode
+#: lightness band at L 0.377 and 0.379, so they are dark and nearly identical
+#: in luminance: they separate by hue, not by value, and would be
+#: indistinguishable in greyscale or on a monochrome printer. Run
+#: `python code/clifcs/palette.py` after adding a site to check the new pair.
+LOGO_PALETTE = {
+    "UCMC": "#800000",
+    "MIMIC": "#aaaaaa",
+    "RUSH": "#0f683d",
+    "UCSF": "#052049",
+    "NU": "#59118e",
 }
 
+
+def site_colors(sites) -> dict[str, str]:
+    """institutional colour per site; unknown sites fall back to the palette"""
+    out, spare = {}, [c for c in CATEGORICAL if c not in LOGO_PALETTE.values()]
+    for site in sites:
+        if site in LOGO_PALETTE:
+            out[site] = LOGO_PALETTE[site]
+        elif spare:
+            out[site] = spare.pop(0)
+        else:
+            raise ValueError(
+                f"no colour for site {site!r}: add it to LOGO_PALETTE"
+            )
+    return out
+
+
+def continuous_cmap():
+    """
+    sequential colormap for magnitude
+
+    cubehelix rather than a single-hue blue ramp: it increases monotonically in
+    perceived lightness while also rotating in hue, so neighbouring values stay
+    distinguishable where a one-hue ramp runs out of contrast, and it still
+    degrades correctly to greyscale.
+    """
+    import seaborn as sns
+
+    return sns.color_palette("cubehelix", as_cmap=True)
+
+
+def husl_colors(keys) -> dict:
+    """
+    categorical colours for an ordered set of levels
+
+    husl spaces hues evenly at constant lightness and saturation, so no level
+    is visually heavier than another -- which matters when the levels are
+    outcome categories and a darker colour would read as more severe.
+    """
+    import seaborn as sns
+
+    keys = list(keys)
+    hexes = [
+        "#{:02x}{:02x}{:02x}".format(*(int(round(255 * v)) for v in rgb))
+        for rgb in sns.color_palette("husl", max(len(keys), 2))
+    ]
+    return dict(zip(keys, hexes))
+
+#: Zweck phenotypes, in the paper's order
+PHENOTYPE_LEVELS = (
+    "I non-congested",
+    "II cardiorenal",
+    "III cardiometabolic",
+)
+
 #: binary outcome
-MORTALITY_COLORS = {False: CATEGORICAL[0], True: CATEGORICAL[1]}
+MORTALITY_LEVELS = (False, True)
+
+
+def phenotype_colors() -> dict:
+    return husl_colors(PHENOTYPE_LEVELS)
+
+
+def mortality_colors() -> dict:
+    return dict(zip(MORTALITY_LEVELS, husl_colors(range(2)).values()))
 
 #: single-hue blue ramp, steps 100-700, for continuous magnitude
 SEQUENTIAL_BLUE = (

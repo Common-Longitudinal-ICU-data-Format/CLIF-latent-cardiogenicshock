@@ -182,7 +182,10 @@ def plot_token_space(
     figure, axes = plt.subplots(
         rows, columns, figsize=(4.0 * columns, 3.5 * rows), squeeze=False
     )
-    sizes = 6 + 30 * (
+    # matched to the background marks: at the previous size the dense
+    # families overlapped into solid blobs and the structure inside them was
+    # unreadable, which defeats colouring by measurement at all
+    sizes = 3.5 + 5.5 * (
         np.log1p(meta["n"].to_numpy()) / np.log1p(meta["n"].max())
     ) ** 2
     group_values = np.asarray(meta["group"].to_list())
@@ -207,7 +210,7 @@ def plot_token_space(
 
         # every other token, so the surrounding space stays visible inside
         # the zoom window rather than the family floating on blank paper
-        ax.scatter(coords[~mask, 0], coords[~mask, 1], s=4.0, c=CONTEXT,
+        ax.scatter(coords[~mask, 0], coords[~mask, 1], s=3.5, c=CONTEXT,
                    linewidths=0, rasterized=True, zorder=1)
 
         handles = []

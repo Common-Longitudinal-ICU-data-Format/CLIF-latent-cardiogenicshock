@@ -53,17 +53,24 @@ from sklearn.preprocessing import StandardScaler
 from clifcs import get_logger, load_paths
 from clifcs.config import CONFIG_HOME
 from clifcs.grid_winnower import GridWinnower
-from clifcs.figures import save_figure
+from clifcs.figures import key_string, quantile_colour, save_figure
 from clifcs.palette import (
+    mortality_colors,
     GRID,
     INK_PRIMARY,
     INK_SECONDARY,
-    PHENOTYPE_COLORS,
-    SCATTER_SEQUENTIAL,
+    phenotype_colors,
+    continuous_cmap,
     SURFACE,
     site_colors,
 )
 from clifcs.phenotype import PHENOTYPES
+from clifcs.state import (
+    VARIABLES,
+    gradient_alignment,
+    position_encodes,
+    trajectory_state,
+)
 
 DPI = 500
 SPLITS = ("train", "tuning", "held_out")
@@ -302,9 +309,7 @@ def plot_scatter(frame, x, y, column, colors, order, title, label, out, logger,
     size = 1.2 if frame.height > 60000 else 2.5
 
     if continuous:
-        from matplotlib.colors import LinearSegmentedColormap
-
-        cmap = LinearSegmentedColormap.from_list("t", SCATTER_SEQUENTIAL)
+        cmap = continuous_cmap()
         values = shuffled[column].to_numpy()
         points = ax.scatter(px, py, s=size, c=values, cmap=cmap, linewidths=0,
                             alpha=0.8, rasterized=True)
@@ -368,6 +373,335 @@ def cell_coherence(frame: pl.DataFrame, x: str, y: str, bins: int = 26) -> float
     return float(
         np.median(np.hypot(sum_x[ok], sum_y[ok]) / np.maximum(sum_speed[ok], 1e-9))
     )
+
+
+def attach_state(paths, frame: pl.DataFrame, logger) -> pl.DataFrame:
+    """physiology at each grid point, for use as a flow-field underlay"""
+    cache = paths.patient_level_home / "trajectory_state.parquet"
+    wanted = set(
+        frame.select("hospitalization_id", "offset_hours").unique().rows()
+    )
+    if cache.is_file():
+        cached = pl.read_parquet(cache)
+        if set(cached.select("hospitalization_id", "offset_hours").rows()) == wanted:
+            logger.info(f"reusing {cache.name}")
+            return frame.join(cached, on=["hospitalization_id", "offset_hours"],
+                              how="left")
+
+    onset = pl.read_parquet(paths.cohort_home / "cs_onset.parquet").select(
+        "hospitalization_id", "site", "cs_onset_dttm"
+    )
+    parts = []
+    for site in paths.sites:
+        grid = (
+            frame.select("hospitalization_id", "site", "offset_hours")
+            .filter(pl.col("site") == site)
+            .join(onset.drop("site"), on="hospitalization_id", how="inner")
+            .with_columns(
+                grid_dttm=pl.col("cs_onset_dttm")
+                + pl.duration(seconds=(pl.col("offset_hours") * 3600).cast(pl.Int64))
+            )
+            .select("hospitalization_id", "offset_hours", "grid_dttm")
+        )
+        logger.info(f"[{site}] physiology at {grid.height:,} grid points")
+        parts.append(trajectory_state(paths.raw_subset(site), grid))
+
+    state = pl.concat(parts, how="diagonal_relaxed")
+    state.write_parquet(cache)
+    logger.info(f"wrote {cache.name}")
+    return frame.join(state, on=["hospitalization_id", "offset_hours"], how="left")
+
+
+def plot_state_flow(frame, x, y, out, title, logger, columns: int = 4):
+    """
+    the flow field over each physiological variable in turn
+
+    The arrows are identical in every panel; only the underlay changes. Where
+    the colour gradient runs along the arrows, that variable is what is
+    changing as patients move.
+    """
+    available = [v for v in VARIABLES if v in frame.columns
+                 and frame[v].is_not_null().sum() > frame.height * 0.2]
+    if not available:
+        logger.warning("no state variables available to underlay")
+        return pl.DataFrame()
+
+    cx, cy, vx, vy, counts, _ = displacement_field(frame, x, y)
+    rows = int(np.ceil(len(available) / columns))
+    figure, axes = plt.subplots(rows, columns, figsize=(3.6 * columns, 3.3 * rows),
+                                squeeze=False)
+    cmap = continuous_cmap()
+
+    px_all, py_all = frame[x].to_numpy(), frame[y].to_numpy()
+    ordered = frame.sort("hospitalization_id", "offset_hours")
+    step = (
+        ordered.with_columns(
+            nx=pl.col(x).shift(-1).over("hospitalization_id"),
+            ny=pl.col(y).shift(-1).over("hospitalization_id"),
+        ).drop_nulls(["nx", "ny"])
+    )
+    sx, sy = step[x].to_numpy(), step[y].to_numpy()
+    svx = (step["nx"] - step[x]).to_numpy()
+    svy = (step["ny"] - step[y]).to_numpy()
+
+    report = []
+    for position, name in enumerate(available):
+        ax = axes[position // columns][position % columns]
+        label, worse_high = VARIABLES[name]
+        values = frame[name].to_numpy().astype(float)
+        finite = np.isfinite(values)
+        if finite.sum() < 100:
+            ax.axis("off")
+            continue
+        points = ax.hexbin(
+            px_all[finite], py_all[finite], C=values[finite],
+            reduce_C_function=np.mean, mincnt=5, gridsize=48,
+            cmap=cmap, linewidths=0,
+        )
+        cells = points.get_array()
+        good = cells.compressed() if hasattr(cells, "compressed") else cells
+        lo, hi = np.nanpercentile(good[np.isfinite(good)], [2, 98])
+        points.set_clim(lo, hi)
+        masked_x = np.ma.array(vx, mask=counts < 5)
+        masked_y = np.ma.array(vy, mask=counts < 5)
+        ax.streamplot(cx, cy, masked_x, masked_y, color=INK_PRIMARY,
+                      linewidth=0.55, density=1.1, arrowsize=0.75,
+                      arrowstyle="->")
+
+        alignment, cells = gradient_alignment(sx, sy, svx, svy,
+                                              step[name].to_numpy().astype(float))
+        # two separate questions, and they can disagree: how much of the
+        # variable a patient's position accounts for, and whether patients
+        # travel along that variable's gradient
+        encoded = position_encodes(px_all, py_all, values)
+        report.append({"variable": name, "label": label,
+                       "worse_is_high": worse_high,
+                       "position_r2": encoded,
+                       "flow_gradient_cosine": alignment, "cells": cells})
+        arrow = "up-gradient" if alignment > 0.05 else (
+            "down-gradient" if alignment < -0.05 else "no trend")
+        ax.set_title(
+            label + "\n"
+            + f"position explains R² {encoded:.2f}   ·   flow {arrow} "
+              f"(cos {alignment:+.2f})",
+            loc="left", fontsize=7.2, pad=4,
+        )
+        bar = figure.colorbar(points, ax=ax, fraction=0.046, pad=0.02)
+        bar.ax.tick_params(labelsize=5.5, color=GRID, labelcolor=INK_SECONDARY)
+        bar.outline.set_visible(False)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_aspect("equal", adjustable="datalim")
+        for side in ("top", "right", "bottom", "left"):
+            ax.spines[side].set_visible(False)
+
+    for position in range(len(available), rows * columns):
+        axes[position // columns][position % columns].axis("off")
+
+    figure.suptitle(title, x=0.02, ha="left", fontsize=10, y=0.998)
+    figure.text(0.02, 0.004,
+                "identical flow field in every panel; only the underlay changes. "
+                "R² is how much of the variable a patient's position accounts for "
+                "(30-NN, held out); cos is the mean cosine between the flow and the "
+                "variable's spatial gradient, +1 moving toward higher values. The two "
+                "answer different questions: where patients sit, and where they go",
+                fontsize=7, color=INK_SECONDARY)
+    figure.tight_layout(rect=(0, 0.02, 1, 0.97))
+    save_figure(figure, out)
+    plt.close(figure)
+    logger.info(f"wrote {out.name}")
+    return pl.DataFrame(report)
+
+
+def colourings(frame: pl.DataFrame, paths) -> list[dict]:
+    """
+    the ways of labelling a patient-timepoint, as one spec per figure
+
+    Kept in one place because the same list drives the standalone UMAPs, the
+    per-patient trajectory overlays and the report's tabs, and they have to
+    agree or a tab will label a figure it is not showing.
+    """
+    specs = [
+        {"key": "site", "label": "contributing site", "kind": "categorical",
+         "colors": site_colors(paths.sites), "order": list(paths.sites)},
+        {"key": "in_hospital_mortality", "label": "in-hospital mortality",
+         "kind": "categorical", "colors": mortality_colors(),
+         "order": [False, True],
+         "names": {False: "survived", True: "died in hospital"}},
+        {"key": "cs_phenotype", "label": "cardiogenic shock phenotype",
+         "kind": "categorical", "colors": phenotype_colors(),
+         "order": list(PHENOTYPES)},
+        {"key": "ever_imv", "label": "ever invasively ventilated",
+         "kind": "categorical", "colors": mortality_colors(),
+         "order": [False, True], "names": {False: "never", True: "ventilated"}},
+        {"key": "n_vasopressors", "label": "vasoactive agents running",
+         "kind": "continuous"},
+        {"key": "map", "label": "MAP (mmHg)", "kind": "continuous"},
+        {"key": "hours_from_admission", "label": "hours from admission",
+         "kind": "continuous"},
+        {"key": "icu_los_days", "label": "ICU length of stay (days)",
+         "kind": "continuous"},
+    ]
+    return [s for s in specs if s["key"] in frame.columns]
+
+
+def plot_colouring_grid(frame, specs, out, title, logger, columns: int = 4):
+    """every labelling of the trajectory cloud, as one small-multiple sheet"""
+    rows = int(np.ceil(len(specs) / columns))
+    figure, axes = plt.subplots(rows, columns, figsize=(3.9 * columns, 3.5 * rows),
+                                squeeze=False)
+    rng = np.random.default_rng(0)
+    order = rng.permutation(frame.height)
+    shuffled = frame.with_columns(_o=pl.Series(order)).sort("_o")
+    px, py = shuffled["umap_1"].to_numpy(), shuffled["umap_2"].to_numpy()
+    size = 1.1 if frame.height > 60000 else 2.2
+
+    for position, spec in enumerate(specs):
+        ax = axes[position // columns][position % columns]
+        if spec["kind"] == "continuous":
+            values = shuffled[spec["key"]].to_numpy().astype(float)
+            finite = np.isfinite(values)
+            if finite.sum() < 100:
+                ax.axis("off")
+                continue
+            # Hexbin of the local mean rather than 75,000 individual points.
+            # Overplotted, a high-variance variable reads as confetti whatever
+            # the colormap, because neighbouring patients differ far more than
+            # neighbouring regions do; averaging within a cell shows the
+            # spatial pattern, which is the thing being asked about.
+            points = ax.hexbin(
+                px[finite], py[finite], C=values[finite],
+                reduce_C_function=np.mean, mincnt=5, gridsize=52,
+                cmap=continuous_cmap(), linewidths=0,
+            )
+            cells = points.get_array()
+            lo, hi = np.nanpercentile(cells.compressed() if hasattr(cells, "compressed")
+                                      else cells[np.isfinite(cells)], [2, 98])
+            points.set_clim(lo, hi)
+            bar = figure.colorbar(points, ax=ax, fraction=0.046, pad=0.02)
+            bar.ax.tick_params(labelsize=5.5, color=GRID, labelcolor=INK_SECONDARY)
+            bar.outline.set_visible(False)
+        else:
+            colours = {key_string(k): v for k, v in spec["colors"].items()}
+            values = [key_string(v) for v in shuffled[spec["key"]].to_list()]
+            ax.scatter(px, py, s=size,
+                       c=[colours.get(v, "#cccccc") for v in values],
+                       linewidths=0, alpha=0.8, rasterized=True)
+            names = spec.get("names", {})
+            ax.legend(
+                handles=[
+                    plt.Line2D([], [], marker="o", linestyle="none", markersize=4,
+                               markerfacecolor=spec["colors"][k],
+                               markeredgecolor="none",
+                               label=str(names.get(k, k))[:28])
+                    for k in spec["order"] if k in spec["colors"]
+                ],
+                loc="upper left", bbox_to_anchor=(0, -0.01), fontsize=5.8,
+                labelcolor=INK_SECONDARY, handletextpad=0.5, borderpad=0,
+                ncol=2,
+            )
+        ax.set_title(spec["label"], loc="left", fontsize=8, pad=4)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_aspect("equal", adjustable="datalim")
+        for side in ("top", "right", "bottom", "left"):
+            ax.spines[side].set_visible(False)
+
+    for position in range(len(specs), rows * columns):
+        axes[position // columns][position % columns].axis("off")
+    figure.suptitle(title, x=0.02, ha="left", fontsize=10, y=0.998)
+    figure.tight_layout(rect=(0, 0.01, 1, 0.97))
+    save_figure(figure, out)
+    plt.close(figure)
+    logger.info(f"wrote {out.name}")
+
+
+def pick_patients(frame: pl.DataFrame, n: int = 5, min_points: int = 5, seed: int = 7):
+    """random patients with enough timepoints to show a path"""
+    counts = (
+        frame.group_by("hospitalization_id")
+        .agg(points=pl.len())
+        .filter(pl.col("points") >= min_points)
+        .sort("hospitalization_id")
+    )
+    if counts.height == 0:
+        return []
+    rng = np.random.default_rng(seed)
+    ids = counts["hospitalization_id"].to_list()
+    chosen = rng.choice(len(ids), size=min(n, len(ids)), replace=False)
+    return [ids[int(i)] for i in sorted(chosen)]
+
+
+def plot_patient_paths(frame, spec, patients, out, title, logger):
+    """
+    one panel per patient: their path through the cloud, over one labelling
+
+    The path is drawn in black over the coloured cloud and each point is
+    annotated with its hour relative to shock onset, so the direction of travel
+    is readable rather than inferred from the arrow of a smoothed field.
+    """
+    figure, axes = plt.subplots(1, len(patients),
+                               figsize=(3.1 * len(patients), 3.4), squeeze=False)
+    px, py = frame["umap_1"].to_numpy(), frame["umap_2"].to_numpy()
+
+    if spec["kind"] == "continuous":
+        values = frame[spec["key"]].to_numpy().astype(float)
+        finite = np.isfinite(values)
+    else:
+        colours = {key_string(k): v for k, v in spec["colors"].items()}
+        values = [colours.get(key_string(v), "#cccccc")
+                  for v in frame[spec["key"]].to_list()]
+
+    for position, patient in enumerate(patients):
+        ax = axes[0][position]
+        if spec["kind"] == "continuous":
+            mesh = ax.hexbin(
+                px[finite], py[finite], C=values[finite],
+                reduce_C_function=np.mean, mincnt=5, gridsize=46,
+                cmap=continuous_cmap(), linewidths=0, alpha=0.75,
+            )
+            cells = mesh.get_array()
+            good = cells.compressed() if hasattr(cells, "compressed") else cells
+            lo, hi = np.nanpercentile(good[np.isfinite(good)], [2, 98])
+            mesh.set_clim(lo, hi)
+        else:
+            ax.scatter(px, py, s=0.9, c=values, linewidths=0, alpha=0.5,
+                       rasterized=True)
+
+        path = frame.filter(pl.col("hospitalization_id") == patient).sort("offset_hours")
+        tx, ty = path["umap_1"].to_numpy(), path["umap_2"].to_numpy()
+        ax.plot(tx, ty, "-", color=INK_PRIMARY, linewidth=1.0, zorder=3)
+        ax.scatter(tx, ty, s=22, c=INK_PRIMARY, zorder=4, linewidths=0)
+        # labelling every point collides where a patient barely moves; the
+        # ends plus every third step still show the direction of travel
+        hours = path["offset_hours"].to_list()
+        for index, (hour, a, b) in enumerate(zip(hours, tx, ty)):
+            if index not in (0, len(hours) - 1) and index % 3:
+                continue
+            ax.annotate(f"{hour:+.0f}h", (a, b), fontsize=5.2, color=INK_PRIMARY,
+                        xytext=(4, 3), textcoords="offset points", zorder=5)
+        site = path["site"][0]
+        died = bool(path["in_hospital_mortality"][0])
+        ax.set_title(
+            f"{site} · {path.height} points · "
+            + ("died" if died else "survived"),
+            loc="left", fontsize=7, pad=3,
+        )
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_aspect("equal", adjustable="datalim")
+        for side in ("top", "right", "bottom", "left"):
+            ax.spines[side].set_visible(False)
+
+    figure.suptitle(title, x=0.01, ha="left", fontsize=9.5, y=1.02)
+    figure.text(0.01, -0.04,
+                "black path is one patient through the cloud; labels are hours "
+                "relative to shock onset",
+                fontsize=6.5, color=INK_SECONDARY)
+    figure.tight_layout()
+    save_figure(figure, out)
+    plt.close(figure)
+    logger.info(f"wrote {out.name}")
 
 
 def plot_flow(frame, x, y, out, title, subtitle, logger, labels=None):
@@ -461,9 +795,21 @@ def main() -> None:
 
     frame = load_grid(paths, args, logger)
     cohort = pl.read_parquet(paths.cohort_home / "cohort.parquet").select(
-        "hospitalization_id", "cs_phenotype", "in_hospital_mortality"
+        "hospitalization_id", "cs_phenotype", "in_hospital_mortality",
+        "icu_los_days", "admission_dttm", "cs_onset_dttm",
     )
     frame = frame.join(cohort, on="hospitalization_id", how="inner")
+
+    # where in the admission this timepoint falls, and whether the patient was
+    # ever ventilated at any point -- a patient-level fact, unlike the
+    # timepoint-level on_imv the state table carries
+    frame = frame.with_columns(
+        hours_from_admission=(
+            (pl.col("cs_onset_dttm") - pl.col("admission_dttm")).dt.total_seconds()
+            / 3600.0
+        )
+        + pl.col("offset_hours")
+    )
     frame = project(frame, args.seed, logger)
 
     home = paths.figure_home / "trajectory"
@@ -478,7 +824,7 @@ def main() -> None:
                  f"{paths.model_key}: patient-timepoints by site",
                  "", home / "trajectory_site.png", logger)
     plot_scatter(frame.filter(pl.col("cs_phenotype").is_not_null()),
-                 "umap_1", "umap_2", "cs_phenotype", PHENOTYPE_COLORS,
+                 "umap_1", "umap_2", "cs_phenotype", phenotype_colors(),
                  list(PHENOTYPES),
                  f"{paths.model_key}: patient-timepoints by phenotype",
                  "", home / "trajectory_phenotype.png", logger)
@@ -501,6 +847,44 @@ def main() -> None:
                       f"{paths.model_key}: latent flow, patients who {name}",
                       f"{part['hospitalization_id'].n_unique():,} patients",
                       logger, labels=("UMAP-1", "UMAP-2"))
+
+    frame = attach_state(paths, frame, logger)
+    if "on_imv" in frame.columns:
+        frame = frame.join(
+            frame.group_by("hospitalization_id").agg(
+                ever_imv=pl.col("on_imv").max() > 0
+            ),
+            on="hospitalization_id",
+            how="left",
+        )
+
+    specs = colourings(frame, paths)
+    plot_colouring_grid(
+        frame, specs, home / "trajectory_labels.png",
+        f"{paths.model_key}: patient-timepoints around shock onset", logger,
+    )
+
+    patients = pick_patients(frame)
+    logger.info(f"patient paths: {patients}")
+    for spec in specs:
+        plot_patient_paths(
+            frame, spec, patients,
+            home / f"patient_paths_{spec['key']}.png",
+            f"{paths.model_key}: five patients, cloud coloured by {spec['label']}",
+            logger,
+        )
+    alignment = plot_state_flow(
+        frame, "umap_1", "umap_2", home / "trajectory_flow_state.png",
+        f"{paths.model_key}: what changes as patients move", logger,
+    )
+    if alignment.height:
+        alignment.write_csv(paths.table_home / "trajectory_flow_alignment.csv")
+        logger.info("position encodes the variable (R2) vs flow follows it (cos):")
+        for row in alignment.sort("position_r2", descending=True).iter_rows(named=True):
+            logger.info(
+                f"    {row['label']:<42} R2 {row['position_r2']:>6.3f}   "
+                f"cos {row['flow_gradient_cosine']:+.3f}"
+            )
 
     frame.select(
         "hospitalization_id", "site", "offset_hours", "last_valid",

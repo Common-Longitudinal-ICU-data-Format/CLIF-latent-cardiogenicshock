@@ -64,3 +64,43 @@ def save_figure(figure, out_path: pathlib.Path, attempts: int = 6, **kwargs) -> 
             if attempt == attempts - 1:
                 raise
             time.sleep(0.5 * 2**attempt)
+
+
+def quantile_colour(values):
+    """
+    map values to their quantile rank, with ticks labelled by actual value
+
+    Colouring a right-skewed variable by magnitude wastes almost the whole
+    ramp: ICU length of stay has a median near 4 days and a tail past 50, so
+    every typical patient lands in the first few percent of the scale and the
+    panel reads as uniformly dark. Ranking first spreads the cloud across the
+    full ramp; the colourbar is then labelled with the value at each quartile,
+    so the reader still sees real units.
+
+    Returns (ranks, finite mask, tick positions, tick labels).
+    """
+    import numpy as np
+    from scipy.stats import rankdata
+
+    finite = np.isfinite(values)
+    ranks = np.full(values.shape, np.nan)
+    if finite.sum() == 0:
+        return ranks, finite, [], []
+    ranks[finite] = rankdata(values[finite], method="average") / finite.sum()
+    quantiles = [0.0, 0.25, 0.5, 0.75, 1.0]
+    labels = [f"{np.nanquantile(values[finite], q):.3g}" for q in quantiles]
+    return ranks, finite, quantiles, labels
+
+
+def key_string(value) -> str:
+    """
+    canonical string form of a categorical level
+
+    polars renders booleans as "true"/"false" while Python's str() gives
+    "True"/"False". A colour dict keyed one way and looked up the other
+    silently returns the fallback grey for every row, which is how the
+    mortality and ventilation panels came out blank.
+    """
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value).lower()

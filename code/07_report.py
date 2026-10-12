@@ -31,7 +31,14 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import polars as pl
 
 from clifcs import ANCHORS, get_logger, load_cohort_cfg, load_paths
-from clifcs.palette import CATEGORICAL, GRID, INK_PRIMARY, INK_SECONDARY, SURFACE
+from clifcs.palette import (
+    CATEGORICAL,
+    GRID,
+    INK_PRIMARY,
+    INK_SECONDARY,
+    LOGO_PALETTE,
+    SURFACE,
+)
 
 MODELS = ("GEM-all", "GEM-mimic-icu", "GEM-ucmc-icu")
 
@@ -225,10 +232,35 @@ def section_cohort(paths, cfg, out: list) -> None:
     ledger = pl.read_csv(ledger_file)
     out.append('<h2 id="cohort">1 &middot; Cohort</h2>')
     out.append(
-        "<p>Cardiogenic shock defined as sustained hypotension or vasoactive "
-        "support, plus evidence of end-organ damage. Urine output is not "
-        "available at either site, so creatinine-based KDIGO AKI stands in for "
-        "it and lactate is added as a second hypoperfusion marker.</p>"
+        "<p>Three criteria, applied in sequence to a base cohort of first "
+        "hospitalizations at least 24 h long with an ICU stay in the first "
+        "24 h &mdash; which mirrors the preprocessing the models were trained "
+        "under, so the patients embedded here sit inside that distribution.</p>"
+    )
+    out.append(
+        "<dl class=\"defs\">"
+        "<dt>1 &middot; hemodynamic</dt><dd>SBP &lt; 90 mmHg sustained for "
+        "&gt; 30 min (a maximal run of consecutive sub-threshold readings "
+        "spanning more than half an hour), <b>or</b> a continuous "
+        "vasoactive/inotrope infusion at a non-zero dose.</dd>"
+        "<dt>2 &middot; end-organ damage</dt><dd>Within &minus;6 h/+24 h of "
+        "the moment criterion 1 is first met: altered mental status (GCS "
+        "&lt; 15, or a &ge;2-point drop from the patient's own best), lactate "
+        "&ge; 2.0 mmol/L, or creatinine-based KDIGO AKI. Urine output is "
+        "unavailable at both sites, so the AKI arm stands in for it and "
+        "lactate is added as a second hypoperfusion marker.</dd>"
+        "<dt>3 &middot; cardiac origin</dt><dd>An inotrope infusion "
+        "(dobutamine, milrinone), a mechanical circulatory support procedure "
+        "(ECMO, IABP, percutaneous VAD, in CPT and ICD-10-PCS), <b>or</b> peak "
+        "troponin &ge; 500 ng/L within &minus;24 h/+48 h of shock onset. "
+        "Diagnosis codes are deliberately excluded: a diagnosis asserts a "
+        "condition, whereas an infusion, a procedure and a troponin record "
+        "something that was done or measured.</dd>"
+        "</dl>"
+    )
+    out.append(
+        "<p><code>cs_onset_dttm</code>, the anchor for everything downstream, "
+        "is the time at which criteria 1 and 2 both hold.</p>"
     )
 
     wide = (
@@ -239,7 +271,7 @@ def section_cohort(paths, cfg, out: list) -> None:
     wide = wide.join(pl.DataFrame({"step": order}).with_row_index("o"), on="step").sort("o").drop("o")
     out.append(table(wide, {c: thousands for c in wide.columns if c != "step"},
                      key_column="step",
-                     highlight={s for s in wide["step"] if "CRITERION 2" in s}))
+                     highlight={s for s in wide["step"] if "CRITERION 3" in s or "CRITERION 2" in s}))
 
     subs = ledger.filter(pl.col("step").str.starts_with("  ")).with_columns(
         step=pl.col("step").str.strip_chars()
@@ -248,18 +280,24 @@ def section_cohort(paths, cfg, out: list) -> None:
     out.append(table(subs, {c: thousands for c in subs.columns if c != "step"}, key_column="step"))
 
     enabled = bool(cfg.cardiac_origin.enabled)
-    out.append(callout(
-        "<b>A cardiac criterion exists and is computed, but is not applied to "
-        "enrollment.</b> <code>cardiac_origin</code> is satisfied by an inotrope "
-        "infusion, an MCS procedure, or peak troponin ≥500 ng/L near onset, "
-        f"and is currently <b>{'applied' if enabled else 'reported only'}</b> "
-        "(<code>cardiac_origin.enabled</code>). It selects 2,219 UCMC (24.3%) and "
-        "5,104 NU (20.4%). As enrolled, the cohort therefore spans "
-        "undifferentiated shock, including septic, hypovolaemic and haemorrhagic. "
-        "For reference, "
-        "STEMI is coded in 3.0% / 2.8% and R57.0 cardiogenic shock in 19.7% / "
-        "9.6% — against the ~81% STEMI of AMI-CS registries, which enrol on "
-        "acute MI and so have a different denominator entirely.", "warn"))
+    if not enabled:
+        out.append(callout(
+            "<b>Criterion 3 is computed but not applied</b> "
+            "(<code>cardiac_origin.enabled</code> is false), so the cohort as "
+            "enrolled spans undifferentiated shock — septic, hypovolaemic "
+            "and haemorrhagic included.", "warn"))
+    else:
+        out.append(callout(
+            "<b>How cardiac is this cohort?</b> Requiring criterion 3 is what "
+            "makes it a cardiogenic shock cohort rather than a shock cohort, "
+            "and it is the criterion with the least precedent, so it is worth "
+            "sizing against the coded diagnoses it deliberately does not use. "
+            "Within the enrolled patients, R57.0 cardiogenic shock is coded in "
+            "19.7% of UCMC and 9.6% of NU, any acute MI in 15.3% / 11.8%, and "
+            "STEMI in 3.0% / 2.8%. The ~81% STEMI quoted in the cardiogenic "
+            "shock literature comes from AMI-CS registries, which enrol on "
+            "acute MI itself and so have a different denominator entirely; it "
+            "is not a figure this cohort should be expected to reproduce."))
 
     summary_file = paths.cohort_home / "phenotype_summary.csv"
     if summary_file.is_file():

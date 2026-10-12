@@ -34,7 +34,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
-from matplotlib.colors import LinearSegmentedColormap, Normalize
+from matplotlib.colors import Normalize
 from matplotlib.lines import Line2D
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
@@ -45,9 +45,9 @@ from clifcs.palette import (
     GRID,
     INK_PRIMARY,
     INK_SECONDARY,
-    MORTALITY_COLORS,
-    PHENOTYPE_COLORS,
-    SCATTER_SEQUENTIAL,
+    mortality_colors,
+    phenotype_colors,
+    continuous_cmap,
     site_colors,
     SURFACE,
 )
@@ -57,7 +57,7 @@ DPI = 500
 #: PCA components kept before UMAP, to denoise and speed up the neighbour graph
 PCA_COMPONENTS = 50
 
-LOS_CMAP = LinearSegmentedColormap.from_list("icu_los_blue", SCATTER_SEQUENTIAL)
+LOS_CMAP = continuous_cmap()
 
 
 def style() -> None:
@@ -479,7 +479,7 @@ def analyse_anchor(paths, anchor: str, args, logger) -> pl.DataFrame:
             x,
             y,
             "cs_phenotype",
-            PHENOTYPE_COLORS,
+            phenotype_colors(),
             [(p, p) for p in PHENOTYPES],
             f"{base}\ncoloured by cardiogenic shock phenotype (Zweck 2021)",
             xlabel,
@@ -493,7 +493,7 @@ def analyse_anchor(paths, anchor: str, args, logger) -> pl.DataFrame:
             x,
             y,
             "in_hospital_mortality",
-            MORTALITY_COLORS,
+            mortality_colors(),
             [(False, "survived"), (True, "died in hospital")],
             f"{base}\ncoloured by in-hospital mortality",
             xlabel,
