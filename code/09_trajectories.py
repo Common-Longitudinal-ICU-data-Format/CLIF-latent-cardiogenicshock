@@ -616,6 +616,78 @@ def plot_colouring_grid(frame, specs, out, title, logger, columns: int = 4):
     logger.info(f"wrote {out.name}")
 
 
+def plot_single_colouring(frame, spec, out, title, logger):
+    """
+    one labelling, one full-size panel
+
+    The small-multiple sheet is for comparing labellings against each other;
+    this is for reading one of them properly, and is what the report tabs
+    between.
+    """
+    figure, (ax, legend_ax) = plt.subplots(
+        1, 2, figsize=(6.6, 5.0),
+        gridspec_kw={"width_ratios": [4.3, 1.15], "wspace": 0.04},
+    )
+    legend_ax.axis("off")
+    rng = np.random.default_rng(0)
+    shuffled = frame.with_columns(_o=pl.Series(rng.permutation(frame.height))).sort("_o")
+    px, py = shuffled["umap_1"].to_numpy(), shuffled["umap_2"].to_numpy()
+
+    if spec["kind"] == "continuous":
+        values = shuffled[spec["key"]].to_numpy().astype(float)
+        finite = np.isfinite(values)
+        mesh = ax.hexbin(
+            px[finite], py[finite], C=values[finite], reduce_C_function=np.mean,
+            mincnt=5, gridsize=64, cmap=continuous_cmap(), linewidths=0,
+        )
+        cells = mesh.get_array()
+        good = cells.compressed() if hasattr(cells, "compressed") else cells
+        lo, hi = np.nanpercentile(good[np.isfinite(good)], [2, 98])
+        mesh.set_clim(lo, hi)
+        bar = figure.colorbar(mesh, cax=legend_ax.inset_axes([0.10, 0.30, 0.16, 0.58]))
+        bar.set_label(spec["label"], color=INK_SECONDARY, fontsize=7)
+        bar.ax.tick_params(labelsize=6, color=GRID, labelcolor=INK_SECONDARY)
+        bar.outline.set_visible(False)
+        legend_ax.text(
+            0.10, 0.22,
+            "hexagon = local mean\nof the patients in it",
+            transform=legend_ax.transAxes, fontsize=6, color=INK_SECONDARY,
+            va="top",
+        )
+    else:
+        colours = {key_string(k): v for k, v in spec["colors"].items()}
+        values = [key_string(v) for v in shuffled[spec["key"]].to_list()]
+        ax.scatter(px, py, s=1.6, c=[colours.get(v, "#cccccc") for v in values],
+                   linewidths=0, alpha=0.8, rasterized=True)
+        counts = frame[spec["key"]].to_list()
+        tally = {}
+        for v in counts:
+            tally[key_string(v)] = tally.get(key_string(v), 0) + 1
+        names = spec.get("names", {})
+        legend_ax.legend(
+            handles=[
+                plt.Line2D([], [], marker="o", linestyle="none", markersize=5,
+                           markerfacecolor=spec["colors"][k], markeredgecolor="none",
+                           label=f"{names.get(k, k)}  n={tally.get(key_string(k), 0):,}")
+                for k in spec["order"] if k in spec["colors"]
+            ],
+            loc="upper left", bbox_to_anchor=(0, 1), fontsize=7,
+            labelcolor=INK_SECONDARY, handletextpad=0.6, borderpad=0,
+        )
+
+    ax.set_title(title, loc="left", pad=8, fontsize=9)
+    ax.set_xlabel("UMAP-1")
+    ax.set_ylabel("UMAP-2")
+    ax.grid(True, color=GRID, linewidth=0.4, alpha=0.6)
+    ax.set_axisbelow(True)
+    ax.set_aspect("equal", adjustable="datalim")
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    save_figure(figure, out)
+    plt.close(figure)
+    logger.info(f"wrote {out.name}")
+
+
 def pick_patients(frame: pl.DataFrame, n: int = 5, min_points: int = 5, seed: int = 7):
     """random patients with enough timepoints to show a path"""
     counts = (
@@ -863,6 +935,13 @@ def main() -> None:
         frame, specs, home / "trajectory_labels.png",
         f"{paths.model_key}: patient-timepoints around shock onset", logger,
     )
+    for spec in specs:
+        plot_single_colouring(
+            frame, spec, home / f"trajectory_label_{spec['key']}.png",
+            f"{paths.model_key}: patient-timepoints around shock onset, "
+            f"by {spec['label']}",
+            logger,
+        )
 
     patients = pick_patients(frame)
     logger.info(f"patient paths: {patients}")

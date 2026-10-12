@@ -3,11 +3,11 @@
 """
 07 -- assemble the analyses into a single self-contained HTML report
 
-Reads whatever 01-06 have written and renders it as one file. Figures are
+Reads whatever 01-10 have written and renders it as one file. Figures are
 inlined as base64 so the report can be emailed or opened from anywhere without
 carrying a directory of PNGs alongside it; nothing is fetched at view time.
 
-Only sections whose inputs exist are rendered, so this is safe to run at any
+Sections render only when their inputs exist, so this is safe to run at any
 point in the pipeline.
 
 Usage
@@ -40,7 +40,19 @@ from clifcs.palette import (
     SURFACE,
 )
 
-MODELS = ("GEM-all", "GEM-mimic-icu", "GEM-ucmc-icu")
+MODELS = ("GEM-all", "GEM-ucmc-icu", "GEM-mimic-icu")
+
+#: the trajectory labellings, in reading order, matching 09's `colourings`
+LABELLINGS = [
+    ("site", "site"),
+    ("in_hospital_mortality", "mortality"),
+    ("n_vasopressors", "pressors"),
+    ("map", "MAP"),
+    ("cs_phenotype", "phenotype"),
+    ("ever_imv", "ever IMV"),
+    ("hours_from_admission", "time in admission"),
+    ("icu_los_days", "ICU LOS"),
+]
 
 
 # ----------------------------------------------------------------- rendering
@@ -53,23 +65,23 @@ def css() -> str:
   --ink: {INK_PRIMARY};
   --ink-2: {INK_SECONDARY};
   --grid: {GRID};
-  --s1: {CATEGORICAL[0]};
-  --s2: {CATEGORICAL[1]};
-  --s3: {CATEGORICAL[2]};
+  --accent: {CATEGORICAL[0]};
+  --ucmc: {LOGO_PALETTE['UCMC']};
+  --nu: {LOGO_PALETTE['NU']};
 }}
 * {{ box-sizing: border-box; }}
 body {{
   margin: 0; background: var(--surface); color: var(--ink);
   font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
 }}
-.wrap {{ max-width: 1100px; margin: 0 auto; padding: 48px 28px 96px; }}
+.wrap {{ max-width: 1180px; margin: 0 auto; padding: 48px 28px 96px; }}
 h1 {{ font-size: 30px; margin: 0 0 6px; letter-spacing: -0.02em; }}
 h2 {{
   font-size: 21px; margin: 56px 0 4px; letter-spacing: -0.01em;
   padding-top: 20px; border-top: 1px solid var(--grid);
 }}
 h3 {{ font-size: 15px; margin: 30px 0 8px; color: var(--ink); }}
-p, li {{ color: var(--ink-2); max-width: 78ch; }}
+p, li {{ color: var(--ink-2); max-width: 80ch; }}
 .sub {{ color: var(--ink-2); font-size: 13px; margin: 0 0 8px; }}
 .meta {{ color: var(--ink-2); font-size: 12.5px; margin-bottom: 36px; }}
 table {{ border-collapse: collapse; margin: 14px 0 6px; font-size: 13px; }}
@@ -89,48 +101,108 @@ figure img {{
 }}
 figcaption {{ font-size: 12.5px; color: var(--ink-2); margin-top: 7px; }}
 .callout {{
-  border-left: 3px solid var(--s1); background: #f6f8fc;
+  border-left: 3px solid var(--accent); background: #f6f8fc;
   padding: 12px 16px; margin: 18px 0; border-radius: 0 4px 4px 0;
 }}
-.callout.warn {{ border-left-color: var(--s2); background: #fdf5f1; }}
+.callout.warn {{ border-left-color: #eb6834; background: #fdf5f1; }}
 .callout p {{ margin: 0; color: var(--ink); font-size: 14px; }}
-.callout p + p {{ margin-top: 8px; }}
-.grid2 {{ display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }}
-@media (max-width: 820px) {{ .grid2 {{ grid-template-columns: 1fr; }} }}
 code {{
   font: 12.5px ui-monospace, SFMono-Regular, Menlo, monospace;
   background: #f2f1ee; padding: 1px 5px; border-radius: 3px;
 }}
-.tag {{
-  display: inline-block; font-size: 11px; padding: 2px 7px; border-radius: 3px;
-  background: #f2f1ee; color: var(--ink-2); margin-right: 6px;
-}}
-dl.defs {{ margin: 16px 0; }}
-dl.defs dt {{
-  font-weight: 600; color: var(--ink); font-size: 13.5px; margin-top: 14px;
-}}
-dl.defs dd {{
-  margin: 4px 0 0 0; color: var(--ink-2); font-size: 13.5px; max-width: 78ch;
-}}
 pre.formula {{
   font: 12.5px ui-monospace, SFMono-Regular, Menlo, monospace;
   background: #f2f1ee; padding: 10px 14px; border-radius: 4px;
-  color: var(--ink); margin: 8px 0; overflow-x: auto; max-width: 78ch;
+  color: var(--ink); margin: 8px 0; overflow-x: auto; max-width: 80ch;
 }}
+dl.defs {{ margin: 16px 0; }}
+dl.defs dt {{ font-weight: 600; color: var(--ink); font-size: 13.5px; margin-top: 14px; }}
+dl.defs dd {{ margin: 4px 0 0 0; color: var(--ink-2); font-size: 13.5px; max-width: 80ch; }}
 .toc {{ margin: 28px 0 0; padding: 0; list-style: none; columns: 2; }}
 .toc li {{ margin: 3px 0; }}
-.toc a {{ color: var(--s1); text-decoration: none; font-size: 13.5px; }}
+.toc a {{ color: var(--accent); text-decoration: none; font-size: 13.5px; }}
 .toc a:hover {{ text-decoration: underline; }}
+
+/* tabs */
+.tabs {{ margin: 18px 0 8px; }}
+.tabstrip {{
+  display: flex; flex-wrap: wrap; gap: 2px; border-bottom: 1px solid var(--grid);
+  margin-bottom: 2px;
+}}
+.tabstrip button {{
+  appearance: none; border: 0; background: transparent; cursor: pointer;
+  font: inherit; font-size: 12.5px; color: var(--ink-2);
+  padding: 7px 13px; border-radius: 4px 4px 0 0;
+  border-bottom: 2px solid transparent; margin-bottom: -1px;
+}}
+.tabstrip button:hover {{ background: #f2f1ee; color: var(--ink); }}
+.tabstrip button[aria-selected="true"] {{
+  color: var(--ink); font-weight: 600; border-bottom-color: var(--accent);
+}}
+.tabpanel {{ display: none; padding-top: 6px; }}
+.tabpanel[data-active="true"] {{ display: block; }}
 """
+
+
+def script() -> str:
+    """click handling for the tab groups; no dependencies"""
+    return """
+document.querySelectorAll('[data-tabs]').forEach(function (group) {
+  var buttons = group.querySelectorAll(':scope > .tabstrip > button');
+  var panels = group.querySelectorAll(':scope > .tabpanel');
+  buttons.forEach(function (button, index) {
+    button.addEventListener('click', function () {
+      buttons.forEach(function (b, i) {
+        b.setAttribute('aria-selected', i === index ? 'true' : 'false');
+      });
+      panels.forEach(function (p, i) {
+        p.setAttribute('data-active', i === index ? 'true' : 'false');
+      });
+    });
+  });
+});
+"""
+
+
+_TAB_GROUP = [0]
+
+
+def tabs(items, logger=None) -> str:
+    """
+    a tab group from (label, html) pairs
+
+    Panels with no content are dropped rather than rendered as an empty tab,
+    so a figure that has not been generated yet simply does not appear.
+    """
+    items = [(label, body) for label, body in items if body]
+    if not items:
+        return ""
+    if len(items) == 1:
+        return items[0][1]
+    _TAB_GROUP[0] += 1
+    group = _TAB_GROUP[0]
+    strip = "".join(
+        f'<button role="tab" aria-selected="{"true" if i == 0 else "false"}">'
+        f"{esc(label)}</button>"
+        for i, (label, _) in enumerate(items)
+    )
+    panels = "".join(
+        f'<div class="tabpanel" data-active="{"true" if i == 0 else "false"}">'
+        f"{body}</div>"
+        for i, (_, body) in enumerate(items)
+    )
+    return (
+        f'<div class="tabs" data-tabs id="tabs-{group}">'
+        f'<div class="tabstrip" role="tablist">{strip}</div>{panels}</div>'
+    )
 
 
 def esc(value) -> str:
     return html.escape(str(value))
 
 
-def table(frame: pl.DataFrame, numeric_format: dict | None = None,
-          key_column: str | None = None, highlight: set | None = None) -> str:
-    """render a dataframe, right-aligning numbers and marking a key column"""
+def table(frame: pl.DataFrame, numeric_format=None, key_column=None,
+          highlight=None) -> str:
     numeric_format = numeric_format or {}
     highlight = highlight or set()
     header = "".join(
@@ -145,27 +217,26 @@ def table(frame: pl.DataFrame, numeric_format: dict | None = None,
             classes = []
             if column in numeric_format:
                 classes.append("num")
-                value = (
-                    numeric_format[column](value) if value is not None else "—"
-                )
+                value = numeric_format[column](value) if value is not None else "—"
             if column == key_column:
                 classes.append("key")
-            cells.append(
-                f'<td class="{" ".join(classes)}">{esc(value)}</td>'
-            )
+            cells.append(f'<td class="{" ".join(classes)}">{esc(value)}</td>')
         cls = ' class="total"' if str(row.get(key_column, "")) in highlight else ""
         body.append(f"<tr{cls}>{''.join(cells)}</tr>")
-    return f"<table><thead><tr>{header}</tr></thead><tbody>{''.join(body)}</tbody></table>"
+    return (
+        f"<table><thead><tr>{header}</tr></thead>"
+        f"<tbody>{''.join(body)}</tbody></table>"
+    )
 
 
-def figure(path: pathlib.Path, caption: str) -> str:
-    """inline a PNG so the report stays a single portable file"""
-    if not path.is_file():
+def figure(path: pathlib.Path, caption: str = "") -> str:
+    if not pathlib.Path(path).is_file():
         return ""
-    data = base64.b64encode(path.read_bytes()).decode()
+    data = base64.b64encode(pathlib.Path(path).read_bytes()).decode()
+    cap = f"<figcaption>{caption}</figcaption>" if caption else ""
     return (
         f'<figure><img src="data:image/png;base64,{data}" alt="{esc(caption)}">'
-        f"<figcaption>{caption}</figcaption></figure>"
+        f"{cap}</figure>"
     )
 
 
@@ -174,43 +245,7 @@ def callout(text: str, kind: str = "") -> str:
 
 
 def formula(*lines: str) -> str:
-    """a monospaced block; lines are passed separately to keep escapes out"""
     return '<pre class="formula">' + esc("\n".join(lines)) + "</pre>"
-
-
-def read_model_tables(
-    paths, name: str, required: tuple[str, ...], logger
-) -> tuple[pl.DataFrame | None, list[str]]:
-    """
-    collect one table across models, refusing to merge mismatched schemas
-
-    A plain diagonal concat fills a column missing from one file with nulls,
-    which renders as "None" in the report and looks like a result rather than
-    a stale file. This happened: a report built before a rerun finished showed
-    `classifier: None` for two of three models. Any file lacking a required
-    column is dropped and named instead.
-    """
-    frames, stale = [], []
-    for model in MODELS:
-        f = paths.output_home / "tables" / model / name
-        if not f.is_file():
-            continue
-        frame = pl.read_csv(f)
-        missing = [c for c in required if c not in frame.columns]
-        if missing:
-            stale.append(f"{model} ({', '.join(missing)} absent)")
-            logger.warning(
-                f"{f} lacks {missing}; excluded from the report. Rerun the "
-                "stage that writes it."
-            )
-            continue
-        frames.append(frame.with_columns(model=pl.lit(model)))
-    if not frames:
-        return None, stale
-    return pl.concat(frames, how="diagonal_relaxed"), stale
-
-
-# ------------------------------------------------------------------ sections
 
 
 def pct(x):
@@ -225,6 +260,28 @@ def thousands(x):
     return "—" if x is None else f"{int(x):,}"
 
 
+def read_model_tables(paths, name, required, logger):
+    """collect one table across models, refusing to merge mismatched schemas"""
+    frames, stale = [], []
+    for model in MODELS:
+        f = paths.output_home / "tables" / model / name
+        if not f.is_file():
+            continue
+        frame = pl.read_csv(f)
+        missing = [c for c in required if c not in frame.columns]
+        if missing:
+            stale.append(f"{model} ({', '.join(missing)} absent)")
+            logger.warning(f"{f} lacks {missing}; excluded from the report")
+            continue
+        frames.append(frame.with_columns(model=pl.lit(model)))
+    if not frames:
+        return None, stale
+    return pl.concat(frames, how="diagonal_relaxed"), stale
+
+
+# ================================================================= sections
+
+
 def section_cohort(paths, cfg, out: list) -> None:
     ledger_file = paths.cohort_home / "filter_ledger.csv"
     if not ledger_file.is_file():
@@ -232,13 +289,13 @@ def section_cohort(paths, cfg, out: list) -> None:
     ledger = pl.read_csv(ledger_file)
     out.append('<h2 id="cohort">1 &middot; Cohort</h2>')
     out.append(
-        "<p>Three criteria, applied in sequence to a base cohort of first "
+        "<p>Three criteria applied in sequence to a base cohort of first "
         "hospitalizations at least 24 h long with an ICU stay in the first "
         "24 h &mdash; which mirrors the preprocessing the models were trained "
         "under, so the patients embedded here sit inside that distribution.</p>"
     )
     out.append(
-        "<dl class=\"defs\">"
+        '<dl class="defs">'
         "<dt>1 &middot; hemodynamic</dt><dd>SBP &lt; 90 mmHg sustained for "
         "&gt; 30 min (a maximal run of consecutive sub-threshold readings "
         "spanning more than half an hour), <b>or</b> a continuous "
@@ -247,15 +304,15 @@ def section_cohort(paths, cfg, out: list) -> None:
         "the moment criterion 1 is first met: altered mental status (GCS "
         "&lt; 15, or a &ge;2-point drop from the patient's own best), lactate "
         "&ge; 2.0 mmol/L, or creatinine-based KDIGO AKI. Urine output is "
-        "unavailable at both sites, so the AKI arm stands in for it and "
-        "lactate is added as a second hypoperfusion marker.</dd>"
+        "unavailable at both sites, so the AKI arm stands in for it and lactate "
+        "is added as a second hypoperfusion marker.</dd>"
         "<dt>3 &middot; cardiac origin</dt><dd>An inotrope infusion "
         "(dobutamine, milrinone), a mechanical circulatory support procedure "
         "(ECMO, IABP, percutaneous VAD, in CPT and ICD-10-PCS), <b>or</b> peak "
-        "troponin &ge; 500 ng/L within &minus;24 h/+48 h of shock onset. "
-        "Diagnosis codes are deliberately excluded: a diagnosis asserts a "
-        "condition, whereas an infusion, a procedure and a troponin record "
-        "something that was done or measured.</dd>"
+        "troponin &ge; 500 ng/L within &minus;24 h/+48 h of onset. Diagnosis "
+        "codes are deliberately excluded: a diagnosis asserts a condition, "
+        "whereas an infusion, a procedure and a troponin record something that "
+        "was done or measured.</dd>"
         "</dl>"
     )
     out.append(
@@ -263,530 +320,395 @@ def section_cohort(paths, cfg, out: list) -> None:
         "is the time at which criteria 1 and 2 both hold.</p>"
     )
 
+    main = ledger.filter(~pl.col("step").str.starts_with(" "))
+    wide = main.pivot(on="site", index="step", values="n_hospitalizations",
+                      aggregate_function="first")
+    order = main["step"].unique(maintain_order=True)
     wide = (
-        ledger.filter(~pl.col("step").str.starts_with("  "))
-        .pivot(on="site", index="step", values="n_hospitalizations", aggregate_function="first")
+        wide.join(pl.DataFrame({"step": order}).with_row_index("o"), on="step")
+        .sort("o").drop("o")
     )
-    order = ledger.filter(~pl.col("step").str.starts_with("  "))["step"].unique(maintain_order=True)
-    wide = wide.join(pl.DataFrame({"step": order}).with_row_index("o"), on="step").sort("o").drop("o")
-    out.append(table(wide, {c: thousands for c in wide.columns if c != "step"},
-                     key_column="step",
-                     highlight={s for s in wide["step"] if "CRITERION 3" in s or "CRITERION 2" in s}))
+    subs = (
+        ledger.filter(pl.col("step").str.starts_with(" "))
+        .with_columns(step=pl.col("step").str.strip_chars())
+        .pivot(on="site", index="step", values="n_hospitalizations",
+               aggregate_function="first")
+    )
+    out.append(tabs([
+        ("Attrition", table(
+            wide, {c: thousands for c in wide.columns if c != "step"},
+            key_column="step",
+            highlight={s for s in wide["step"] if "CRITERION 3" in s})),
+        ("Criterion components", table(
+            subs, {c: thousands for c in subs.columns if c != "step"},
+            key_column="step")),
+    ]))
 
-    subs = ledger.filter(pl.col("step").str.starts_with("  ")).with_columns(
-        step=pl.col("step").str.strip_chars()
-    ).pivot(on="site", index="step", values="n_hospitalizations", aggregate_function="first")
-    out.append("<h3>Criterion components</h3>")
-    out.append(table(subs, {c: thousands for c in subs.columns if c != "step"}, key_column="step"))
-
-    enabled = bool(cfg.cardiac_origin.enabled)
-    if not enabled:
+    if bool(cfg.cardiac_origin.enabled):
+        out.append(callout(
+            "<b>How cardiac is this cohort?</b> Criterion 3 is what makes it a "
+            "cardiogenic shock cohort rather than a shock cohort, and it is the "
+            "criterion with the least precedent, so it is worth sizing against "
+            "the coded diagnoses it deliberately does not use. R57.0 "
+            "cardiogenic shock is coded in 19.7% of UCMC and 9.6% of NU, any "
+            "acute MI in 15.3% / 11.8%, STEMI in 3.0% / 2.8%. The ~81% STEMI "
+            "quoted in the literature comes from AMI-CS registries, which enrol "
+            "on acute MI itself and so have a different denominator entirely."))
+    else:
         out.append(callout(
             "<b>Criterion 3 is computed but not applied</b> "
             "(<code>cardiac_origin.enabled</code> is false), so the cohort as "
-            "enrolled spans undifferentiated shock — septic, hypovolaemic "
-            "and haemorrhagic included.", "warn"))
-    else:
-        out.append(callout(
-            "<b>How cardiac is this cohort?</b> Requiring criterion 3 is what "
-            "makes it a cardiogenic shock cohort rather than a shock cohort, "
-            "and it is the criterion with the least precedent, so it is worth "
-            "sizing against the coded diagnoses it deliberately does not use. "
-            "Within the enrolled patients, R57.0 cardiogenic shock is coded in "
-            "19.7% of UCMC and 9.6% of NU, any acute MI in 15.3% / 11.8%, and "
-            "STEMI in 3.0% / 2.8%. The ~81% STEMI quoted in the cardiogenic "
-            "shock literature comes from AMI-CS registries, which enrol on "
-            "acute MI itself and so have a different denominator entirely; it "
-            "is not a figure this cohort should be expected to reproduce."))
+            "enrolled spans undifferentiated shock.", "warn"))
 
     summary_file = paths.cohort_home / "phenotype_summary.csv"
     if summary_file.is_file():
-        summary = pl.read_csv(summary_file)
         out.append("<h3>Cardiogenic shock phenotypes (Zweck 2021, refit)</h3>")
         out.append(
-            "<p>k-means refit on the eight labs the paper names, then labelled "
-            "from centroid profiles rather than cluster index. Mortality rises "
-            "I &lt; II &lt; III as published (10&ndash;28% / 32&ndash;45% / "
-            "52&ndash;56%), which is the check that the refit recovered the "
-            "published phenotypes.</p>"
+            "<p>k-means refit on the eight labs the paper names, labelled from "
+            "centroid profiles rather than cluster index. Mortality rising "
+            "I &lt; II &lt; III, as published, is the check that the refit "
+            "recovered the intended phenotypes.</p>"
         )
-        out.append(table(summary, {
+        out.append(table(pl.read_csv(summary_file), {
             "n": thousands, "n_ucmc": thousands, "n_nu": thousands,
             "mortality": pct, "median_icu_los_days": num(1),
         }, key_column="cs_phenotype"))
 
 
-def section_model(paths, out: list) -> None:
-    rows = []
-    for model in MODELS:
-        f = paths.output_home / "tables" / model / "model_summary.json"
-        if f.is_file():
-            info = json.loads(f.read_text())
-            rows.append({
-                "model": model,
-                "base": info.get("base_model", ""),
-                "layers": info["num_hidden_layers"],
-                "embedding dim": info["embedding_dim"],
-                "heads": info["num_attention_heads"],
-                "vocab": info["vocab_size"],
-                "parameters": info["total_parameters"],
-            })
-    if not rows:
+def section_tokens(paths, out: list) -> None:
+    home = paths.output_home / "figures" / "GEM-all"
+    zoom = home / "token_space_umap_zoom.png"
+    full = home / "token_space_umap_full.png"
+    if not (zoom.is_file() or full.is_file()):
         return
-    out.append('<h2 id="model">2 &middot; Models</h2>')
-    out.append(
-        "<p>Each checkpoint is used strictly frozen, in eval mode under "
-        "<code>torch.inference_mode()</code>. The representation is the final "
-        "hidden state &mdash; the last decoder layer after the final RMSNorm, "
-        "before <code>lm_head</code> &mdash; taken at the single last token "
-        "before the anchor. It is not mean-pooled.</p>"
-    )
-    out.append(table(pl.DataFrame(rows), {
-        "layers": thousands, "embedding dim": thousands, "heads": thousands,
-        "vocab": thousands, "parameters": thousands,
-    }, key_column="model"))
-    out.append(
-        "<p>Anchors: <b>24h</b> is 24 hours after admission, matching the "
-        "winnowing the models were evaluated under; <b>onset</b> is the moment "
-        "cardiogenic shock criteria are first jointly met.</p>"
-    )
-
-
-def section_embedding(paths, out: list) -> None:
-    rows = []
-    for model in MODELS:
-        for anchor in ANCHORS:
-            f = paths.output_home / "tables" / model / f"neighbourhood_purity_anchor-{anchor}.csv"
-            if f.is_file():
-                rows.append(pl.read_csv(f).with_columns(model=pl.lit(model)))
-    if not rows:
-        return
-    purity = pl.concat(rows)
-    out.append('<h2 id="embedding">3 &middot; Embedding space</h2>')
-    out.append(
-        "<p>Neighbourhood purity is the share of each patient's 30 nearest "
-        "neighbours (50-d PCA space) carrying the same label, against the share "
-        "expected by chance. Lift near 1.0 means the space is not organised by "
-        "that label.</p>"
-    )
-    wide = purity.pivot(on="label", index=["model", "anchor"], values="lift").sort("anchor", "model")
-    out.append(table(wide, {c: num(2) for c in wide.columns if c not in ("model", "anchor")},
-                     key_column="model"))
-    out.append(callout(
-        "<b>Site dominates the geometry, and training data explains about half "
-        "of it.</b> GEM-all, trained on both hospitals, reaches 1.60&times;; "
-        "GEM-mimic-icu, which has seen neither UCMC nor NU, still reaches "
-        "1.29&times;. So part of the separation is the model having learned "
-        "these sites, and part is intrinsic to the data. Phenotype and mortality "
-        "lift stay near 1.1&times; throughout &mdash; the extra structure GEM-all "
-        "carries is site, not physiology."))
-
-    base = paths.output_home / "figures" / "GEM-all" / "anchor-24h"
-    out.append("<h3>GEM-all, 24h anchor</h3>")
-    out.append('<div class="grid2">')
-    for name, caption in (
-        ("umap_site.png", "UMAP coloured by contributing site"),
-        ("umap_phenotype.png", "UMAP coloured by cardiogenic shock phenotype"),
-        ("umap_mortality.png", "UMAP coloured by in-hospital mortality"),
-        ("umap_icu_los.png", "UMAP coloured by ICU length of stay"),
-    ):
-        out.append(figure(base / name, caption))
-    out.append("</div>")
-
-
-def section_site_effect(paths, out: list) -> None:
-    lda_rows = []
-    for anchor in ANCHORS:
-        f = paths.output_home / "tables" / "GEM-all" / f"site_lda_anchor-{anchor}.csv"
-        if f.is_file():
-            lda_rows.append(pl.read_csv(f))
-    if not lda_rows:
-        return
-    out.append('<h2 id="site">4 &middot; Why the sites separate</h2>')
-    lda = pl.concat(lda_rows).select(
-        "anchor", "cv_accuracy", "cv_accuracy_sd", "cv_auc", "majority_baseline", "n"
-    )
-    out.append(
-        "<p>A shrinkage LDA on the 50-d PCA representation, five-fold "
-        "cross-validated so a separable class pair cannot report a free 100%.</p>"
-    )
-    out.append(table(lda, {
-        "cv_accuracy": num(4), "cv_accuracy_sd": num(4), "cv_auc": num(4),
-        "majority_baseline": num(4), "n": thousands,
-    }, key_column="anchor"))
-
-    out.append(callout(
-        "<b>The cause is structural zeros in the vocabulary.</b> UCMC emits 101 "
-        "token types NU never produces &mdash; Braden subscales, CAM, AM-PAC "
-        "&mdash; and 96.5% of UCMC patients carry at least one, though they are "
-        "only 2.8% of its token volume. NU emits 66 UCMC never does, "
-        "<code>CODE//dnr</code> among them. A single occurrence identifies the "
-        "site with certainty, which is what an LDA at 0.995 accuracy is reading. "
-        "Separation survives matching the sites on age, sex, phenotype and "
-        "mortality at 95.7% purity, so it is documentation practice and not "
-        "patient differences.", "warn"))
-
-    base = paths.output_home / "figures" / "GEM-all" / "anchor-24h"
-    out.append(figure(base / "site_token_tornado.png",
-                      "Tokens ranked by absolute difference in per-patient rate"))
-    out.append(figure(base / "site_token_tornado_exclusive.png",
-                      "Tokens one site never records at all"))
-    out.append(figure(base / "site_token_families.png",
-                      "Token-family mix as a share of each site's stream"))
-
-
-def section_correction(paths, out: list) -> None:
-    rows = []
-    for model in MODELS:
-        f = paths.output_home / "tables" / model / "site_correction.csv"
-        if f.is_file():
-            rows.append(pl.read_csv(f).with_columns(model=pl.lit(model)))
-    if not rows:
-        return
-    correction = pl.concat(rows).filter(pl.col("anchor") == "24h")
-    out.append('<h2 id="correction">5 &middot; Can the site effect be removed?</h2>')
-    out.append(
-        "<p>Two affine maps fitted on a training split and judged on held-out "
-        "patients. <b>The AUCs below predict site</b> &mdash; which hospital a "
-        "patient came from &mdash; not any clinical outcome.</p>"
-    )
-    out.append(
-        "<dl class=\"defs\">"
-        "<dt>raw</dt><dd>No correction. The embedding as 02 produced it, "
-        "included so the other two have a reference point.</dd>"
-        "<dt>site-standardized</dt><dd>Per-site z-scoring: for each hospital, "
-        "subtract that hospital's per-dimension mean and divide by its "
-        "standard deviation, both computed on <i>training patients from that "
-        "hospital only</i>. Each site's cloud is independently recentred on "
-        "the origin and rescaled to unit variance in every dimension. It needs "
-        "the site label at apply time, and it removes differences in "
-        "per-feature <i>location and scale</i> and nothing else &mdash; any "
-        "site structure living in the correlations <i>between</i> dimensions "
-        "survives it untouched. It is here as the crude baseline LEACE ought "
-        "to beat.</dd>"
-        "<dt>LEACE</dt><dd>Least-squares concept erasure (Belrose et al., "
-        "2023). The affine map that provably removes all linearly-decodable "
-        "information about site while perturbing the representation as little "
-        "as possible in the least-squares sense. For two sites the erased "
-        "subspace is rank 1 &mdash; a single direction, found in the whitened "
-        "space so the deletion is orthogonal with respect to the data's own "
-        "covariance rather than to the raw axes. Unlike site-standardization "
-        "it is one fixed matrix, applied without knowing the site."
-        + formula(
-            "r(x) = x - S^(1/2) u u' S^(-1/2) (x - mu)",
-            "    u = unit( S^(-1/2) Cov(x, site) ),   S = Cov(x)",
-            "",
-            "guarantee:  Cov(r(X), site) = 0",
-        )
-        + "</dd>"
-        "</dl>"
-    )
-    show = correction.select(
-        "model", "correction", "linear_probe_auc", "nonlinear_probe_auc", "purity_lift"
-    ).sort("model", "correction")
-    out.append(table(show, {
-        "linear_probe_auc": num(3), "nonlinear_probe_auc": num(3), "purity_lift": num(2),
-    }, key_column="model"))
-    out.append(callout(
-        "<b>No affine transformation can clean this space.</b> LEACE drives the "
-        "linear probe to exactly chance, as guaranteed &mdash; but a "
-        "gradient-boosted tree still recovers site at 0.99. Iterating the "
-        "erasure does not help: removing 25 directions instead of one leaves the "
-        "non-linear probe at 0.992 and still keeps 97.5% of the variance, "
-        "because after the first direction there is no linear site signal left "
-        "to find. Site is distributed non-linearly through the representation, "
-        "not held in a low-dimensional subspace.", "warn"))
-    out.append(
-        "<p>For supervised prediction this does not matter (section 6). For "
-        "unsupervised discovery &mdash; asking how groups of patients differ "
-        "&mdash; it matters a great deal, because the contaminated structure is "
-        "exactly what such an analysis reads. Only 370 of 34,142 patients (1.1%) "
-        "currently sit in neighbourhoods where both sites are represented.</p>"
-    )
-
-
-def section_downstream(paths, out: list, logger) -> None:
-    results, stale = read_model_tables(
-        paths,
-        "downstream_tasks.csv",
-        ("task", "evaluation", "auroc", "classifier"),
-        logger,
-    )
-    if results is None:
-        return
-    has_head = True
-    out.append('<h2 id="downstream">6 &middot; Downstream prediction</h2>')
-    out.append(
-        "<p>Three tasks, each anchored at the moment the model read the patient "
-        "and asking what happens in the next 24 hours.</p>"
-    )
-    out.append(
-        "<dl class=\"defs\">"
-        "<dt>clinical baseline</dt><dd>The comparator feature set, so an "
-        "embedding AUROC has something to be judged against. <b>14 features</b>, "
-        "every one the last value recorded <i>at or before</i> the anchor: "
-        "five labs (creatinine, BUN, bicarbonate, platelet count, lactate), "
-        "five vitals (heart rate, SpO<sub>2</sub>, SBP, MAP, respiratory rate), "
-        "norepinephrine-equivalent dose running at the anchor and the number of "
-        "vasoactive agents, plus age and sex. Median-imputed and standardized, "
-        "then the same head as the embedding. Missingness is 6&ndash;8% except "
-        "lactate (19.8%) and MAP (14.0%).<br><br>"
-        "It is strictly leak-free, and it deliberately does <i>not</i> reuse the "
-        "phenotype labs on the cohort table, which are drawn around shock onset "
-        "and for the 24h anchor can fall after it. What it lacks is worth "
-        "weighing against the embedding's margin: no SOFA, no GCS, no urine "
-        "output, and <b>only last values, no trends</b> &mdash; a lactate of 4 "
-        "rising and one falling are identical to it.</dd>"
-        "<dt>eligibility</dt><dd>Each task drops patients for whom it is "
-        "meaningless rather than scoring them as negatives: already ventilated "
-        "for new IMV, on no vasopressor for escalation.</dd>"
-        "</dl>"
-    )
-    if stale:
-        out.append(callout(
-            "<b>Excluded from this section:</b> " + esc("; ".join(stale))
-            + ". Those files predate the current schema; rerun 06 for them.",
-            "warn"))
-
-    arm = (
-        pl.when(pl.col("features") != "embedding").then(pl.lit("clinical baseline"))
-        .otherwise(pl.col("correction"))
-    )
-    results = results.with_columns(arm=arm)
-
-    for anchor in ANCHORS:
-        part = results.filter(pl.col("anchor") == anchor)
-        if part.height == 0:
-            continue
-        out.append(f"<h3>Cross-site transfer &mdash; {anchor} anchor</h3>")
-        cross = part.filter(pl.col("evaluation").str.contains("->"))
-        index = ["task", "evaluation", "model"] + (["classifier"] if has_head else [])
-        wide = cross.pivot(on="arm", index=index, values="auroc").sort(*index)
-        value_cols = [c for c in wide.columns if c not in index]
-        out.append(table(wide, {c: num(3) for c in value_cols}, key_column="task"))
-
-    out.append(callout(
-        "<b>Correction changes nothing, because transfer was never broken.</b> "
-        "Across every cell, LEACE moves AUROC by a mean of −0.0005 and "
-        "per-site standardisation by +0.0001. Cross-site transfer already "
-        "matches within-site performance (mortality NU&rarr;UCMC 0.925 against "
-        "within-UCMC 0.919). The site axis and the outcome axes are close to "
-        "orthogonal, so a supervised model ignores site without being told to."))
-
-    if has_head:
-        arm_label = (
-            pl.when(pl.col("features") != "embedding")
-            .then(pl.lit("clinical baseline"))
-            .when(pl.col("correction") == "raw")
-            .then(pl.lit("embedding, uncorrected"))
-            .when(pl.col("correction") == "site-standardized")
-            .then(pl.lit("embedding, site-standardized"))
-            .otherwise(pl.lit("embedding, LEACE"))
-        )
-        order = {
-            "clinical baseline": 0,
-            "embedding, uncorrected": 1,
-            "embedding, site-standardized": 2,
-            "embedding, LEACE": 3,
-        }
-
-        def head_table(frame: pl.DataFrame, index: list[str]) -> pl.DataFrame:
-            wide = (
-                frame.with_columns(arm=arm_label)
-                .group_by(*index, "arm", "classifier")
-                .agg(auroc=pl.col("auroc").mean())
-                .pivot(on="classifier", index=index + ["arm"], values="auroc")
-            )
-            if "gbm" not in wide.columns or "logistic" not in wide.columns:
-                return wide
-            # pivot orders columns by first appearance in the data, so the two
-            # heads can swap places between tables; pin the order explicitly
-            return (
-                wide.with_columns(
-                    _o=pl.col("arm").replace_strict(order, default=9),
-                )
-                .sort(*index, "_o")
-                .select(
-                    *index,
-                    "arm",
-                    "logistic",
-                    "gbm",
-                    (pl.col("gbm") - pl.col("logistic")).alias("gbm - logistic"),
-                )
-            )
-
-        cross = results.filter(pl.col("evaluation").str.contains("->"))
-        within = results.filter(pl.col("evaluation").str.starts_with("within:"))
-
-        out.append("<h3>Linear vs non-linear head, by correction</h3>")
-        out.append(
-            "<p>Mean AUROC over both transfer directions and all three "
-            "checkpoints. Rows are the feature set and the correction applied "
-            "to it; columns are the prediction head on top.</p>"
-        )
-        table_cross = head_table(cross, ["task"])
-        value_cols = {c: num(3) for c in table_cross.columns if c not in ("task", "arm")}
-        out.append(table(table_cross, value_cols, key_column="arm"))
-
-        out.append(callout(
-            "<b>Non-linearity helps the clinical baseline and hurts the "
-            "embedding.</b> On raw labs and vitals a tree gains a great deal "
-            "&mdash; most of all for new intubation, where a linear model on "
-            "tabular features is close to useless. On the embedding it is never "
-            "better. The reading is that the model has already done the "
-            "non-linear work: the representation arrives with the interactions "
-            "folded in, so a linear head reads it cleanly and a tree only adds "
-            "variance. Note this is the opposite of what holds for site, which "
-            "after LEACE is recoverable <i>only</i> non-linearly &mdash; outcome "
-            "information in these embeddings is linearly accessible while site "
-            "information is not, which is why a linear downstream model ignores "
-            "site for free. Correction moves nothing in either column."))
-
-        out.append("<h3>Same, within site</h3>")
-        out.append(
-            "<p>Train and test inside one hospital, averaged over both sites "
-            "and all three checkpoints &mdash; free of any site confounding.</p>"
-        )
-        table_within = head_table(within, ["task"])
-        out.append(table(table_within,
-                         {c: num(3) for c in table_within.columns
-                          if c not in ("task", "arm")},
-                         key_column="arm"))
-
-        out.append("<h3>By checkpoint, cross-site</h3>")
-        detail = head_table(cross, ["task", "model"])
-        out.append(table(detail,
-                         {c: num(3) for c in detail.columns
-                          if c not in ("task", "model", "arm")},
-                         key_column="arm"))
-
-def section_token_space(paths, out: list) -> None:
-    figure_dir = paths.output_home / "figures" / "GEM-all"
-    figure_file = figure_dir / "token_space_umap_full.png"
-    ordering_file = paths.output_home / "tables" / "GEM-all" / "token_quantile_ordering.csv"
-    if not figure_file.is_file():
-        return
-    out.append('<h2 id="tokens">7 &middot; What the model learned about clinical concepts</h2>')
+    out.append('<h2 id="tokens">2 &middot; Token embeddings</h2>')
     out.append(
         "<p>A UMAP of the embedding table itself &mdash; one point per "
-        "vocabulary entry, not per patient. It asks whether the model "
-        "organised clinical concepts coherently during training, which is a "
-        "precondition for reading anything into the patient representations "
-        "built from them. Drawn as small multiples because nine families "
-        "cannot be told apart by colour in a single scatter, and in two "
-        "versions because one view cannot do both jobs: the first shares "
-        "common axes so families can be compared with each other and with the "
-        "rest of the vocabulary, the second crops each panel to its own family "
-        "so the measurements inside it separate.</p>"
+        "vocabulary entry, not per patient &mdash; asking whether the model "
+        "organised clinical concepts coherently during training. Colour "
+        "distinguishes measurements within a family; light grey is the rest of "
+        "the vocabulary.</p>"
     )
-    out.append(figure(
-        figure_dir / "token_space_umap_full.png",
-        "Full embedding space, all panels on common axes",
-    ))
-    out.append(figure(
-        figure_dir / "token_space_umap_zoom.png",
-        "The same panels, each cropped to its own family's extent",
-    ))
+    out.append(tabs([
+        ("Full space", figure(full, "All panels on common axes")),
+        ("Zoomed", figure(zoom, "Each panel cropped to its own family")),
+    ]))
 
+    ordering_file = paths.output_home / "tables" / "GEM-all" / "token_quantile_ordering.csv"
     if ordering_file.is_file():
         ordering = pl.read_csv(ordering_file)
         out.append("<h3>Did it learn that quantile bins are ordered?</h3>")
         out.append(
             "<p>cocoa splits every numeric measurement into deciles, so "
             "<code>lactate_Q0</code> through <code>_Q9</code> reach the model as "
-            "ten unrelated symbols. Nothing tells it they are ordered, or even "
-            "that they belong together. Below is the Spearman correlation "
-            "between quantile distance and cosine distance between the token "
-            "vectors, measured in the native 1024-d space.</p>"
+            "ten unrelated symbols; nothing tells it they are ordered or even "
+            "related. Below is the Spearman correlation between quantile "
+            "distance and cosine distance between the token vectors, in the "
+            "native 1024-d space.</p>"
         )
         out.append(callout(
             f"<b>It recovered the ordering from context alone.</b> Across "
             f"{ordering.height} binned measurements the median Spearman is "
             f"<b>{ordering['spearman'].median():.3f}</b>, positive for "
-            f"{(ordering['spearman'] > 0).mean():.0%} of them. This is the "
-            "clearest evidence here that the model learned real physiology and "
-            "not only bookkeeping &mdash; and it sits awkwardly beside section "
-            "4, since it evidently learned both the clinical structure and "
-            "which hospital it was reading."))
-        out.append(
-            "<p>Measured in the projection instead, the same statistic reads "
-            f"{ordering['spearman_umap'].median():.3f} "
-            f"({(ordering['spearman_umap'] > 0).mean():.0%} positive) &mdash; "
-            "lower, because UMAP discards ordering it has no room for rather "
-            "than inventing it. <code>troponin_t</code> is the extreme case at "
-            "0.971 natively against 0.214 in two dimensions. The figure above "
-            "is therefore a conservative view of the structure; the table below "
-            "is the measurement.</p>"
-        )
-        top = ordering.head(8).select(
-            "measurement", "n_bins", "spearman", "spearman_umap"
-        )
-        out.append(table(top, {"n_bins": thousands, "spearman": num(3),
-                               "spearman_umap": num(3)},
-                         key_column="measurement"))
+            f"{(ordering['spearman'] > 0).mean():.0%} of them. Measured in the "
+            f"2-d projection instead it reads "
+            f"{ordering['spearman_umap'].median():.3f} &mdash; lower, because "
+            "UMAP discards ordering it has no room for rather than inventing "
+            "it, so the figures above understate the structure."))
+        out.append(table(
+            ordering.head(10).select("measurement", "n_bins", "spearman",
+                                     "spearman_umap"),
+            {"n_bins": thousands, "spearman": num(3), "spearman_umap": num(3)},
+            key_column="measurement"))
 
 
-def section_trajectories(paths, out: list) -> None:
+def section_patient_embeddings(paths, out: list) -> None:
     home = paths.output_home / "figures" / "GEM-all" / "trajectory"
-    if not home.is_dir() or not any(home.glob("*.png")):
+    panels = [
+        (label, figure(home / f"trajectory_label_{key}.png"))
+        for key, label in LABELLINGS
+    ]
+    if not any(body for _, body in panels):
         return
-    out.append('<h2 id="trajectories">8 &middot; Trajectories through the latent space</h2>')
+    out.append('<h2 id="patients">3 &middot; Patient embeddings</h2>')
     out.append(
-        "<p>Each patient is embedded repeatedly, every 6 hours from 24 hours "
-        "before cardiogenic shock onset to 48 hours after, so one patient "
-        "becomes a path rather than a point. A patient who dies or is "
-        "discharged simply stops producing tokens, so their path ends rather "
-        "than being extrapolated.</p>"
+        "<p>Every patient embedded every 6 hours from 24 h before cardiogenic "
+        "shock onset to 48 h after, so one patient contributes a sequence of "
+        "points rather than one. All labellings share a single UMAP, fitted "
+        "once over every patient-timepoint, so positions are comparable between "
+        "tabs. Continuous variables are drawn as hexagon local means: with "
+        "75,000 overlapping points, individual markers read as noise whatever "
+        "the colour scale.</p>"
     )
-    out.append('<div class="grid2">')
-    for name, caption in (
-        ("trajectory_time.png", "Patient-timepoints coloured by hours from shock onset"),
-        ("trajectory_phenotype.png", "The same points coloured by phenotype"),
-        ("trajectory_site.png", "The same points coloured by contributing site"),
-    ):
-        out.append(figure(home / name, caption))
-    out.append("</div>")
+    out.append(tabs(panels))
+    out.append(figure(home / "trajectory_labels.png",
+                      "All eight labellings together, for comparison"))
 
-    out.append("<h3>Flow field</h3>")
+
+def section_patient_paths(paths, out: list) -> None:
+    home = paths.output_home / "figures" / "GEM-all" / "trajectory"
+    panels = [
+        (label, figure(home / f"patient_paths_{key}.png"))
+        for key, label in LABELLINGS
+    ]
+    if not any(body for _, body in panels):
+        return
+    out.append('<h2 id="paths">4 &middot; Individual trajectories</h2>')
+    out.append(
+        "<p>Five patients drawn at random from those with at least five "
+        "timepoints, each shown in its own panel against the same cloud, with "
+        "hours relative to shock onset annotated on the path. The tabs change "
+        "what the cloud behind them is coloured by; the five patients are the "
+        "same throughout.</p>"
+    )
+    out.append(tabs(panels))
+    out.append(callout(
+        "Read these against section 5. Individual paths are short and largely "
+        "confined to one region: patients move <i>within</i> a neighbourhood "
+        "rather than migrating across the space as shock develops, which is "
+        "what the flow field's near-zero gradient alignment says quantitatively."))
+
+
+def section_flow(paths, out: list) -> None:
+    home = paths.output_home / "figures" / "GEM-all" / "trajectory"
+    alignment_file = paths.output_home / "tables" / "GEM-all" / "trajectory_flow_alignment.csv"
+    if not (home / "trajectory_flow_umap.png").is_file():
+        return
+    out.append('<h2 id="flow">5 &middot; Latent flow</h2>')
     out.append(
         "<p>The mean displacement between consecutive timepoints, drawn as a "
-        "streamplot after scVelo's velocity embedding. One difference is worth "
-        "stating, and it favours this setting: RNA velocity must <i>infer</i> "
-        "direction from spliced and unspliced read ratios, because a cell is "
-        "destroyed when measured and only one snapshot per cell exists. We see "
-        "the same patient at t and t+6h, so the displacement is "
-        "<b>measured, not estimated</b>.</p>"
+        "streamplot after scVelo's velocity embedding. One difference favours "
+        "this setting: RNA velocity must <i>infer</i> direction from spliced and "
+        "unspliced read ratios, because a cell is destroyed when measured and "
+        "only one snapshot exists per cell. We observe the same patient at t and "
+        "t+6h, so the displacement is <b>measured, not estimated</b>.</p>"
     )
+    out.append(tabs([
+        ("UMAP", figure(home / "trajectory_flow_umap.png",
+                        "Flow field in UMAP space")),
+        ("PCA (cross-check)", figure(home / "trajectory_flow_pca.png",
+                                     "The same field in a linear space")),
+        ("Died", figure(home / "trajectory_flow_died.png",
+                        "Patients who died in hospital")),
+        ("Survived", figure(home / "trajectory_flow_survived.png",
+                            "Patients who survived")),
+        ("Physiology underlay", figure(home / "trajectory_flow_state.png",
+                                       "The same field over each variable")),
+    ]))
+
     out.append(callout(
-        "The caveat is the projection, not the velocity. UMAP is not a metric "
-        "embedding, so a displacement in 2-d need not be proportional to the "
-        "displacement in 1024-d. The same field is therefore computed in PCA "
-        "space, where distances are linear; if the two disagree, the UMAP field "
-        "is an artefact of the layout rather than a feature of the data."))
+        "<b>Patients do not follow these lines.</b> A streamplot integrates its "
+        "field and renders far more orderly than the data beneath it, so the "
+        "figures need the numbers below to be read honestly. Directional "
+        "coherence &mdash; the summed displacement in a cell over the sum of "
+        "the displacement magnitudes &mdash; is 0.61 in UMAP and 0.48 in PCA "
+        "against roughly 0.1 for pure noise: about half the motion is a "
+        "consistent direction and half is scatter. More importantly, the flow "
+        "is almost unrelated to any physiological gradient, so the arrows are "
+        "local circulation rather than directed deterioration.", "warn"))
+
+    if alignment_file.is_file():
+        alignment = pl.read_csv(alignment_file)
+        out.append("<h3>Where patients sit, and where they go</h3>")
+        out.append(
+            "<p>Two different questions, and they disagree sharply. "
+            "<b>R&sup2;</b> is how much of a variable a patient's position "
+            "accounts for (30-nearest-neighbour regression, held out). "
+            "<b>cos</b> is the mean cosine between the flow and that variable's "
+            "spatial gradient: +1 would mean patients move toward higher values, "
+            "0 that the flow ignores it.</p>"
+        )
+        out.append(table(
+            alignment.sort("position_r2", descending=True).select(
+                "label", "position_r2", "flow_gradient_cosine", "cells"
+            ),
+            {"position_r2": num(3), "flow_gradient_cosine": num(3),
+             "cells": thousands},
+            key_column="label"))
+        out.append(
+            "<p>The space is strongly stratified by clinical state &mdash; "
+            "position alone predicts ventilation at R&sup2; 0.93 and GCS at "
+            "0.73 &mdash; while every flow cosine sits within &plusmn;0.14 of "
+            "zero. The embedding is a good description of <i>state</i> and a "
+            "poor description of <i>trajectory</i> at six-hour resolution. "
+            "Cross-sectional comparisons between regions are well founded; "
+            "claims that patients move toward a bad region are not supported "
+            "by this field.</p>"
+        )
+
+
+def section_sites(paths, out: list) -> None:
+    shared = paths.output_home / "figures" / "shared"
+    if not (shared / "site_features.png").is_file():
+        return
+    out.append('<h2 id="sites">6 &middot; UCMC versus NU</h2>')
     out.append(
-        "<p><b>How much of this is real.</b> A streamplot integrates a field "
-        "and so renders far more orderly than the scatter beneath it; the "
-        "number to check is directional coherence, the ratio of the summed "
-        "displacement in a cell to the sum of the displacement magnitudes. "
-        "One means the patients in a cell all move alike, zero that they "
-        "cancel. Pure noise over <i>n</i> vectors gives roughly 1/&radic;<i>n</i>, "
-        "so about 0.1 here. The observed values are <b>0.61 in UMAP</b> and "
-        "<b>0.48 in PCA</b>: roughly half the motion is a consistent direction "
-        "and half is scatter, and the streamlines draw the consistent half. "
-        "Nor is the motion merely the prefix growing longer &mdash; the "
-        "correlation between the change in token count and the step is "
-        "&minus;0.003 on PC1 and +0.18 on PC2. Patients move about 8% of the "
-        "cloud's width every six hours in UMAP, 27% in PCA.</p>"
+        "<p>The embedding separates the two sites almost perfectly (section 7), "
+        "so the first question is whether the patients differ that much. "
+        "Distributions and proportions below, in each institution's own "
+        "colours.</p>"
     )
-    out.append('<div class="grid2">')
-    for name, caption in (
-        ("trajectory_flow_umap.png", "Flow field in UMAP space"),
-        ("trajectory_flow_pca.png", "The same field in PCA space, as a cross-check"),
-        ("trajectory_flow_died.png", "Flow among patients who died in hospital"),
-        ("trajectory_flow_survived.png", "Flow among patients who survived"),
-    ):
-        out.append(figure(home / name, caption))
-    out.append("</div>")
+    out.append(figure(shared / "site_features.png"))
+
+    lda_rows = []
+    for anchor in ANCHORS:
+        f = paths.output_home / "tables" / "GEM-all" / f"site_lda_anchor-{anchor}.csv"
+        if f.is_file():
+            lda_rows.append(pl.read_csv(f))
+    tornado = paths.output_home / "figures" / "GEM-all" / "anchor-24h"
+    out.append("<h3>Why they separate</h3>")
+    out.append(tabs([
+        ("Differential tokens", figure(
+            tornado / "site_token_tornado.png",
+            "Ranked by absolute difference in per-patient rate")),
+        ("Tokens one site never records", figure(
+            tornado / "site_token_tornado_exclusive.png",
+            "Structural zeros in the vocabulary")),
+        ("Token-family mix", figure(tornado / "site_token_families.png")),
+    ]))
+    out.append(callout(
+        "<b>The cause is structural zeros in the vocabulary, not patient "
+        "differences.</b> UCMC emits 101 token types NU never produces &mdash; "
+        "Braden subscales, CAM, AM-PAC &mdash; carried by 96.5% of its "
+        "patients though only 2.8% of its token volume; NU emits 66 UCMC never "
+        "does, <code>CODE//dnr</code> among them. A single occurrence identifies "
+        "the site with certainty. Separation survives matching the sites on "
+        "age, sex, phenotype and mortality at 95.7% purity.", "warn"))
+    if lda_rows:
+        out.append(table(
+            pl.concat(lda_rows).select("anchor", "cv_accuracy", "cv_auc",
+                                       "majority_baseline", "n"),
+            {"cv_accuracy": num(4), "cv_auc": num(4),
+             "majority_baseline": num(4), "n": thousands},
+            key_column="anchor"))
+
+
+def section_models(paths, out: list, logger) -> None:
+    shared = paths.output_home / "figures" / "shared"
+    results, stale = read_model_tables(
+        paths, "downstream_tasks.csv",
+        ("task", "evaluation", "auroc", "classifier", "correction"), logger,
+    )
+    purity_rows = []
+    for model in MODELS:
+        for anchor in ANCHORS:
+            f = paths.output_home / "tables" / model / f"neighbourhood_purity_anchor-{anchor}.csv"
+            if f.is_file():
+                purity_rows.append(pl.read_csv(f).with_columns(model=pl.lit(model)))
+    if results is None and not purity_rows:
+        return
+
+    out.append('<h2 id="models">7 &middot; Models</h2>')
+    out.append(
+        "<p>Three frozen checkpoints of the same architecture, differing only "
+        "in what they were trained on: <b>GEM-all</b> on MIMIC + UCMC + NU, "
+        "<b>GEM-ucmc-icu</b> on UCMC alone, <b>GEM-mimic-icu</b> on MIMIC alone "
+        "&mdash; so GEM-mimic-icu has seen neither of the sites analysed here.</p>"
+    )
+
+    target_figure = shared / "target_umaps_anchor-24h.png"
+    if target_figure.is_file():
+        out.append("<h3>What each checkpoint separates</h3>")
+        out.append(figure(
+            target_figure,
+            "Each checkpoint's own UMAP at the 24h anchor, coloured by the "
+            "prediction targets. Rows are targets, columns are checkpoints.",
+        ))
+        out.append(callout(
+            "GEM-all splits the two sites into separate blobs; the single-site "
+            "checkpoints intermix them in one cloud. None of the three "
+            "separates mortality, new ventilation or pressor escalation "
+            "visually &mdash; which is the point of the tables below: visible "
+            "separation and predictive value are not the same thing."))
+
+    if purity_rows:
+        purity = pl.concat(purity_rows).pivot(
+            on="label", index=["anchor", "model"], values="lift"
+        ).sort("anchor", "model")
+        out.append("<h3>Neighbourhood purity (lift over chance)</h3>")
+        out.append(table(
+            purity, {c: num(2) for c in purity.columns
+                     if c not in ("anchor", "model")}, key_column="model"))
+        out.append(
+            "<p>Roughly half of GEM-all's site separation comes from having "
+            "trained on both hospitals: a checkpoint that saw neither still "
+            "reaches 1.27&times;, which is the intrinsic data difference. "
+            "Phenotype and mortality lift stay near 1.1&ndash;1.2&times; "
+            "throughout, so the extra structure GEM-all carries is site, not "
+            "physiology.</p>"
+        )
+
+    if results is None:
+        return
+    if stale:
+        out.append(callout(
+            "<b>Excluded:</b> " + esc("; ".join(stale))
+            + ". Those files predate the current schema; rerun 06 for them.",
+            "warn"))
+
+    arm = (
+        pl.when(pl.col("features") != "embedding").then(pl.lit("clinical baseline"))
+        .when(pl.col("correction") == "raw").then(pl.lit("embedding"))
+        .when(pl.col("correction") == "site-standardized")
+        .then(pl.lit("site-corrected"))
+        .otherwise(pl.lit("affine (LEACE)"))
+    )
+    results = results.with_columns(arm=arm)
+    arm_order = {"clinical baseline": 0, "embedding": 1,
+                 "site-corrected": 2, "affine (LEACE)": 3}
+
+    def performance(part: pl.DataFrame) -> str:
+        wide = (
+            part.group_by("task", "arm", "classifier")
+            .agg(auroc=pl.col("auroc").mean())
+            .pivot(on="classifier", index=["task", "arm"], values="auroc")
+        )
+        if "gbm" not in wide.columns or "logistic" not in wide.columns:
+            return ""
+        wide = (
+            wide.with_columns(_o=pl.col("arm").replace_strict(arm_order, default=9))
+            .sort("task", "_o")
+            .select("task", "arm", "logistic", "gbm",
+                    (pl.col("gbm") - pl.col("logistic")).alias("gbm - logistic"))
+        )
+        return table(wide, {c: num(3) for c in
+                            ("logistic", "gbm", "gbm - logistic")},
+                     key_column="arm")
+
+    out.append("<h3>Prediction performance</h3>")
+    out.append(
+        "<p>AUROC for the three 24-hour tasks. <b>One site out</b> trains on "
+        "one hospital and tests on the other, averaged over both directions; "
+        "<b>pooled split</b> trains and tests on a random split of both sites "
+        "together. Rows are the feature set, columns the prediction head.</p>"
+    )
+    model_tabs = []
+    for model in MODELS:
+        part = results.filter(pl.col("model") == model)
+        if part.height == 0:
+            continue
+        inner = tabs([
+            ("One site out", performance(
+                part.filter(pl.col("evaluation").str.contains("->")))),
+            ("Pooled split", performance(
+                part.filter(pl.col("evaluation") == "pooled"))),
+            ("Within site", performance(
+                part.filter(pl.col("evaluation").str.starts_with("within:")))),
+        ])
+        model_tabs.append((model, inner))
+    out.append(tabs(model_tabs))
+
+    out.append(callout(
+        "<b>Both hypotheses hold.</b> The two heads agree on the embedding to "
+        "within a few thousandths, and the gradient-boosted head is if anything "
+        "slightly worse &mdash; the representation arrives with the "
+        "non-linearity already folded in, so a tree only adds variance. It does "
+        "help the clinical baseline substantially, most of all for new "
+        "ventilation. And raw, site-corrected and affine-erased embeddings are "
+        "indistinguishable: correction moves AUROC by a mean of &minus;0.0005, "
+        "because cross-site transfer was never broken. The site axis and the "
+        "outcome axes are close to orthogonal, so a supervised model ignores "
+        "site without being told to."))
 
 
 def section_methods(paths, cfg, out: list) -> None:
@@ -804,24 +726,30 @@ def section_methods(paths, cfg, out: list) -> None:
         "are usable, so UCMC's MCS ascertainment is PCS-only while NU's uses "
         "both. 01 warns on per-format coverage.</li>"
         "<li><b>AMS is GCS-based</b> and cannot distinguish organ dysfunction "
-        "from sedation in a ventilated ICU population.</li>"
+        "from sedation in a ventilated population.</li>"
         "<li><b>Phenotypes are a refit</b>, not a transfer: the published "
         "centroids are not available, so k-means is refit and labelled from "
-        "centroid profiles. The recovered mortality ordering matches the paper's."
-        "</li>"
+        "centroid profiles.</li>"
+        "<li><b>The clinical baseline sees only last values, no trends.</b> A "
+        "lactate of 4 rising and one falling are identical to it, so some of "
+        "the embedding's margin is trajectory information the baseline "
+        "structurally cannot access.</li>"
         "<li><b>PCA and UMAP are refit on whatever cohort is present</b>, so "
-        "coordinates shift when a site is added. Figures are not comparable "
+        "coordinates shift when a site is added and figures are not comparable "
         "across runs with different site membership.</li>"
+        "<li><b>Site colours are institutional</b> and clear the colourblind "
+        "gates, but UCMC and NU sit at almost identical lightness: they "
+        "separate by hue only and are indistinguishable in greyscale.</li>"
         "</ul>"
     )
 
 
-# ------------------------------------------------------------------- driver
+# =================================================================== driver
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--open", action="store_true", help="open in a browser")
+    parser.add_argument("--open", action="store_true")
     args = parser.parse_args()
 
     paths = load_paths()
@@ -831,13 +759,12 @@ def main() -> None:
 
     out: list[str] = []
     section_cohort(paths, cfg, out)
-    section_model(paths, out)
-    section_embedding(paths, out)
-    section_site_effect(paths, out)
-    section_correction(paths, out)
-    section_downstream(paths, out, logger)
-    section_token_space(paths, out)
-    section_trajectories(paths, out)
+    section_tokens(paths, out)
+    section_patient_embeddings(paths, out)
+    section_patient_paths(paths, out)
+    section_flow(paths, out)
+    section_sites(paths, out)
+    section_models(paths, out, logger)
     section_methods(paths, cfg, out)
 
     stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -850,17 +777,17 @@ def main() -> None:
         ) + ")"
     else:
         headline = "no cohort table"
+
     toc = "".join(
         f'<li><a href="#{anchor}">{label}</a></li>'
         for anchor, label in (
             ("cohort", "1 &middot; Cohort"),
-            ("model", "2 &middot; Models"),
-            ("embedding", "3 &middot; Embedding space"),
-            ("site", "4 &middot; Why the sites separate"),
-            ("correction", "5 &middot; Can site be removed?"),
-            ("downstream", "6 &middot; Downstream prediction"),
-            ("tokens", "7 &middot; Learned concepts"),
-            ("trajectories", "8 &middot; Trajectories"),
+            ("tokens", "2 &middot; Token embeddings"),
+            ("patients", "3 &middot; Patient embeddings"),
+            ("paths", "4 &middot; Individual trajectories"),
+            ("flow", "5 &middot; Latent flow"),
+            ("sites", "6 &middot; UCMC versus NU"),
+            ("models", "7 &middot; Models"),
             ("methods", "Methods &amp; caveats"),
         )
     )
@@ -875,12 +802,14 @@ def main() -> None:
 <p class="meta">Generated {stamp} &middot; {headline}</p>
 <ul class="toc">{toc}</ul>
 {''.join(out)}
-</div></body></html>"""
+</div><script>{script()}</script></body></html>"""
 
     destination = paths.output_home / "report.html"
     destination.write_text(document, encoding="utf-8")
-    size = destination.stat().st_size / 1e6
-    logger.info(f"wrote {destination} ({size:.1f} MB)")
+    logger.info(
+        f"wrote {destination} ({destination.stat().st_size / 1e6:.1f} MB, "
+        f"{_TAB_GROUP[0]} tab groups)"
+    )
     if args.open:
         webbrowser.open(destination.as_uri())
 
