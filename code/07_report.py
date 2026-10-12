@@ -375,24 +375,86 @@ def section_cohort(paths, cfg, out: list) -> None:
         }, key_column="cs_phenotype"))
 
 
+#: token families, in the order their figures are stacked
+TOKEN_FAMILIES = [
+    ("labs", "Labs"),
+    ("vitals", "Vitals"),
+    ("medications", "Medications"),
+    ("respiratory", "Respiratory"),
+    ("assessments", "Assessments"),
+    ("severity-events", "Severity &amp; events"),
+    ("location-admin", "Location &amp; admin"),
+    ("demographics", "Demographics"),
+    ("other", "Other"),
+]
+
+
 def section_tokens(paths, out: list) -> None:
     home = paths.output_home / "figures" / "GEM-all"
-    zoom = home / "token_space_umap_zoom.png"
-    full = home / "token_space_umap_full.png"
-    if not (zoom.is_file() or full.is_file()):
+    panels = [
+        (label, home / f"token_space_{key}.png") for key, label in TOKEN_FAMILIES
+    ]
+    panels = [(label, path) for label, path in panels if path.is_file()]
+    if not panels:
         return
     out.append('<h2 id="tokens">2 &middot; Token embeddings</h2>')
     out.append(
         "<p>A UMAP of the embedding table itself &mdash; one point per "
         "vocabulary entry, not per patient &mdash; asking whether the model "
-        "organised clinical concepts coherently during training. Colour "
-        "distinguishes measurements within a family; light grey is the rest of "
-        "the vocabulary.</p>"
+        "organised clinical concepts coherently during training. One figure per "
+        "family: the whole vocabulary on the left with the zoom window drawn "
+        "on it, that window enlarged on the right. Colour distinguishes "
+        "measurements within the family; light grey is the rest of the "
+        "vocabulary.</p>"
     )
-    out.append(tabs([
-        ("Full space", figure(full, "All panels on common axes")),
-        ("Zoomed", figure(zoom, "Each panel cropped to its own family")),
-    ]))
+
+    out.append("<h3>What a single point is</h3>")
+    out.append(
+        "<p>Not a one-hot vector. The one-hot is the <i>input</i> to the "
+        "embedding lookup; the point is the learned 1024-float row it "
+        "selects.</p>"
+    )
+    out.append(formula(
+        "embed(onehot_i)  =  onehot_i @ W_E  =  W_E[i]",
+        "",
+        "W_E : 1344 x 1024, learned       W_E[i] : the plotted point",
+    ))
+    out.append(
+        '<dl class="defs">'
+        "<dt>It starts as noise</dt><dd>At initialisation these rows are "
+        "random, so every bit of structure in these figures was learned, and "
+        "learned from one signal only: predicting the next token. Two tokens "
+        "end up near each other because they occur in similar contexts and are "
+        "followed by similar events. That is why the decile ordering below "
+        "emerges at all &mdash; <code>lactate_Q8</code> and "
+        "<code>lactate_Q9</code> arise in similar situations and predict "
+        "similar continuations.</dd>"
+        "<dt>It does double duty</dt><dd>The checkpoint sets "
+        "<code>tie_word_embeddings: true</code>, so the same row is both what "
+        "the model adds to the residual stream on reading that token and the "
+        "direction whose dot product with the hidden state gives that token's "
+        "output logit. &ldquo;Nearby&rdquo; therefore means <i>plays a similar "
+        "predictive role</i>.</dd>"
+        "<dt>The numeric value never enters directly</dt><dd>"
+        "<code>LAB-RES//sodium_Q7</code> carries no information that 7 exceeds "
+        "6 beyond what the model inferred from context. And there is no patient "
+        "in the vector: it is a property of the vocabulary, averaged over every "
+        "training context in which that token appeared.</dd>"
+        "</dl>"
+    )
+    out.append(callout(
+        "<b>So distance here is predictive-role similarity, not clinical "
+        "similarity.</b> <code>LAB-ORD//sodium</code> and "
+        "<code>LAB-ORD//potassium</code> sit close together largely because "
+        "they are on the same basic metabolic panel and get ordered in the same "
+        "breath &mdash; that is panel structure, not physiology. Reading these "
+        "clusters as statements about disease biology would overclaim; they are "
+        "statements about what tends to be recorded together and what tends to "
+        "follow.", "warn"))
+
+    out.append("<h3>By family</h3>")
+    for label, path in panels:
+        out.append(figure(path, label.replace("&amp;", "&")))
 
     ordering_file = paths.output_home / "tables" / "GEM-all" / "token_quantile_ordering.csv"
     if ordering_file.is_file():

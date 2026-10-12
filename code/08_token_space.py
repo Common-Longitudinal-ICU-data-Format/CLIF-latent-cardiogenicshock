@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import pathlib
+import re
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -148,136 +149,123 @@ def group_of(family: str) -> str:
     return "other"
 
 
-def plot_token_space(
+def slug(group: str) -> str:
+    """filename-safe form of a family name"""
+    return re.sub(r"[^a-z0-9]+", "-", group.lower()).strip("-")
+
+
+def plot_family(
     coords: np.ndarray,
     meta: pl.DataFrame,
+    group: str,
     out_path: pathlib.Path,
     title: str,
     logger,
-    zoom: bool = True,
 ) -> None:
     """
-    small multiples of the token space, one panel per clinical family
+    one family, as a pair: the whole space on the left, the family zoomed on
+    the right, with the zoom window drawn on the left panel
 
-    Within a panel, points are coloured by *measurement* rather than by family
-    -- `RESP//peep_set` apart from `RESP//imv` -- because the question a reader
-    has in front of a family panel is which concepts it contains and whether
-    they separate, and a single colour cannot answer that.
+    Paired rather than tabbed because the two panels answer halves of the same
+    question -- where in the vocabulary this family sits, and what is inside it
+    -- and flipping between them loses the correspondence. The rectangle is the
+    link between the two.
 
-    Written in two versions, because one view cannot do both jobs. Zoomed,
-    each panel is cropped to its own family's extent and the measurements
-    inside separate; a family occupying a small corner of the global layout
-    would otherwise collapse into a single blob. Unzoomed, every panel spans
-    the whole space on common axes, so families are comparable with each other
-    and the rest of the vocabulary stays in view.
-
-    Identity is carried by the legend over a zoomed layout, not by hue alone:
-    eight slots exceed what the all-pairs colour gate supports in a scatter,
-    so the legend is the secondary encoding that makes them legible.
+    Within the family, colour distinguishes measurements: the leading eight by
+    frequency, with the tail folded into one grey series. Identity is carried
+    by the legend over a zoomed layout, not by hue alone, since eight slots
+    exceed what the all-pairs colour gate supports in a scatter.
     """
-    groups = [g for g in list(FAMILY_GROUPS) + ["other"]
-              if (meta["group"] == g).any()]
-    columns = 3
-    rows = int(np.ceil(len(groups) / columns))
-    figure, axes = plt.subplots(
-        rows, columns, figsize=(4.0 * columns, 3.5 * rows), squeeze=False
-    )
-    # matched to the background marks: at the previous size the dense
-    # families overlapped into solid blobs and the structure inside them was
-    # unreadable, which defeats colouring by measurement at all
-    sizes = 3.5 + 5.5 * (
-        np.log1p(meta["n"].to_numpy()) / np.log1p(meta["n"].max())
-    ) ** 2
     group_values = np.asarray(meta["group"].to_list())
     counts = meta["n"].to_numpy()
     stems = np.asarray(
         meta.with_columns(stem=pl.col("token").str.replace(r"_Q\d+$", ""))["stem"]
         .to_list()
     )
+    mask = group_values == group
+    local = np.flatnonzero(mask)
+    if local.size == 0:
+        return
 
-    for position, group in enumerate(groups):
-        ax = axes[position // columns][position % columns]
-        mask = group_values == group
-        local = np.flatnonzero(mask)
+    sizes = 3.5 + 5.5 * (np.log1p(counts) / np.log1p(counts.max())) ** 2
 
-        # rank this family's measurements by how often they occur, colour the
-        # leading few, and fold the tail into one grey series
-        by_stem: dict[str, np.ndarray] = {}
-        for stem in dict.fromkeys(stems[local]):
-            by_stem[stem] = local[stems[local] == stem]
-        ranked = sorted(by_stem, key=lambda s: -counts[by_stem[s]].sum())
-        shown, folded = ranked[: len(CATEGORICAL_8)], ranked[len(CATEGORICAL_8):]
+    by_stem: dict[str, np.ndarray] = {}
+    for stem in dict.fromkeys(stems[local]):
+        by_stem[stem] = local[stems[local] == stem]
+    ranked = sorted(by_stem, key=lambda t: -counts[by_stem[t]].sum())
+    shown, folded = ranked[: len(CATEGORICAL_8)], ranked[len(CATEGORICAL_8):]
 
-        # every other token, so the surrounding space stays visible inside
-        # the zoom window rather than the family floating on blank paper
+    px, py = coords[local, 0], coords[local, 1]
+    # Squared about the family's centre: a family spread wide and flat gives a
+    # window of that shape, and under equal aspect the zoom panel then fills
+    # horizontally and wastes most of its height. A square window fills a
+    # square panel, and keeps the aspect honest in both panels.
+    span = max(np.ptp(px), np.ptp(py), 1.0) * 1.18
+    mid_x, mid_y = (px.min() + px.max()) / 2, (py.min() + py.max()) / 2
+    window = (mid_x - span / 2, mid_x + span / 2, mid_y - span / 2, mid_y + span / 2)
+
+    figure, axes = plt.subplots(
+        1, 3, figsize=(11.2, 4.2),
+        gridspec_kw={"width_ratios": [4.0, 4.0, 1.5], "wspace": 0.06},
+    )
+    legend_ax = axes[2]
+    legend_ax.axis("off")
+
+    handles = []
+    for position, ax in enumerate(axes[:2]):
         ax.scatter(coords[~mask, 0], coords[~mask, 1], s=3.5, c=CONTEXT,
                    linewidths=0, rasterized=True, zorder=1)
-
-        handles = []
         if folded:
-            index = np.concatenate([by_stem[s] for s in folded])
+            index = np.concatenate([by_stem[t] for t in folded])
             ax.scatter(coords[index, 0], coords[index, 1], s=sizes[index],
-                       c="#8a8980", linewidths=0, alpha=0.7, rasterized=True)
-            handles.append(
-                plt.Line2D([], [], marker="o", linestyle="none", markersize=4,
-                           markerfacecolor="#8a8980", markeredgecolor="none",
-                           label=f"{len(folded)} others")
-            )
+                       c="#8a8980", linewidths=0, alpha=0.75, rasterized=True,
+                       zorder=2)
+            if position == 0:
+                handles.append(
+                    plt.Line2D([], [], marker="o", linestyle="none", markersize=4,
+                               markerfacecolor="#8a8980", markeredgecolor="none",
+                               label=f"{len(folded)} others")
+                )
         for colour, stem in zip(CATEGORICAL_8, shown):
             index = by_stem[stem]
             ax.scatter(coords[index, 0], coords[index, 1], s=sizes[index],
-                       c=colour, linewidths=0, alpha=0.9, rasterized=True)
-            handles.insert(
-                len(handles) - (1 if folded else 0),
-                plt.Line2D([], [], marker="o", linestyle="none", markersize=4,
-                           markerfacecolor=colour, markeredgecolor="none",
-                           # the full stem, not just the suffix: a group can
-                           # span families, and LAB-ORD//sodium (the order)
-                           # and LAB-RES//sodium (the result) are different
-                           # concepts that both end in "sodium"
-                           label=stem[:30]),
-            )
-
-        if zoom:
-            # crop to this family, with padding, so its members separate
-            px, py = coords[local, 0], coords[local, 1]
-            pad = max(np.ptp(px), np.ptp(py), 1.0) * 0.18
-            ax.set_xlim(px.min() - pad, px.max() + pad)
-            ax.set_ylim(py.min() - pad, py.max() + pad)
-        else:
-            # common axes across panels, so position is comparable
-            pad = max(np.ptp(coords[:, 0]), np.ptp(coords[:, 1])) * 0.04
-            ax.set_xlim(coords[:, 0].min() - pad, coords[:, 0].max() + pad)
-            ax.set_ylim(coords[:, 1].min() - pad, coords[:, 1].max() + pad)
-            ax.set_aspect("equal", adjustable="box")
-
-        ax.set_title(
-            f"{group}  ({int(mask.sum())} tokens, {len(by_stem)} measurements)",
-            loc="left", fontsize=8, pad=4,
-        )
-        ax.legend(handles=handles, loc="upper left", bbox_to_anchor=(1.0, 1.0),
-                  fontsize=5.4, labelcolor=INK_SECONDARY, handletextpad=0.5,
-                  borderpad=0, labelspacing=0.35)
+                       c=colour, linewidths=0, alpha=0.9, rasterized=True, zorder=3)
+            if position == 0:
+                handles.insert(
+                    len(handles) - (1 if folded else 0),
+                    plt.Line2D([], [], marker="o", linestyle="none", markersize=4,
+                               markerfacecolor=colour, markeredgecolor="none",
+                               label=stem[:30]),
+                )
         ax.set_xticks([])
         ax.set_yticks([])
         for side in ("top", "right", "bottom", "left"):
             ax.spines[side].set_visible(False)
 
-    for position in range(len(groups), rows * columns):
-        axes[position // columns][position % columns].axis("off")
+    # left: the whole space, with the right panel's window outlined
+    axes[0].add_patch(
+        plt.Rectangle(
+            (window[0], window[2]), window[1] - window[0], window[3] - window[2],
+            fill=False, edgecolor=INK_PRIMARY, linewidth=0.9, zorder=4,
+        )
+    )
+    axes[0].set_title("whole vocabulary", loc="left", fontsize=7.5, pad=4)
+    axes[0].set_aspect("equal", adjustable="box")
 
-    figure.suptitle(title, x=0.02, ha="left", fontsize=10, y=0.997)
-    figure.text(0.02, 0.004,
-                "UMAP of the embedding table, one panel per family; colour distinguishes "
-                "measurements within the family, light grey are the rest of the vocabulary; "
-                + ("each panel is cropped to its own family's extent" if zoom
-                   else "all panels share the full extent of the space")
-                + "; point area follows log frequency in the cohort",
-                fontsize=7, color=INK_SECONDARY)
-    figure.tight_layout(rect=(0, 0.02, 1, 0.97))
+    # right: the same points, cropped to the window
+    axes[1].set_xlim(window[0], window[1])
+    axes[1].set_ylim(window[2], window[3])
+    axes[1].set_title("zoomed to the boxed region", loc="left", fontsize=7.5, pad=4)
+    axes[1].set_aspect("equal", adjustable="box")
+
+    legend_ax.legend(handles=handles, loc="upper left", bbox_to_anchor=(-0.05, 1.0),
+                     fontsize=6.2, labelcolor=INK_SECONDARY, handletextpad=0.5,
+                     borderpad=0, labelspacing=0.4)
+    figure.suptitle(title, x=0.015, ha="left", fontsize=9.5, y=1.0)
+    figure.tight_layout()
     save_figure(figure, out_path)
     plt.close(figure)
-    logger.info(f"wrote {out_path}")
+    logger.info(f"wrote {out_path.name}")
 
 
 def quantile_coherence(
@@ -402,18 +390,23 @@ def main() -> None:
         random_state=args.seed,
     ).fit_transform(vectors)
 
-    for zoom, suffix, note in (
-        (True, "_zoom", "zoomed to each family"),
-        (False, "_full", "full embedding space"),
-    ):
-        plot_token_space(
+    groups = [g for g in list(FAMILY_GROUPS) + ["other"]
+              if (meta["group"] == g).any()]
+    for group in groups:
+        members = int((meta["group"] == group).sum())
+        measurements = (
+            meta.filter(pl.col("group") == group)
+            .with_columns(stem=pl.col("token").str.replace(r"_Q\d+$", ""))["stem"]
+            .n_unique()
+        )
+        plot_family(
             coords,
             meta,
-            paths.figure_home / f"token_space_umap{suffix}.png",
-            f"{paths.model_key}: learned token embeddings "
-            f"(>= {args.min_count} occurrences) — {note}",
+            group,
+            paths.figure_home / f"token_space_{slug(group)}.png",
+            f"{paths.model_key} · {group}: {members} tokens, "
+            f"{measurements} measurements",
             logger,
-            zoom=zoom,
         )
 
     coherence = quantile_coherence(vectors, coords, meta, logger)
