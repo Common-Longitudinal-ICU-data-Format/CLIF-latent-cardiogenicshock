@@ -306,13 +306,14 @@ def section_cohort(paths, cfg, out: list) -> None:
         "&ge; 2.0 mmol/L, or creatinine-based KDIGO AKI. Urine output is "
         "unavailable at both sites, so the AKI arm stands in for it and lactate "
         "is added as a second hypoperfusion marker.</dd>"
-        "<dt>3 &middot; cardiac origin</dt><dd>An inotrope infusion "
-        "(dobutamine, milrinone), a mechanical circulatory support procedure "
-        "(ECMO, IABP, percutaneous VAD, in CPT and ICD-10-PCS), <b>or</b> peak "
-        "troponin &ge; 500 ng/L within &minus;24 h/+48 h of onset. Diagnosis "
-        "codes are deliberately excluded: a diagnosis asserts a condition, "
-        "whereas an infusion, a procedure and a troponin record something that "
-        "was done or measured.</dd>"
+        "<dt>3 &middot; cardiac origin &mdash; computed, not applied</dt>"
+        "<dd>An inotrope infusion (dobutamine, milrinone), a "
+        "mechanical circulatory support procedure (ECMO, IABP, percutaneous VAD, "
+        "in CPT and ICD-10-PCS), <b>or</b> peak troponin &ge; 500 ng/L within "
+        "&minus;24 h/+48 h of onset. Reported for every patient but <b>not used "
+        "to subset</b>: the question is where the mechanisms of shock sit "
+        "relative to one another, which filtering to one of them makes "
+        "unanswerable.</dd>"
         "</dl>"
     )
     out.append(
@@ -338,7 +339,7 @@ def section_cohort(paths, cfg, out: list) -> None:
         ("Attrition", table(
             wide, {c: thousands for c in wide.columns if c != "step"},
             key_column="step",
-            highlight={s for s in wide["step"] if "CRITERION 3" in s})),
+            highlight={s for s in wide["step"] if "CRITERION 2" in s})),
         ("Criterion components", table(
             subs, {c: thousands for c in subs.columns if c != "step"},
             key_column="step")),
@@ -356,9 +357,15 @@ def section_cohort(paths, cfg, out: list) -> None:
             "on acute MI itself and so have a different denominator entirely."))
     else:
         out.append(callout(
-            "<b>Criterion 3 is computed but not applied</b> "
-            "(<code>cardiac_origin.enabled</code> is false), so the cohort as "
-            "enrolled spans undifferentiated shock.", "warn"))
+            "<b>This is an undifferentiated shock cohort.</b> Criteria 1 and 2 "
+            "are mechanism-agnostic &mdash; sustained hypotension or vasoactive "
+            "support plus end-organ damage &mdash; so septic, cardiogenic, "
+            "hypovolaemic and haemorrhagic shock are all enrolled. That is the "
+            "point: the coded mechanism is attached afterwards as a labelling, "
+            "so the embedding can be asked whether it separates them. Criterion "
+            "3 is still computed and would cut the cohort to 2,219 UCMC and "
+            "5,104 NU patients if <code>cardiac_origin.enabled</code> were set "
+            "true."))
 
     summary_file = paths.cohort_home / "phenotype_summary.csv"
     if summary_file.is_file():
@@ -373,6 +380,59 @@ def section_cohort(paths, cfg, out: list) -> None:
             "n": thousands, "n_ucmc": thousands, "n_nu": thousands,
             "mortality": pct, "median_icu_los_days": num(1),
         }, key_column="cs_phenotype"))
+
+    shock_file = paths.cohort_home / "shock_type_summary.csv"
+    if shock_file.is_file():
+        shock = pl.read_csv(shock_file)
+        out.append("<h3>Shock type, from coded diagnoses</h3>")
+        out.append(
+            "<p>What the coders said the mechanism was, from "
+            "<code>clif_hospital_diagnosis</code>. A labelling, never a filter: "
+            "every patient here was enrolled on physiology. Codes overlap, so a "
+            "patient carrying more than one of septic, cardiogenic or "
+            "hypovolaemic is <code>mixed</code>; <code>other shock</code> is "
+            "R57.8/R57.9 and the rare mechanisms.</p>"
+        )
+        out.append(callout(
+            "<b>This is the one place the pipeline reads diagnosis codes, and it "
+            "is a deliberate exception.</b> Everywhere else the cohort is built "
+            "from things that were done or measured, on the argument that a code "
+            "asserts a condition rather than recording an event. The mechanism "
+            "of shock has no corresponding measurement, so the code is the only "
+            "evidence there is &mdash; but it only describes patients already "
+            "enrolled, and it is never allowed to select one."))
+        out.append(tabs([
+            (
+                str(site).upper() if site != "pooled" else "Pooled",
+                table(
+                    shock.filter(pl.col("site") == site).drop("site"),
+                    {
+                        "n": thousands,
+                        "share": pct,
+                        "mortality": pct,
+                        "median_icu_los_days": num(1),
+                    },
+                    key_column="shock_type",
+                ),
+            )
+            for site in shock["site"].unique(maintain_order=True).to_list()
+        ]))
+        out.append(callout(
+            "<b>Over half the cohort carries no shock code at all, and that "
+            "group is far less sick.</b> 54.6% of patients are uncoded, with "
+            "6.2% in-hospital mortality against 25-43% in every coded group. "
+            "The most likely reading is that criteria 1 and 2 are over-inclusive "
+            "&mdash; a brief run of hypotension, or a short phenylephrine "
+            "infusion around a procedure, satisfies them without anyone "
+            "treating the patient as being in shock. Read the coded groups as "
+            "the shock cohort and the uncoded remainder as the cost of a purely "
+            "physiological definition.", "warn"))
+        out.append(callout(
+            "<b>Coding practice differs between the sites more than case mix "
+            "plausibly does.</b> Septic shock is the label on 20.3% of NU's "
+            "cohort and 12.3% of UCMC's, while cardiogenic shock runs the other "
+            "way (5.3% NU, 13.5% UCMC). Compare shock-type composition "
+            "<i>within</i> a site before reading anything across them.", "warn"))
 
 
 #: token families, in the order their figures are stacked
@@ -403,9 +463,10 @@ def section_tokens(paths, out: list) -> None:
         "vocabulary entry, not per patient &mdash; asking whether the model "
         "organised clinical concepts coherently during training. One figure per "
         "family: the whole vocabulary on the left with the zoom window drawn "
-        "on it, that window enlarged on the right. Colour distinguishes "
-        "measurements within the family; light grey is the rest of the "
-        "vocabulary.</p>"
+        "on it, that window enlarged on the right. Hue distinguishes "
+        "measurements within the family and lightness distinguishes the "
+        "decile within each measurement, light for Q0 to dark for Q9; "
+        "light grey is the rest of the vocabulary.</p>"
     )
 
     out.append("<h3>What a single point is</h3>")
@@ -456,6 +517,35 @@ def section_tokens(paths, out: list) -> None:
     for label, path in panels:
         out.append(figure(path, label.replace("&amp;", "&")))
 
+    runs = [
+        (label, home / f"token_deciles_{key}.png") for key, label in TOKEN_FAMILIES
+    ]
+    runs = [(label, path) for label, path in runs if path.is_file()]
+    if runs:
+        out.append("<h3>One measurement at a time</h3>")
+        out.append(
+            "<p>The family figures show that the gradient is there, but not "
+            "whether it is <i>ordered</i>: a measurement&rsquo;s ten deciles "
+            "span about 1% of the labs window and 3% of the vitals window, so "
+            "at family scale a decile run is a few pixels. Cropping is no help "
+            "&mdash; the windows are set by genuine spread rather than by "
+            "outliers, and the central-98% window is within 1.14&times; of the "
+            "full extent for every family. So each measurement below gets its "
+            "own panel, cropped to its own deciles and joined Q0 to Q9.</p>"
+        )
+        out.append(callout(
+            "Each panel carries two coefficients. <b>native</b> is measured in "
+            "the model&rsquo;s own 1024-d space under cosine distance, and is "
+            "the claim about what the model learned. <b>here</b> is the same "
+            "quantity measured on the drawn 2-d coordinates. Where the two "
+            "part company &mdash; <code>spo2</code> is +0.93 native and "
+            "&minus;0.06 here &mdash; the ordering is in the representation and "
+            "the projection is what lost it, so the tangled path is an artefact "
+            "of the layout rather than evidence against the model. This is why "
+            "the table below reports the native figure."))
+        for label, path in runs:
+            out.append(figure(path, label.replace("&amp;", "&")))
+
     ordering_file = paths.output_home / "tables" / "GEM-all" / "token_quantile_ordering.csv"
     if ordering_file.is_file():
         ordering = pl.read_csv(ordering_file)
@@ -484,6 +574,134 @@ def section_tokens(paths, out: list) -> None:
             key_column="measurement"))
 
 
+#: the per-anchor colourings 03 writes, in reading order
+PROJECTION_PANELS = [
+    ("site", "site"),
+    ("shock_type", "shock type"),
+    ("phenotype", "phenotype"),
+    ("mortality", "mortality"),
+    ("icu_los", "ICU LOS"),
+]
+
+
+def trajectory_is_current(paths, logger=None) -> tuple[bool, str]:
+    """
+    whether 09's trajectory artifacts describe the cohort 01 last wrote
+
+    Sections 4 to 6 come from 09, which is the most expensive script here and
+    so the one most likely to be left behind when the cohort definition
+    changes. Its figures carry no record of which cohort they were drawn from,
+    so a report that renders them unconditionally will happily show 7,323
+    patients' trajectories under a 34,142-patient cohort table and look
+    entirely consistent doing it.
+
+    Compared on the patient set, not the row count: a cohort can change size
+    and membership independently, and it is membership that decides whether a
+    figure is about these patients.
+    """
+    cohort_file = paths.cohort_home / "cohort.parquet"
+    trajectory_file = (
+        paths.output_home / "patient_level_data" / "GEM-all"
+        / "trajectory_projections.parquet"
+    )
+    if not trajectory_file.is_file():
+        return False, "09 has not been run"
+    if not cohort_file.is_file():
+        return True, ""
+
+    cohort_ids = set(
+        pl.read_parquet(cohort_file, columns=["hospitalization_id"])[
+            "hospitalization_id"
+        ].to_list()
+    )
+    trajectory_ids = set(
+        pl.read_parquet(trajectory_file, columns=["hospitalization_id"])[
+            "hospitalization_id"
+        ].to_list()
+    )
+    missing = len(cohort_ids - trajectory_ids)
+    extra = len(trajectory_ids - cohort_ids)
+    if not missing and not extra:
+        return True, ""
+
+    note = (
+        f"09's trajectory figures cover {len(trajectory_ids):,} patients "
+        f"against the cohort's {len(cohort_ids):,}"
+    )
+    if missing:
+        note += f"; {missing:,} cohort patients are absent from them"
+    if extra:
+        note += f"; {extra:,} of their patients are no longer in the cohort"
+    if logger is not None:
+        logger.warning(f"skipping sections 4-6: {note}")
+    return False, note
+
+
+def section_projections(paths, out: list) -> None:
+    """
+    03's per-anchor projections of the patient embeddings
+
+    PaCMAP leads and UMAP is kept beside it. Both are computed every run from
+    the same 50-d PCA subspace with the same neighbour count, so the pair is a
+    comparison of the two algorithms rather than of two settings: PaCMAP is
+    built to hold global structure as well as local neighbourhoods, where UMAP
+    optimises the local graph and can tear apart or fuse clusters that are
+    genuinely adjacent. Where the two disagree, neither is the truth -- it is a
+    sign the layout is carrying less information than it appears to.
+    """
+    anchors_present = []
+    for anchor in ANCHORS:
+        home = paths.output_home / "figures" / "GEM-all" / f"anchor-{anchor}"
+        if (home / "pacmap_site.png").is_file() or (home / "umap_site.png").is_file():
+            anchors_present.append((anchor, home))
+    if not anchors_present:
+        return
+
+    out.append('<h2 id="projections">3 &middot; Patient embeddings</h2>')
+    out.append(
+        "<p>One point per patient: the model's hidden state at the last token "
+        "before the anchor, projected to 2-d. <b>PaCMAP</b> is shown first and "
+        "UMAP alongside it; PCA is there as the linear reference, where "
+        "distance means what it usually means.</p>"
+    )
+
+    anchor_label = {
+        "24h": "24 h after admission",
+        "onset": "shock onset",
+    }
+
+    anchor_tabs = []
+    for anchor, home in anchors_present:
+        projection_tabs = []
+        for key, pretty in (
+            ("pacmap", "PaCMAP"),
+            ("umap", "UMAP"),
+            ("pca", "PCA (linear reference)"),
+        ):
+            panels = [
+                (label, figure(home / f"{key}_{name}.png"))
+                for name, label in PROJECTION_PANELS
+            ]
+            panels = [(label, body) for label, body in panels if body]
+            if panels:
+                projection_tabs.append((pretty, tabs(panels)))
+        if projection_tabs:
+            anchor_tabs.append(
+                (anchor_label.get(anchor, anchor), tabs(projection_tabs))
+            )
+
+    out.append(tabs(anchor_tabs))
+    out.append(callout(
+        "<b>The shock-type panels are small multiples, not one scatter.</b> Six "
+        "categories cannot be separated by colour in a scatter &mdash; every "
+        "series is on screen at once, so the all-pairs colourblind gate applies "
+        "and the palette validates three slots under it. Each panel therefore "
+        "shows one type in colour against the whole cohort in grey. That is "
+        "also the more honest figure here: the types overlap heavily, and in a "
+        "single pooled scatter whichever category is drawn last looks larger "
+        "than it is."))
+
+
 def section_patient_embeddings(paths, out: list) -> None:
     home = paths.output_home / "figures" / "GEM-all" / "trajectory"
     panels = [
@@ -492,7 +710,7 @@ def section_patient_embeddings(paths, out: list) -> None:
     ]
     if not any(body for _, body in panels):
         return
-    out.append('<h2 id="patients">3 &middot; Patient embeddings</h2>')
+    out.append('<h2 id="patients">4 &middot; Embeddings over time</h2>')
     out.append(
         "<p>Every patient embedded every 6 hours from 24 h before cardiogenic "
         "shock onset to 48 h after, so one patient contributes a sequence of "
@@ -515,7 +733,7 @@ def section_patient_paths(paths, out: list) -> None:
     ]
     if not any(body for _, body in panels):
         return
-    out.append('<h2 id="paths">4 &middot; Individual trajectories</h2>')
+    out.append('<h2 id="paths">5 &middot; Individual trajectories</h2>')
     out.append(
         "<p>Five patients drawn at random from those with at least five "
         "timepoints, each shown in its own panel against the same cloud, with "
@@ -534,9 +752,21 @@ def section_patient_paths(paths, out: list) -> None:
 def section_flow(paths, out: list) -> None:
     home = paths.output_home / "figures" / "GEM-all" / "trajectory"
     alignment_file = paths.output_home / "tables" / "GEM-all" / "trajectory_flow_alignment.csv"
-    if not (home / "trajectory_flow_umap.png").is_file():
+    # 09 names the flow figure after whichever projection it drew, so that a
+    # field can never be shown under the wrong axis labels. Prefer PaCMAP,
+    # which is 09's default, and fall back to a UMAP run.
+    flow = next(
+        (
+            home / f"trajectory_flow_{name}.png"
+            for name in ("pacmap", "umap")
+            if (home / f"trajectory_flow_{name}.png").is_file()
+        ),
+        None,
+    )
+    if flow is None:
         return
-    out.append('<h2 id="flow">5 &middot; Latent flow</h2>')
+    projection_label = "PaCMAP" if flow.stem.endswith("pacmap") else "UMAP"
+    out.append('<h2 id="flow">6 &middot; Latent flow</h2>')
     out.append(
         "<p>The mean displacement between consecutive timepoints, drawn as a "
         "streamplot after scVelo's velocity embedding. One difference favours "
@@ -546,8 +776,8 @@ def section_flow(paths, out: list) -> None:
         "t+6h, so the displacement is <b>measured, not estimated</b>.</p>"
     )
     out.append(tabs([
-        ("UMAP", figure(home / "trajectory_flow_umap.png",
-                        "Flow field in UMAP space")),
+        (projection_label, figure(flow,
+                                  f"Flow field in {projection_label} space")),
         ("PCA (cross-check)", figure(home / "trajectory_flow_pca.png",
                                      "The same field in a linear space")),
         ("Died", figure(home / "trajectory_flow_died.png",
@@ -563,7 +793,7 @@ def section_flow(paths, out: list) -> None:
         "field and renders far more orderly than the data beneath it, so the "
         "figures need the numbers below to be read honestly. Directional "
         "coherence &mdash; the summed displacement in a cell over the sum of "
-        "the displacement magnitudes &mdash; is 0.61 in UMAP and 0.48 in PCA "
+        "the displacement magnitudes &mdash; was 0.61 in UMAP and 0.48 in PCA "
         "against roughly 0.1 for pure noise: about half the motion is a "
         "consistent direction and half is scatter. More importantly, the flow "
         "is almost unrelated to any physiological gradient, so the arrows are "
@@ -603,7 +833,7 @@ def section_sites(paths, out: list) -> None:
     shared = paths.output_home / "figures" / "shared"
     if not (shared / "site_features.png").is_file():
         return
-    out.append('<h2 id="sites">6 &middot; UCMC versus NU</h2>')
+    out.append('<h2 id="sites">7 &middot; UCMC versus NU</h2>')
     out.append(
         "<p>The embedding separates the two sites almost perfectly (section 7), "
         "so the first question is whether the patients differ that much. "
@@ -660,7 +890,7 @@ def section_models(paths, out: list, logger) -> None:
     if results is None and not purity_rows:
         return
 
-    out.append('<h2 id="models">7 &middot; Models</h2>')
+    out.append('<h2 id="models">8 &middot; Models</h2>')
     out.append(
         "<p>Three frozen checkpoints of the same architecture, differing only "
         "in what they were trained on: <b>GEM-all</b> on MIMIC + UCMC + NU, "
@@ -789,6 +1019,12 @@ def section_methods(paths, cfg, out: list) -> None:
         "both. 01 warns on per-format coverage.</li>"
         "<li><b>AMS is GCS-based</b> and cannot distinguish organ dysfunction "
         "from sedation in a ventilated population.</li>"
+        "<li><b>Shock type is a coded label, not an adjudicated one.</b> "
+        "<code>clif_hospital_diagnosis</code> is hospitalization-level, so a "
+        "code entered on day 20 is indistinguishable from one entered on "
+        "admission; <code>poa_present</code> would narrow that but is populated "
+        "for every UCMC row and only 61% of NU's, so it is reported rather than "
+        "required. Septic-shock coding also differs 1.7x between the sites.</li>"
         "<li><b>Phenotypes are a refit</b>, not a transfer: the published "
         "centroids are not available, so k-means is refit and labelled from "
         "centroid profiles.</li>"
@@ -822,9 +1058,23 @@ def main() -> None:
     out: list[str] = []
     section_cohort(paths, cfg, out)
     section_tokens(paths, out)
-    section_patient_embeddings(paths, out)
-    section_patient_paths(paths, out)
-    section_flow(paths, out)
+    section_projections(paths, out)
+    current, note = trajectory_is_current(paths, logger)
+    if current:
+        section_patient_embeddings(paths, out)
+        section_patient_paths(paths, out)
+        section_flow(paths, out)
+    else:
+        out.append(
+            '<h2 id="patients">4 &middot; Embeddings over time</h2>'
+        )
+        out.append(callout(
+            "<b>Sections 4 to 6 are omitted: 09 has not been rerun for this "
+            f"cohort.</b> {html.escape(note)}. Trajectory figures carry no "
+            "record of the cohort they were drawn from, so showing them here "
+            "would put one cohort's figures under another's tables. Run "
+            "<code>python code/09_trajectories.py</code> and regenerate this "
+            "report.", "warn"))
     section_sites(paths, out)
     section_models(paths, out, logger)
     section_methods(paths, cfg, out)
@@ -845,11 +1095,12 @@ def main() -> None:
         for anchor, label in (
             ("cohort", "1 &middot; Cohort"),
             ("tokens", "2 &middot; Token embeddings"),
-            ("patients", "3 &middot; Patient embeddings"),
-            ("paths", "4 &middot; Individual trajectories"),
-            ("flow", "5 &middot; Latent flow"),
-            ("sites", "6 &middot; UCMC versus NU"),
-            ("models", "7 &middot; Models"),
+            ("projections", "3 &middot; Patient embeddings"),
+            ("patients", "4 &middot; Embeddings over time"),
+            ("paths", "5 &middot; Individual trajectories"),
+            ("flow", "6 &middot; Latent flow"),
+            ("sites", "7 &middot; UCMC versus NU"),
+            ("models", "8 &middot; Models"),
             ("methods", "Methods &amp; caveats"),
         )
     )

@@ -7,8 +7,8 @@ Runs six stages per site (UCMC, NU). Each writes its outputs and can be rerun
 on its own with --stage, which matters because `derive` and `collate` are the
 slow ones.
 
-  cohort    identify cardiogenic shock, print the filter ledger, attach
-            outcomes and Zweck phenotypes       -> output/cohort/
+  cohort    identify shock, print the filter ledger, attach outcomes,
+            coded shock type and Zweck phenotypes   -> output/cohort/
   subset    cut each site's CLIF tables down to the cohort   -> scratch/data-raw/
   derive    clifpy: respiratory-support waterfall, dose conversion, SOFA
   collate   cocoa collate                                   -> scratch/processed/
@@ -47,6 +47,8 @@ from clifcs.cohort import (
 from clifcs.config import CONFIG_HOME
 from clifcs.onset_winnower import OnsetWinnower
 from clifcs.outcomes import add_outcomes
+from clifcs.shock_type import shock_type_flags
+from clifcs.shock_type import summarize as summarize_shock_type
 from clifcs.phenotype import (
     add_egfr,
     apply_phenotype_model,
@@ -73,6 +75,10 @@ REQUIRED_TABLES = (
     "clif_position",
     "clif_respiratory_support",
     "clif_patient_procedures",
+    # read by clifcs.shock_type for the coded mechanism. Not collated by cocoa,
+    # but kept in the subset so the cohort stage can be rerun against it
+    # without going back to the full extract.
+    "clif_hospital_diagnosis",
 )
 
 
@@ -96,6 +102,14 @@ def stage_cohort(paths, cfg, logger, phenotype_model=None) -> pl.DataFrame:
 
         shock = attach_demographics(data_dir, shock)
         shock = add_outcomes(data_dir, shock, cfg)
+        # what the coders said the mechanism was. A labelling, never a filter --
+        # the cohort is selected on physiology and stays mechanism-agnostic.
+        shock = shock.join(
+            shock_type_flags(data_dir, shock, cfg, logger),
+            on="hospitalization_id",
+            how="left",
+            validate="1:1",
+        )
         labs = nearest_labs(data_dir, shock, cfg)
         shock = shock.join(labs, on="hospitalization_id", how="left")
         shock = add_egfr(shock)
@@ -120,6 +134,7 @@ def stage_cohort(paths, cfg, logger, phenotype_model=None) -> pl.DataFrame:
         cohort, centroids, model = assign_phenotypes(cohort, cfg)
         save_phenotype_model(paths.cohort_home / "phenotype_model.json", **model)
     phenotype_summary = summarize(cohort, logger)
+    shock_type_summary = summarize_shock_type(cohort, logger)
 
     paths.cohort_home.mkdir(parents=True, exist_ok=True)
     cohort.write_parquet(paths.cohort_home / "cohort.parquet")
@@ -128,6 +143,7 @@ def stage_cohort(paths, cfg, logger, phenotype_model=None) -> pl.DataFrame:
     if centroids is not None:
         centroids.write_csv(paths.cohort_home / "phenotype_centroids.csv")
     phenotype_summary.write_csv(paths.cohort_home / "phenotype_summary.csv")
+    shock_type_summary.write_csv(paths.cohort_home / "shock_type_summary.csv")
 
     # the onset table the onset-anchored winnower reads
     cohort.select("hospitalization_id", "patient_id", "site", "cs_onset_dttm").write_parquet(

@@ -7,8 +7,8 @@ Embeds each patient repeatedly, on a grid of timepoints around cardiogenic
 shock onset, and draws where they move.
 
 Two figures:
-  scatter     every patient-timepoint in one UMAP, coloured by time relative
-              to onset, by phenotype, and by outcome
+  scatter     every patient-timepoint in one projection, coloured by time
+              relative to onset, by phenotype, and by outcome
   flow        the mean displacement field, as a streamplot
 
 The flow plot is modelled on scVelo's velocity embedding, with one important
@@ -223,8 +223,42 @@ def load_grid(paths, args, logger) -> pl.DataFrame:
     return frame
 
 
+#: which 2-d projection the figures are drawn in.
+#:
+#: UMAP and PaCMAP are both computed and both saved to
+#: trajectory_projections.parquet every run; this only selects which one is
+#: plotted. Set once from --projection in main() and read by `proj_cols` and
+#: `proj_labels`, so no figure can end up with one projection's coordinates
+#: under another's axis labels -- which has happened here before.
+PROJECTION = "pacmap"
+
+
+def proj_cols() -> tuple[str, str]:
+    """the coordinate columns the figures should read"""
+    return f"{PROJECTION}_1", f"{PROJECTION}_2"
+
+
+def proj_labels() -> tuple[str, str]:
+    """axis labels matching `proj_cols`"""
+    if PROJECTION == "pca":
+        return "PC1", "PC2"
+    pretty = {"umap": "UMAP", "pacmap": "PaCMAP"}[PROJECTION]
+    return f"{pretty}-1", f"{pretty}-2"
+
+
 def project(frame: pl.DataFrame, seed: int, logger) -> pl.DataFrame:
-    """one UMAP over every patient-timepoint, so positions are comparable"""
+    """
+    one projection over every patient-timepoint, so positions are comparable
+
+    UMAP and PaCMAP are both fitted, on the same PCA scores with the same
+    neighbour count, and both are saved. PaCMAP is what the figures use by
+    default: it is built to preserve global structure alongside local
+    neighbourhoods, which matters more here than anywhere else in the pipeline
+    because the question being asked of this layout is about *motion* across
+    it, and a projection that tears neighbouring regions apart invents
+    displacement that the 1024-d space does not contain.
+    """
+    import pacmap
     import umap
 
     columns = sorted(c for c in frame.columns if c.startswith("emb_"))
@@ -238,12 +272,23 @@ def project(frame: pl.DataFrame, seed: int, logger) -> pl.DataFrame:
         f"first {PCA_COMPONENTS} {pca.explained_variance_ratio_.sum():.1%}"
     )
     logger.info("UMAP: building neighbour graph")
-    coords = umap.UMAP(
+    umap_coords = umap.UMAP(
         n_neighbors=30, min_dist=0.3, n_components=2, random_state=seed
     ).fit_transform(scores)
+    logger.info("PaCMAP: building neighbour graph")
+    pacmap_coords = pacmap.PaCMAP(
+        n_components=2,
+        n_neighbors=30,
+        MN_ratio=0.5,
+        FP_ratio=2.0,
+        apply_pca=False,
+        random_state=seed,
+    ).fit_transform(np.ascontiguousarray(scores, dtype=np.float32))
     return frame.with_columns(
-        umap_1=pl.Series(coords[:, 0]),
-        umap_2=pl.Series(coords[:, 1]),
+        umap_1=pl.Series(umap_coords[:, 0]),
+        umap_2=pl.Series(umap_coords[:, 1]),
+        pacmap_1=pl.Series(pacmap_coords[:, 0]),
+        pacmap_2=pl.Series(pacmap_coords[:, 1]),
         pca_1=pl.Series(scores[:, 0]),
         pca_2=pl.Series(scores[:, 1]),
     )
@@ -335,8 +380,8 @@ def plot_scatter(frame, x, y, column, colors, order, title, label, out, logger,
         )
 
     ax.set_title(title, loc="left", pad=8)
-    ax.set_xlabel("UMAP-1")
-    ax.set_ylabel("UMAP-2")
+    ax.set_xlabel(proj_labels()[0])
+    ax.set_ylabel(proj_labels()[1])
     ax.grid(True, color=GRID, linewidth=0.4, alpha=0.7)
     ax.set_axisbelow(True)
     ax.set_aspect("equal", adjustable="datalim")
@@ -553,7 +598,8 @@ def plot_colouring_grid(frame, specs, out, title, logger, columns: int = 4):
     rng = np.random.default_rng(0)
     order = rng.permutation(frame.height)
     shuffled = frame.with_columns(_o=pl.Series(order)).sort("_o")
-    px, py = shuffled["umap_1"].to_numpy(), shuffled["umap_2"].to_numpy()
+    _px, _py = proj_cols()
+    px, py = shuffled[_px].to_numpy(), shuffled[_py].to_numpy()
     size = 1.1 if frame.height > 60000 else 2.2
 
     for position, spec in enumerate(specs):
@@ -631,7 +677,8 @@ def plot_single_colouring(frame, spec, out, title, logger):
     legend_ax.axis("off")
     rng = np.random.default_rng(0)
     shuffled = frame.with_columns(_o=pl.Series(rng.permutation(frame.height))).sort("_o")
-    px, py = shuffled["umap_1"].to_numpy(), shuffled["umap_2"].to_numpy()
+    _px, _py = proj_cols()
+    px, py = shuffled[_px].to_numpy(), shuffled[_py].to_numpy()
 
     if spec["kind"] == "continuous":
         values = shuffled[spec["key"]].to_numpy().astype(float)
@@ -676,8 +723,8 @@ def plot_single_colouring(frame, spec, out, title, logger):
         )
 
     ax.set_title(title, loc="left", pad=8, fontsize=9)
-    ax.set_xlabel("UMAP-1")
-    ax.set_ylabel("UMAP-2")
+    ax.set_xlabel(proj_labels()[0])
+    ax.set_ylabel(proj_labels()[1])
     ax.grid(True, color=GRID, linewidth=0.4, alpha=0.6)
     ax.set_axisbelow(True)
     ax.set_aspect("equal", adjustable="datalim")
@@ -714,7 +761,8 @@ def plot_patient_paths(frame, spec, patients, out, title, logger):
     """
     figure, axes = plt.subplots(1, len(patients),
                                figsize=(3.1 * len(patients), 3.4), squeeze=False)
-    px, py = frame["umap_1"].to_numpy(), frame["umap_2"].to_numpy()
+    _px, _py = proj_cols()
+    px, py = frame[_px].to_numpy(), frame[_py].to_numpy()
 
     if spec["kind"] == "continuous":
         values = frame[spec["key"]].to_numpy().astype(float)
@@ -741,7 +789,7 @@ def plot_patient_paths(frame, spec, patients, out, title, logger):
                        rasterized=True)
 
         path = frame.filter(pl.col("hospitalization_id") == patient).sort("offset_hours")
-        tx, ty = path["umap_1"].to_numpy(), path["umap_2"].to_numpy()
+        tx, ty = path[_px].to_numpy(), path[_py].to_numpy()
         ax.plot(tx, ty, "-", color=INK_PRIMARY, linewidth=1.0, zorder=3)
         ax.scatter(tx, ty, s=22, c=INK_PRIMARY, zorder=4, linewidths=0)
         # labelling every point collides where a patient barely moves; the
@@ -845,9 +893,19 @@ def main() -> None:
     parser.add_argument("--step-hours", type=float, default=6.0)
     parser.add_argument("--min-tokens", type=int, default=8)
     parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument(
+        "--projection",
+        choices=("pacmap", "umap", "pca"),
+        default="pacmap",
+        help="which projection the figures are drawn in; all are computed and "
+        "saved regardless",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
+
+    global PROJECTION
+    PROJECTION = args.projection
 
     paths = load_paths(model=args.model)
     paths.mkdirs()
@@ -887,38 +945,40 @@ def main() -> None:
     home = paths.figure_home / "trajectory"
     home.mkdir(parents=True, exist_ok=True)
 
-    plot_scatter(frame, "umap_1", "umap_2", "offset_hours", None, None,
+    px, py = proj_cols()
+    plot_scatter(frame, px, py, "offset_hours", None, None,
                  f"{paths.model_key}: patient-timepoints around shock onset",
                  "hours from onset", home / "trajectory_time.png", logger,
                  continuous=True)
-    plot_scatter(frame, "umap_1", "umap_2", "site", site_colors(paths.sites),
+    plot_scatter(frame, px, py, "site", site_colors(paths.sites),
                  list(paths.sites),
                  f"{paths.model_key}: patient-timepoints by site",
                  "", home / "trajectory_site.png", logger)
     plot_scatter(frame.filter(pl.col("cs_phenotype").is_not_null()),
-                 "umap_1", "umap_2", "cs_phenotype", phenotype_colors(),
+                 px, py, "cs_phenotype", phenotype_colors(),
                  list(PHENOTYPES),
                  f"{paths.model_key}: patient-timepoints by phenotype",
                  "", home / "trajectory_phenotype.png", logger)
 
-    plot_flow(frame, "umap_1", "umap_2", home / "trajectory_flow_umap.png",
+    plot_flow(frame, px, py, home / f"trajectory_flow_{PROJECTION}.png",
               f"{paths.model_key}: latent flow around shock onset",
               f"mean observed displacement between consecutive {args.step_hours:g}h "
               "timepoints; cells with <5 vectors blank", logger,
-              labels=("UMAP-1", "UMAP-2"))
+              labels=proj_labels())
     plot_flow(frame, "pca_1", "pca_2", home / "trajectory_flow_pca.png",
               f"{paths.model_key}: latent flow, PCA space",
               "the same field in a linear space, where distances are metric — "
-              "a cross-check on the UMAP field", logger, labels=("PC1", "PC2"))
+              f"a cross-check on the {proj_labels()[0].rsplit('-', 1)[0]} field",
+              logger, labels=("PC1", "PC2"))
 
     for survived, name in ((False, "died"), (True, "survived")):
         part = frame.filter(pl.col("in_hospital_mortality") != survived)
         if part.height > 2000:
-            plot_flow(part, "umap_1", "umap_2",
+            plot_flow(part, px, py,
                       home / f"trajectory_flow_{name}.png",
                       f"{paths.model_key}: latent flow, patients who {name}",
                       f"{part['hospitalization_id'].n_unique():,} patients",
-                      logger, labels=("UMAP-1", "UMAP-2"))
+                      logger, labels=proj_labels())
 
     frame = attach_state(paths, frame, logger)
     if "on_imv" in frame.columns:
@@ -953,7 +1013,7 @@ def main() -> None:
             logger,
         )
     alignment = plot_state_flow(
-        frame, "umap_1", "umap_2", home / "trajectory_flow_state.png",
+        frame, px, py, home / "trajectory_flow_state.png",
         f"{paths.model_key}: what changes as patients move", logger,
     )
     if alignment.height:
@@ -968,7 +1028,7 @@ def main() -> None:
     frame.select(
         "hospitalization_id", "site", "offset_hours", "last_valid",
         "cs_phenotype", "in_hospital_mortality",
-        "umap_1", "umap_2", "pca_1", "pca_2",
+        "umap_1", "umap_2", "pacmap_1", "pacmap_2", "pca_1", "pca_2",
     ).write_parquet(paths.patient_level_home / "trajectory_projections.parquet")
     logger.info("09 done")
 

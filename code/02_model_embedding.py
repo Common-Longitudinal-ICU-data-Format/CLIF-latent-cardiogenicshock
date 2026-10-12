@@ -450,6 +450,7 @@ def main() -> None:
         "icu_los_days",
         "in_hospital_mortality",
         "cardiac_origin",
+        "shock_type",
         "age_at_admission",
         "sex_category",
         "hours_admission_to_cs_onset",

@@ -28,6 +28,9 @@ pyarrow
 # --- analysis and plotting ---------------------------------------------------
 scikit-learn
 umap-learn
+# PaCMAP is what the report's 2-d panels use; umap-learn is kept so the
+# two projections can be compared. Pulls faiss-cpu for neighbour search.
+pacmap
 matplotlib
 numpy
 

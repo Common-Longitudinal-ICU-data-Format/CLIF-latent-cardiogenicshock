@@ -1,7 +1,12 @@
-# CLIF latent space — cardiogenic shock
+# CLIF latent space — shock
 
-Exploring where cardiogenic shock patients sit in the embedding space of a
-frozen CLIF foundation model, using data from two contributing sites.
+Exploring where shock patients sit in the embedding space of a frozen CLIF
+foundation model, using data from two contributing sites.
+
+The cohort is **undifferentiated shock**, selected on physiology alone, with the
+coded mechanism attached afterwards as a labelling. The question is whether the
+model's latent space separates septic from cardiogenic from hypovolaemic shock —
+which filtering to one of them would make unanswerable.
 
 - **Model** — `GEM*-all`, the coreopsis `cxxx-all` run: a 9-layer Llama-3.2
   architecture derived from `meta-llama/Llama-3.2-1B` (hidden size **1024**, 8
@@ -63,9 +68,12 @@ marker.
 **The definition has no cardiac criterion**, so it selects *undifferentiated*
 shock — septic, hypovolaemic and haemorrhagic shock are all included, which is
 why the cohort runs to tens of thousands rather than the hundreds a cardiogenic
-shock registry would hold. A `cardiac_origin` flag is computed and reported for
-every patient but **not applied**; set `cardiac_origin.enabled: true` in the
-config to restrict to it. It is satisfied by any of:
+shock registry would hold. That is the design, not a limitation: see
+[Shock type](#shock-type) below.
+
+A `cardiac_origin` flag is computed and reported for every patient but **not
+applied** (`cardiac_origin.enabled: false`). Applying it would cut the cohort to
+2,219 UCMC and 5,104 NU patients. It is satisfied by any of:
 
 | arm | UCMC | NU |
 |---|---|---|
@@ -98,6 +106,72 @@ taken from `clif_patient_procedures` instead, and MCS is not part of
 criterion (1): MCS without either sustained hypotension or a vasoactive infusion
 occurred in 3 of 34,142 patients, so nothing is lost by leaving it out.
 
+## Shock type
+
+What the coders said the mechanism was, from `clif_hospital_diagnosis`, attached
+to every enrolled patient by
+[code/clifcs/shock_type.py](code/clifcs/shock_type.py). **A labelling, never a
+filter.**
+
+Codes overlap, so a patient carrying more than one of septic, cardiogenic or
+hypovolaemic is `mixed`; `other shock` is R57.8/R57.9 plus the rare mechanisms.
+Matching is by code prefix across ICD-10-CM and ICD-9-CM without consulting
+`diagnosis_code_format` — ICD-9 shock codes are numeric and ICD-10's begin with a
+letter, so the prefixes cannot collide, and the match does not then depend on a
+column NU populates with two values and UCMC with one.
+
+| shock type | n | share | mortality | median ICU LOS |
+|---|---|---|---|---|
+| septic (R65.21) | 6,189 | 18.1% | 29.6% | 4.3 d |
+| cardiogenic (R57.0) | 2,560 | 7.5% | 25.2% | 5.2 d |
+| hypovolemic (R57.1) | 1,314 | 3.8% | 12.6% | 3.2 d |
+| mixed (≥2 of the above) | 2,508 | 7.3% | 43.3% | 7.3 d |
+| other shock (R57.8/R57.9, …) | 2,945 | 8.6% | 26.8% | 3.8 d |
+| **none coded** | **18,626** | **54.6%** | **6.2%** | 2.5 d |
+
+### Read the uncoded group before anything else
+
+**Over half the cohort carries no shock code at all, and that group is barely
+sick** — 6.2% in-hospital mortality against 25–43% in every coded group, and a
+median ICU stay of 2.5 days.
+
+The most likely reading is that criteria 1 and 2 are over-inclusive. A single
+run of SBP < 90 lasting half an hour, or a short phenylephrine infusion around a
+procedure, satisfies the hemodynamic criterion without anyone treating the
+patient as being in shock; a lactate of 2.0 or a 0.3 mg/dL creatinine rise then
+satisfies the end-organ criterion. So the physiological definition is doing what
+it was specified to do and catching a large population the clinical teams did
+not consider shocked.
+
+Treat the coded groups as the shock cohort and the uncoded remainder as the cost
+of a purely physiological definition. It is also the reason the `shock_type`
+panels are worth more than the phenotype panels here: they are the only thing in
+the pipeline that distinguishes the two.
+
+### Coding practice differs between the sites
+
+Septic shock is the label on 20.3% of NU's cohort and 12.3% of UCMC's, while
+cardiogenic shock runs the other way (5.3% NU, 13.5% UCMC). `summarize` warns
+whenever the septic share differs by more than 1.5x between sites, which it
+currently does at 1.7x. Compare composition **within** a site before reading
+anything across them.
+
+### Why this reads diagnosis codes at all
+
+It is a deliberate exception to the rule applied everywhere else in this
+pipeline. The cohort is built from things that were done or measured — an
+infusion, a procedure, a laboratory value — on the argument that a code asserts
+a condition rather than recording an event. That argument still holds. But the
+mechanism of shock is a clinical judgement with no corresponding measurement, so
+the coded diagnosis is the only evidence available; it only ever describes
+patients already enrolled on physiology, and never selects one.
+
+Two further caveats: `clif_hospital_diagnosis` is hospitalization-level, so a
+code entered on day 20 is indistinguishable from one entered on admission; and
+`poa_present` would narrow that but is populated for every UCMC row and only 61%
+of NU's, so it is reported rather than required
+(`shock_type.require_present_on_arrival`).
+
 ## Embedding anchors
 
 Each patient is embedded twice, at two cut points:
@@ -110,6 +184,29 @@ Each patient is embedded twice, at two cut points:
   per-patient cut point, so
   [code/clifcs/onset_winnower.py](code/clifcs/onset_winnower.py) overrides its
   thresholding; everything downstream is cocoa's unchanged.
+
+## Projections: PCA, UMAP and PaCMAP
+
+`03` computes all three every run and saves all three — coordinates to
+`projections_anchor-*.parquet`, figures to `figures/<model>/anchor-*/`. **The
+report shows PaCMAP**; UMAP is kept beside it.
+
+PaCMAP ([Wang et al. 2021](https://github.com/YingfanWang/PaCMAP)) is built to
+preserve global structure alongside local neighbourhoods, where UMAP optimises
+the local graph and will tear apart or fuse regions that are genuinely adjacent.
+That matters most in `09`, whose whole subject is *motion* across the layout: a
+projection that invents distance invents displacement with it.
+
+Both are fitted on the same 50-d PCA scores with the same neighbour count
+(`N_NEIGHBORS = 30`), so the pair is a comparison of the two algorithms rather
+than of two neighbourhood scales. PaCMAP is told `apply_pca=False` because it is
+already receiving PCA scores. Where the two disagree, neither is the truth — it
+is a sign the layout carries less information than it appears to, which is what
+the PCA panel is there to settle.
+
+`09` takes `--projection {pacmap,umap,pca}` and defaults to PaCMAP. It names its
+flow figure after whichever projection it drew (`trajectory_flow_pacmap.png`), so
+a field cannot be shown under the wrong axis labels.
 
 ## Phenotypes
 

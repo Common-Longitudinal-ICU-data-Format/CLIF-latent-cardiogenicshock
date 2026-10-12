@@ -26,6 +26,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import math
 import pathlib
 import re
 import sys
@@ -46,14 +47,25 @@ from clifcs.figures import save_figure
 from clifcs.palette import (
     CATEGORICAL,
     CATEGORICAL_8,
+    CONTEXT,
     GRID,
+    HIGHLIGHT,
     INK_PRIMARY,
     INK_SECONDARY,
     SURFACE,
+    shade_ramp,
 )
 from clifcs.tokens import load_pre_anchor_tokens, token_counts_by_site, vocabulary
 
 DPI = 500
+
+#: cocoa bins every continuous value into this many population deciles
+#: and fuses the bin into the token name (tokenization.yaml: n_bins)
+DECILES = 10
+
+#: panels per decile-run figure; the leading measurements by volume,
+#: because past a couple of dozen the panels are too small to read
+MAX_RUN_PANELS = 24
 
 #: families grouped for colour; everything else falls into "other"
 FAMILY_GROUPS = {
@@ -66,12 +78,11 @@ FAMILY_GROUPS = {
     "location & admin": ("XFR-IN", "XFR-OUT", "ADMN", "DSCG", "CODE"),
     "demographics": ("AGE", "SEX", "RACE", "ETHN"),
 }
-#: One hue only. Nine groups cannot be told apart by colour in a scatter --
-#: the palette validates three slots under the all-pairs gate -- so each group
-#: gets its own panel with the rest as grey context, which is the documented
-#: answer past three series.
-HIGHLIGHT = CATEGORICAL[0]
-CONTEXT = "#e2e1dc"
+#: One hue only. Nine groups cannot be told apart by colour in a scatter -- the
+#: palette validates three slots under the all-pairs gate -- so each group gets
+#: its own panel with the rest as grey context. HIGHLIGHT and CONTEXT live in
+#: the palette module because 03 draws the shock-type panels the same way, and a
+#: second copy of the context grey is a second thing to keep in step.
 
 
 def style() -> None:
@@ -154,6 +165,12 @@ def slug(group: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", group.lower()).strip("-")
 
 
+def decile_of(token: str) -> int | None:
+    """the decile a fused token carries, or None if it carries no value"""
+    found = re.search(r"_Q(\d+)$", token)
+    return int(found.group(1)) if found else None
+
+
 def plot_family(
     coords: np.ndarray,
     meta: pl.DataFrame,
@@ -171,13 +188,24 @@ def plot_family(
     -- and flipping between them loses the correspondence. The rectangle is the
     link between the two.
 
-    Within the family, colour distinguishes measurements: the leading eight by
-    frequency, with the tail folded into one grey series. Identity is carried
-    by the legend over a zoomed layout, not by hue alone, since eight slots
-    exceed what the all-pairs colour gate supports in a scatter.
+    Colour carries two things at once. Hue names the measurement: the leading
+    eight by frequency, with the tail folded into one grey series. Lightness
+    within that hue names the decile, because cocoa never hands the model a
+    number -- it bins every continuous value into ten population deciles and
+    fuses the bin into the token, so sodium_Q0 through _Q9 are ten unrelated
+    vocabulary entries whose ordering the model had to learn from context.
+    Ramping light to dark across Q0..Q9 makes that learned ordering legible as
+    geometry: where it was learned, the shades lie along a path. Tokens that
+    carry no value keep the undiluted hue.
+
+    Identity is carried by the legend over a zoomed layout, not by hue alone,
+    since eight slots exceed what the all-pairs colour gate supports in a
+    scatter; the deciles are a within-hue ordinal ramp, which is a separate
+    channel and is read against its own key rather than pairwise.
     """
     group_values = np.asarray(meta["group"].to_list())
     counts = meta["n"].to_numpy()
+    tokens = np.asarray(meta["token"].to_list())
     stems = np.asarray(
         meta.with_columns(stem=pl.col("token").str.replace(r"_Q\d+$", ""))["stem"]
         .to_list()
@@ -188,12 +216,16 @@ def plot_family(
         return
 
     sizes = 3.5 + 5.5 * (np.log1p(counts) / np.log1p(counts.max())) ** 2
+    deciles = [decile_of(t) for t in tokens]
 
     by_stem: dict[str, np.ndarray] = {}
     for stem in dict.fromkeys(stems[local]):
         by_stem[stem] = local[stems[local] == stem]
     ranked = sorted(by_stem, key=lambda t: -counts[by_stem[t]].sum())
     shown, folded = ranked[: len(CATEGORICAL_8)], ranked[len(CATEGORICAL_8):]
+
+    # how much of this family is actually binned, stated rather than implied
+    binned = sum(deciles[i] is not None for i in local)
 
     px, py = coords[local, 0], coords[local, 1]
     # Squared about the family's centre: a family spread wide and flat gives a
@@ -204,12 +236,29 @@ def plot_family(
     mid_x, mid_y = (px.min() + px.max()) / 2, (py.min() + py.max()) / 2
     window = (mid_x - span / 2, mid_x + span / 2, mid_y - span / 2, mid_y + span / 2)
 
-    figure, axes = plt.subplots(
-        1, 3, figsize=(11.2, 4.2),
-        gridspec_kw={"width_ratios": [4.0, 4.0, 1.5], "wspace": 0.06},
-    )
+    # Placed by hand rather than by tight_layout: both scatter panels are
+    # held to equal aspect with adjustable="box", which tight_layout cannot
+    # honour, and it responds by resizing the axes after the limits are set --
+    # which let the zoom panel spill past the window it claims to show.
+    figure = plt.figure(figsize=(11.2, 4.6))
+    axes = [
+        figure.add_axes([0.015, 0.045, 0.40, 0.84]),
+        figure.add_axes([0.435, 0.045, 0.40, 0.84]),
+        figure.add_axes([0.850, 0.045, 0.14, 0.84]),
+    ]
     legend_ax = axes[2]
     legend_ax.axis("off")
+
+    ramps = {stem: shade_ramp(colour, DECILES)
+             for colour, stem in zip(CATEGORICAL_8, shown)}
+    folded_ramp = shade_ramp("#8a8980", DECILES)
+
+    def point_colours(index: np.ndarray, ramp: list[str], base: str) -> list[str]:
+        """the shade each token takes: its decile within the hue, else the hue"""
+        return [
+            base if deciles[i] is None else ramp[min(deciles[i], len(ramp) - 1)]
+            for i in index
+        ]
 
     handles = []
     for position, ax in enumerate(axes[:2]):
@@ -217,9 +266,10 @@ def plot_family(
                    linewidths=0, rasterized=True, zorder=1)
         if folded:
             index = np.concatenate([by_stem[t] for t in folded])
-            ax.scatter(coords[index, 0], coords[index, 1], s=sizes[index],
-                       c="#8a8980", linewidths=0, alpha=0.75, rasterized=True,
-                       zorder=2)
+            ax.scatter(coords[index, 0], coords[index, 1],
+                       s=sizes[index] * (1.0 if position == 0 else 3.2),
+                       c=point_colours(index, folded_ramp, "#8a8980"),
+                       linewidths=0, alpha=0.75, rasterized=True, zorder=2)
             if position == 0:
                 handles.append(
                     plt.Line2D([], [], marker="o", linestyle="none", markersize=4,
@@ -228,8 +278,12 @@ def plot_family(
                 )
         for colour, stem in zip(CATEGORICAL_8, shown):
             index = by_stem[stem]
-            ax.scatter(coords[index, 0], coords[index, 1], s=sizes[index],
-                       c=colour, linewidths=0, alpha=0.9, rasterized=True, zorder=3)
+            if position == 1:
+                decile_path(ax, coords, index, deciles, ramps[stem])
+            ax.scatter(coords[index, 0], coords[index, 1],
+                       s=sizes[index] * (1.0 if position == 0 else 3.2),
+                       c=point_colours(index, ramps[stem], colour),
+                       linewidths=0, alpha=0.9, rasterized=True, zorder=3)
             if position == 0:
                 handles.insert(
                     len(handles) - (1 if folded else 0),
@@ -258,14 +312,193 @@ def plot_family(
     axes[1].set_title("zoomed to the boxed region", loc="left", fontsize=7.5, pad=4)
     axes[1].set_aspect("equal", adjustable="box")
 
-    legend_ax.legend(handles=handles, loc="upper left", bbox_to_anchor=(-0.05, 1.0),
-                     fontsize=6.2, labelcolor=INK_SECONDARY, handletextpad=0.5,
-                     borderpad=0, labelspacing=0.4)
-    figure.suptitle(title, x=0.015, ha="left", fontsize=9.5, y=1.0)
-    figure.tight_layout()
+    legend_ax.legend(
+        handles=handles, loc="upper left", bbox_to_anchor=(-0.05, 1.0),
+        fontsize=6.2, labelcolor=INK_SECONDARY, handletextpad=0.5,
+        borderpad=0, labelspacing=0.4,
+    )
+    if binned:
+        decile_key(legend_ax, binned, int(local.size))
+    figure.suptitle(title, x=0.015, ha="left", fontsize=9.5, y=0.975)
     save_figure(figure, out_path)
     plt.close(figure)
-    logger.info(f"wrote {out_path.name}")
+    logger.info(
+        f"wrote {out_path.name} ({binned}/{local.size} tokens carry a decile)"
+    )
+
+
+def decile_path(ax, coords: np.ndarray, index: np.ndarray,
+                deciles: list, ramp: list[str]) -> None:
+    """
+    join one measurement's deciles in order, Q0 to Q9
+
+    The shade ramp alone is hard to read at this scale, because ten deciles of
+    one measurement often land within a few points of each other and the eye
+    compares touching dots rather than following a sequence. Drawing the
+    sequence makes the question answerable directly: if the model recovered the
+    ordering the path is smooth, and if it did not the path doubles back. It is
+    the same claim the Spearman coefficients make numerically, in a form that
+    can be checked by looking.
+
+    Drawn under the markers and in the measurement's own mid shade so it reads
+    as belonging to that series rather than as a separate layer.
+    """
+    ordered = sorted(
+        (i for i in index if deciles[i] is not None), key=lambda i: deciles[i]
+    )
+    if len(ordered) < 3:
+        return
+    ax.plot(coords[ordered, 0], coords[ordered, 1],
+            color=ramp[len(ramp) // 2], linewidth=0.7, alpha=0.5,
+            solid_capstyle="round", zorder=2.5)
+
+
+def decile_key(ax, binned: int, total: int) -> None:
+    """
+    the within-hue ramp, drawn once as swatches rather than repeated per series
+
+    Lightness is a single ordinal channel shared by every hue on the plot, so
+    one key serves all of them, in neutral grey to avoid implying it belongs to
+    any one measurement. It sits below the hue legend because it is read
+    second: first which measurement, then which decile of it.
+    """
+    # saturation_floor=0 so the neutral stays neutral: the floor is there
+    # to keep a hue from washing out, and a grey has no hue to keep
+    swatches = shade_ramp("#6b6b6b", DECILES, saturation_floor=0.0)
+    left, width, height = -0.05, 0.9 / DECILES, 0.035
+    base = 0.30
+    ax.text(left, base + height + 0.05, "decile within each colour",
+            transform=ax.transAxes, fontsize=6.2, color=INK_SECONDARY)
+    for step, shade in enumerate(swatches):
+        ax.add_patch(
+            plt.Rectangle(
+                (left + step * width, base), width, height,
+                transform=ax.transAxes, facecolor=shade, edgecolor="none",
+                clip_on=False,
+            )
+        )
+    ax.text(left, base - 0.02, "Q0", transform=ax.transAxes,
+            fontsize=5.8, color=INK_SECONDARY, ha="left", va="top")
+    ax.text(left + 0.9, base - 0.02, "Q9", transform=ax.transAxes,
+            fontsize=5.8, color=INK_SECONDARY, ha="right", va="top")
+    ax.text(left, base - 0.10,
+            f"{binned} of {total} tokens carry a\nbinned value; the rest carry none",
+            transform=ax.transAxes, fontsize=5.6, color=INK_SECONDARY,
+            ha="left", va="top", linespacing=1.5)
+
+
+def plot_decile_runs(
+    coords: np.ndarray,
+    meta: pl.DataFrame,
+    coherence: pl.DataFrame,
+    group: str,
+    out_path: pathlib.Path,
+    title: str,
+    logger,
+) -> None:
+    """
+    one small panel per measurement, cropped to that measurement's own deciles
+
+    The family figures colour deciles as a ramp within each hue, which shows
+    that the gradient is there but not whether it is ordered: a measurement's
+    ten deciles span 1.1% of the labs window and 3.2% of the vitals window, so
+    at family scale a decile run is a few pixels and no crop fixes it -- the
+    windows are set by genuine spread, not by outliers (the central-98% window
+    is within 1.14x of the full extent for every family).
+
+    Cropping each measurement to its own run makes the run fill its panel by
+    construction, which is what makes the claim checkable: a model that
+    recovered the ordering draws a path that advances light to dark without
+    doubling back. The Spearman coefficient on each panel is the same quantity
+    measured in the native 1024-d space, so the picture and the number can be
+    read against each other rather than taken on trust.
+
+    Hues follow CATEGORICAL_8 in the same frequency order as the family figure,
+    so the leading measurements keep the colour they had there. Past eight the
+    hues repeat, which is harmless here and would not be in the family figure:
+    each panel is cropped, labelled and read alone, so hue is decoration rather
+    than the thing carrying identity.
+    """
+    scores = {
+        row["measurement"]: (row["spearman"], row["spearman_umap"])
+        for row in coherence.iter_rows(named=True)
+    }
+    counts = meta["n"].to_numpy()
+    stems = np.asarray(
+        meta.with_columns(stem=pl.col("token").str.replace(r"_Q\d+$", ""))["stem"]
+        .to_list()
+    )
+    tokens = np.asarray(meta["token"].to_list())
+    deciles = [decile_of(t) for t in tokens]
+    local = np.flatnonzero(np.asarray(meta["group"].to_list()) == group)
+
+    runs = []
+    for stem in dict.fromkeys(stems[local]):
+        index = np.array([i for i in local[stems[local] == stem]
+                          if deciles[i] is not None])
+        if index.size >= 5:
+            runs.append((stem, index[np.argsort([deciles[i] for i in index])]))
+    if not runs:
+        return
+    runs.sort(key=lambda pair: -counts[pair[1]].sum())
+    runs = runs[:MAX_RUN_PANELS]
+
+    columns = min(6, len(runs))
+    rows = math.ceil(len(runs) / columns)
+    figure, axes = plt.subplots(
+        rows, columns, figsize=(1.62 * columns, 1.90 * rows), squeeze=False
+    )
+    for position, ax in enumerate(axes.ravel()):
+        ax.set_xticks([])
+        ax.set_yticks([])
+        for side in ("top", "right", "bottom", "left"):
+            ax.spines[side].set_visible(position < len(runs))
+            ax.spines[side].set_color(GRID)
+        if position >= len(runs):
+            ax.set_visible(False)
+            continue
+
+        stem, index = runs[position]
+        ramp = shade_ramp(CATEGORICAL_8[position % len(CATEGORICAL_8)], DECILES)
+        x, y = coords[index, 0], coords[index, 1]
+        span = max(np.ptp(x), np.ptp(y), 1e-6) * 1.35
+        ax.set_xlim((x.min() + x.max()) / 2 - span / 2,
+                    (x.min() + x.max()) / 2 + span / 2)
+        ax.set_ylim((y.min() + y.max()) / 2 - span / 2,
+                    (y.min() + y.max()) / 2 + span / 2)
+        ax.set_aspect("equal", adjustable="box")
+
+        ax.plot(x, y, color=ramp[len(ramp) // 2], linewidth=0.8, alpha=0.55,
+                solid_capstyle="round", zorder=2)
+        ax.scatter(x, y, s=46,
+                   c=[ramp[min(deciles[i], DECILES - 1)] for i in index],
+                   linewidths=0.4, edgecolors=SURFACE["light"], zorder=3)
+        ax.annotate("Q0", (x[0], y[0]), textcoords="offset points",
+                    xytext=(0, 7), ha="center", fontsize=5.0,
+                    color=INK_SECONDARY, zorder=4)
+        ax.annotate(f"Q{deciles[index[-1]]}", (x[-1], y[-1]),
+                    textcoords="offset points", xytext=(0, 7), ha="center",
+                    fontsize=5.0, color=INK_SECONDARY, zorder=4)
+
+        name = stem.split("//")[-1]
+        # native first because it is the claim about the model; "here" is
+        # the projection, and where the two part company the drawn path is
+        # the casualty rather than the evidence
+        pair = scores.get(stem)
+        label = name[:22] if pair is None else (
+            f"{name[:22]}\nρ {pair[0]:+.2f} native \u00b7 "
+            f"{pair[1]:+.2f} here"
+        )
+        ax.set_title(label, fontsize=5.5, color=INK_PRIMARY, loc="center",
+                     pad=3, linespacing=1.4)
+
+    figure.suptitle(title, x=0.012, ha="left", fontsize=9.5, y=0.995)
+    # h_pad clears the two-line titles, which sit above an equal-aspect box
+    # and would otherwise land on the row above
+    figure.tight_layout(rect=(0, 0, 1, 0.945), h_pad=2.4, w_pad=1.1)
+    save_figure(figure, out_path)
+    plt.close(figure)
+    logger.info(f"wrote {out_path.name} ({len(runs)} measurements)")
 
 
 def quantile_coherence(
@@ -390,6 +623,10 @@ def main() -> None:
         random_state=args.seed,
     ).fit_transform(vectors)
 
+    # ahead of the figures because the decile-run panels are labelled with
+    # these coefficients: the picture and the number should come from one pass
+    coherence = quantile_coherence(vectors, coords, meta, logger)
+
     groups = [g for g in list(FAMILY_GROUPS) + ["other"]
               if (meta["group"] == g).any()]
     for group in groups:
@@ -408,8 +645,17 @@ def main() -> None:
             f"{measurements} measurements",
             logger,
         )
+        plot_decile_runs(
+            coords,
+            meta,
+            coherence,
+            group,
+            paths.figure_home / f"token_deciles_{slug(group)}.png",
+            f"{paths.model_key} \u00b7 {group}: decile runs, each cropped to "
+            f"its own measurement",
+            logger,
+        )
 
-    coherence = quantile_coherence(vectors, coords, meta, logger)
     if coherence.height:
         coherence.write_csv(paths.table_home / "token_quantile_ordering.csv")
     meta.with_columns(

@@ -96,12 +96,16 @@ end_organ:
 # included. That is why the cohort comes out large (tens of thousands rather
 # than the hundreds a cardiogenic-shock registry would hold).
 #
-# Applied as an enrollment criterion. The flag is computed for every patient
-# reaching criterion 2 and then used to filter, so the ledger still shows what
-# each arm contributed before the restriction. Set `enabled: false` to go back
-# to reporting it without subsetting.
+# NOT applied as an enrollment criterion. The flag is computed and reported for
+# every patient reaching criterion 2, so the size of a cardiac-origin cohort
+# stays visible, but it does not subset anything: the study question is where
+# the *mechanisms* of shock sit relative to one another in the latent space, and
+# filtering to one of them makes that unanswerable. Set `enabled: true` to
+# restrict the cohort to it again.
+#
+# With it off, the coded mechanism is attached instead -- see `shock_type`.
 cardiac_origin:
-  enabled: !!bool true
+  enabled: !!bool false
   # satisfied by either an inotrope infusion or a mechanical circulatory
   # support procedure. Diagnosis codes are deliberately not used: an ICD
   # diagnosis records an assertion about the patient, whereas an inotrope
@@ -157,6 +161,44 @@ cardiac_origin:
       - 5A15 # extracorporeal membrane oxygenation
       - 5A02 # assistance with cardiac output (balloon pump, impeller pump)
       - 02HA # insertion of short-term external heart assist device
+
+# ------------------------------------------------- shock type (labelling only)
+# What the coders said the mechanism was, from clif_hospital_diagnosis. Attached
+# to every enrolled patient and never used to select one.
+#
+# This is the one place in the pipeline that reads diagnosis codes, and it is a
+# deliberate exception to the rule applied everywhere else. The mechanism of
+# shock is a clinical judgement with no corresponding measurement, so the coded
+# diagnosis is the only evidence there is -- but it only ever describes patients
+# already enrolled on physiology.
+#
+# Matched by code prefix across both ICD-10-CM and ICD-9-CM without consulting
+# diagnosis_code_format: ICD-9 shock codes are numeric and ICD-10's begin with a
+# letter, so the prefixes cannot collide and the match does not depend on a
+# column the two sites populate differently (NU files both systems, UCMC only
+# ICD-10-CM).
+#
+# Prevalence among hospitalizations carrying any diagnosis (UCMC / NU):
+#   septic R65.21        5.3% / 14.1%   <- a 2.7x coding gap, not a case-mix one
+#   cardiogenic R57.0    5.1% /  5.6%
+#   hypovolemic R57.1    2.7% /  4.0%
+#   other R57.8/R57.9    3.5% /  8.1%
+# Codes checked and found absent or negligible at both sites, so folded into
+# `other` rather than given their own arm: R57.21 haemorrhagic (absent),
+# R57.20 traumatic (0.0%), T78.2 anaphylactic (0.0% / 0.3%), T81.1
+# postprocedural (0.4% / 0.8%), O75.1 obstetric, A48.3 toxic shock.
+shock_type:
+  # Require the diagnosis to be flagged present on arrival. Left off: poa_present
+  # is populated for every UCMC row but only 61% of NU's, so requiring it would
+  # silently drop a third of NU's diagnoses. Reported, not applied.
+  require_present_on_arrival: !!bool false
+
+  code_groups:
+    septic: ['R6521', '78552']
+    cardiogenic: ['R570', '78551']
+    hypovolemic: ['R571', '7851']
+    other: ['R5720', 'R5721', 'R578', 'R579', 'T811', 'T782', 'T8052',
+            'O751', 'A483', '7859', '9950', '99500', '9584', '0403']
 
 # ---------------------------------------------------------- phenotype feature
 # Zweck et al., "Phenotyping Cardiogenic Shock", J Am Heart Assoc 2021;10:e020085

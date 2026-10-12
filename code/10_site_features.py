@@ -71,6 +71,12 @@ PROPORTIONS = [
     ("cardiac_inotrope", "inotrope infusion"),
     ("cardiac_mcs", "MCS procedure"),
     ("cardiac_troponin", "troponin >= 500"),
+    # coded mechanism. Not mutually exclusive: a patient can carry more than one
+    # shock code, which is what the `mixed` level of `shock_type` collapses.
+    ("shock_septic", "coded septic shock"),
+    ("shock_cardiogenic", "coded cardiogenic shock"),
+    ("shock_hypovolemic", "coded hypovolemic shock"),
+    ("shock_other", "coded other/unspecified shock"),
 ]
 
 

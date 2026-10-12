@@ -47,6 +47,21 @@ CATEGORICAL_8 = (
     "#e34948",  # red
 )
 
+#: The answer past three series: one panel per group, that group in a single
+#: highlight hue, every other point in grey behind it.
+#:
+#: A scatter puts every series on screen at once, so the all-pairs gate applies,
+#: and the palette validates three slots under it. Four or more categories
+#: therefore cannot be separated by colour at all, and the fix is to stop asking
+#: colour to carry the identity: each panel names its own group, so each hue
+#: only has to separate from the context layer and the surface rather than from
+#: five other hues.
+#:
+#: Slot 1 against this context layer is normal-vision dE 27.4 and clears every
+#: CVD floor trivially -- there is only one pair to check.
+HIGHLIGHT = CATEGORICAL[0]
+CONTEXT = "#e2e1dc"
+
 #: Institutional colours, taken from each site's own branding. Fixed per site
 #: rather than assigned by position, so a site keeps its colour across every
 #: figure and however many other sites are present.
@@ -78,6 +93,60 @@ def site_colors(sites) -> dict[str, str]:
             raise ValueError(
                 f"no colour for site {site!r}: add it to LOGO_PALETTE"
             )
+    return out
+
+
+def shade_ramp(hex_colour: str, n: int = 10,
+               lightness: tuple[float, float] = (0.68, 0.30),
+               saturation_floor: float = 0.60) -> list[str]:
+    """
+    a light-to-dark ramp of one hue, for the deciles of one measurement
+
+    cocoa discretises every numeric value into ten population deciles and
+    fuses the bin into the token name, so `sodium_Q0` through `_Q9` are ten
+    independent vocabulary entries with no ordering built in. Giving a
+    measurement one hue and its deciles a lightness ramp within that hue lets
+    the learned ordering be read off the figure directly: if the model
+    recovered it, the shades lie along a path.
+
+    Hue is held fixed and only lightness varies, so the ramp is monotone in
+    perceived value and the measurement's identity survives.
+
+    The band is narrower than the full lightness range on purpose. A ten-step
+    within-hue ramp cannot pass the categorical adjacent-pairs gate, and should
+    not be asked to -- that gate stops two *unrelated* series being confused,
+    whereas these steps are deliberately similar because they are ordered and
+    are read against a key rather than pairwise. The gates that do bind are the
+    ones about vanishing, and over CATEGORICAL_8 this band satisfies them:
+
+      pale end vs the light-grey context layer   dE 13.5   (does not vanish)
+      pale end vs the grey "others" series       dE 14.8   (not mistaken for it)
+      minimum chroma over all shades             0.104     (clears the 0.10 floor)
+      Q0 vs Q9                                   dE 29.2   (reads as a ramp)
+
+    The saturation floor is what buys the chroma: at lightness 0.68 a hue left
+    at its native saturation desaturates toward grey, which is exactly the
+    confusion to avoid.
+    """
+    import colorsys
+
+    hex_colour = hex_colour.lstrip("#")
+    rgb = tuple(int(hex_colour[i : i + 2], 16) / 255 for i in (0, 2, 4))
+    hue, _, saturation = colorsys.rgb_to_hls(*rgb)
+    saturation = max(saturation, saturation_floor)
+    out = []
+    for step in range(n):
+        level = lightness[0] + (lightness[1] - lightness[0]) * (
+            step / max(n - 1, 1)
+        )
+        out.append(
+            "#{:02x}{:02x}{:02x}".format(
+                *(
+                    int(round(255 * v))
+                    for v in colorsys.hls_to_rgb(hue, level, saturation)
+                )
+            )
+        )
     return out
 
 
@@ -401,8 +470,11 @@ def main() -> None:
     self_test()
     for label, palette in (
         ("sites (up to 3)", list(CATEGORICAL)),
-        ("phenotype (I, II, III)", list(PHENOTYPE_COLORS.values())),
-        ("in-hospital mortality", list(MORTALITY_COLORS.values())),
+        (
+            f"phenotype ({', '.join(PHENOTYPE_LEVELS)})",
+            list(phenotype_colors().values()),
+        ),
+        ("in-hospital mortality", list(mortality_colors().values())),
     ):
         # scatterplots put every series on screen together, so all pairs must
         # separate, not just adjacent ones
