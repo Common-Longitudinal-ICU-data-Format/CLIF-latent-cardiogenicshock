@@ -1090,19 +1090,27 @@ def main() -> None:
     else:
         headline = "no cohort table"
 
-    toc = "".join(
-        f'<li><a href="#{anchor}">{label}</a></li>'
-        for anchor, label in (
-            ("cohort", "1 &middot; Cohort"),
-            ("tokens", "2 &middot; Token embeddings"),
-            ("projections", "3 &middot; Patient embeddings"),
-            ("patients", "4 &middot; Embeddings over time"),
+    # Every entry here must point at a heading that was actually emitted.
+    # Sections 5 and 6 only exist when 09 is current, and listing them
+    # regardless leaves the reader two links that quietly do nothing.
+    entries = [
+        ("cohort", "1 &middot; Cohort"),
+        ("tokens", "2 &middot; Token embeddings"),
+        ("projections", "3 &middot; Patient embeddings"),
+        ("patients", "4 &middot; Embeddings over time"),
+    ]
+    if current:
+        entries += [
             ("paths", "5 &middot; Individual trajectories"),
             ("flow", "6 &middot; Latent flow"),
-            ("sites", "7 &middot; UCMC versus NU"),
-            ("models", "8 &middot; Models"),
-            ("methods", "Methods &amp; caveats"),
-        )
+        ]
+    entries += [
+        ("sites", "7 &middot; UCMC versus NU"),
+        ("models", "8 &middot; Models"),
+        ("methods", "Methods &amp; caveats"),
+    ]
+    toc = "".join(
+        f'<li><a href="#{anchor}">{label}</a></li>' for anchor, label in entries
     )
     document = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
