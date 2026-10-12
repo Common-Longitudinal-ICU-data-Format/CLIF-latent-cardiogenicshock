@@ -1,0 +1,264 @@
+%YAML 1.2
+---
+# Randomised trials that underpin the cardiogenic shock guidelines, and the
+# populations they enrolled.
+#
+# This file holds *literature values only* -- what each paper reported. The
+# eligibility logic lives in code/clifcs/trials.py, where each criterion can be
+# commented and reviewed next to the CLIF column it reads. Numbers here are
+# meant to be checkable against the cited paper, so each carries its source.
+#
+# `published` is used two ways by 11_trial_alignment.py:
+#
+#   1. as a REPRESENTATIVENESS CHECK -- our trial-eligible subset is compared
+#      against the enrolled population. If our eligible patients are a decade
+#      older or half as hyperlactataemic, "eligible" does not mean "resembles
+#      the people the recommendation was tested on", and the comparison says so.
+#   2. nowhere else. The trial *regions* in embedding space are fitted from our
+#      own eligible patients, not from these marginal summaries -- see the
+#      note on circularity in clifcs.trials.fit_regions.
+#
+# A published value of `null` means the paper did not report it (or it was not
+# retrievable), not that it is zero.
+#
+# ---------------------------------------------------------------------------
+# WHAT CANNOT BE APPLIED AT THESE SITES
+#
+# Left ventricular ejection fraction is unavailable. Neither extract has an
+# echo table, and ejection fraction appears in no vitals, labs or assessment
+# category at either site. DanGer Shock enrolled on LVEF < 45% and SHOCK on
+# shock due to LV failure, so for those two the eligible set here is a strict
+# SUPERSET of the trial's: every other criterion is applied, the ventricular
+# one is not. Each trial's `not_implementable` list in trials.py records this,
+# and 11 prints it beside every count so no eligibility number is read as
+# exact.
+#
+# Coronary anatomy is unavailable for the same reason -- no angiography detail
+# in CLIF 2.1 -- which is why CULPRIT-SHOCK's multivessel requirement and
+# OptimaCC's "after successful PCI" cannot be applied.
+
+trials:
+
+  # -------------------------------------------------------------- SHOCK 1999
+  shock:
+    label: SHOCK
+    year: !!int 1999
+    intervention: early revascularisation (PCI/CABG)
+    guideline: >-
+      Emergency culprit-vessel revascularisation in ACS with cardiogenic shock
+      (2025 ACC/AHA/ACEP/NAEMSP/SCAI ACS guideline; 2023 ESC ACS guideline)
+    citation: Hochman JS et al. N Engl J Med 1999;341:625-34
+    published:
+      n: !!int 302
+      age_mean: !!float 66.0
+      age_sd: !!float 10.0
+      age_median: null
+      pct_female: !!float 0.32
+      lactate_median: null
+      sbp_median: null
+      lvef_median: null
+      mortality_control: !!float 0.561 # 30-day, medical stabilisation arm
+      source_note: >-
+        Age and sex from the NEJM abstract. Per-arm baseline values were not
+        retrievable without journal access; no lactate or SBP reported.
+
+  # ------------------------------------------------------- IABP-SHOCK II 2012
+  iabp_shock_ii:
+    label: IABP-SHOCK II
+    year: !!int 2012
+    intervention: intra-aortic balloon counterpulsation
+    guideline: >-
+      Against routine IABP in cardiogenic shock without mechanical
+      complications (ESC HF 2016 Class III B; carried into 2023 ESC ACS)
+    citation: Thiele H et al. N Engl J Med 2012;367:1287-96
+    published:
+      n: !!int 600
+      age_mean: null
+      age_sd: null
+      age_median: !!float 70.0
+      pct_female: !!float 0.31
+      lactate_median: null
+      sbp_median: null
+      lvef_median: !!float 35.0
+      mortality_control: !!float 0.414 # 30-day, control arm
+      source_note: >-
+        Median age and LVEF from the ACC trial summary; female share 31% from
+        the trial's sex substudy (187 of 600). Diabetes share not confirmed.
+
+  # ------------------------------------------------------ CULPRIT-SHOCK 2017
+  culprit_shock:
+    label: CULPRIT-SHOCK
+    year: !!int 2017
+    intervention: culprit-lesion-only PCI (vs immediate multivessel)
+    guideline: >-
+      Against routine immediate non-infarct-artery PCI in ACS with cardiogenic
+      shock (2025 ACC/AHA ACS guideline; staged non-IRA PCI IIa C in 2023 ESC)
+    citation: Thiele H et al. N Engl J Med 2017;377:2419-32
+    published:
+      n: !!int 706
+      age_mean: null
+      age_sd: null
+      age_median: !!float 70.0
+      pct_female: !!float 0.25
+      lactate_median: null
+      sbp_median: null
+      lvef_median: null
+      mortality_control: !!float 0.516 # 30-day, multivessel arm
+      source_note: >-
+        Median age 70 and roughly 75% male from secondary summaries of the
+        trial; the NEJM Table 1 was not retrievable.
+
+  # ----------------------------------------------------------- SOAP II 2010
+  soap_ii:
+    label: SOAP II (CS subgroup)
+    year: !!int 2010
+    intervention: norepinephrine rather than dopamine as first vasopressor
+    guideline: >-
+      Norepinephrine preferred as first-line vasopressor in cardiogenic shock
+      (2025 ACC CS consensus; ESC HF 2021)
+    citation: De Backer D et al. N Engl J Med 2010;362:779-89
+    published:
+      n: !!int 280 # cardiogenic subgroup of 1,679 randomised
+      age_mean: null
+      age_sd: null
+      age_median: null
+      pct_female: null
+      lactate_median: null
+      sbp_median: null
+      lvef_median: null
+      mortality_control: null
+      source_note: >-
+        The 280 is the prespecified cardiogenic subgroup. The paper reports
+        baseline characteristics for the whole 1,679-patient trial, not for the
+        subgroup, so no subgroup demographics are available.
+
+  # --------------------------------------------------------- OptimaCC 2018
+  optimacc:
+    label: OptimaCC
+    year: !!int 2018
+    intervention: norepinephrine rather than epinephrine
+    guideline: >-
+      Against epinephrine as first-line vasopressor in AMI-related cardiogenic
+      shock (2025 ACC CS consensus)
+    citation: Levy B et al. J Am Coll Cardiol 2018;72:173-82
+    published:
+      n: !!int 57
+      age_mean: null
+      age_sd: null
+      age_median: null
+      pct_female: !!float 0.34
+      lactate_median: null
+      sbp_median: null
+      lvef_median: null
+      mortality_control: null
+      source_note: >-
+        57 patients, stopped early for excess refractory shock on epinephrine.
+        Sex was imbalanced between arms (reported as 48% vs 20% female in a
+        secondary summary), so the 0.34 pooled figure is approximate.
+
+  # -------------------------------------------------------------- ECMO-CS 2022
+  ecmo_cs:
+    label: ECMO-CS
+    year: !!int 2022
+    intervention: immediate VA-ECMO (vs early conservative)
+    guideline: >-
+      Short-term mechanical circulatory support may be considered in refractory
+      shock (2023 ESC ACS IIb C); informs ISHLT 2024 HF-CS consensus
+    citation: Ostadal P et al. Circulation 2023;147:454-64
+    published:
+      n: !!int 117
+      age_mean: null
+      age_sd: null
+      age_median: !!float 66.0
+      pct_female: !!float 0.25
+      lactate_median: !!float 5.0
+      sbp_median: null
+      lvef_median: null
+      mortality_control: null
+      source_note: >-
+        Median age reported as 67 (immediate) and 65 (conservative); 66 used
+        here as the pooled value. Lactate 5.3 / 4.7 mmol/L by arm. Roughly
+        three-quarters male. The one trial here with a substantial non-AMI
+        population (STEMI 50.4%, heart-failure exacerbation 23.1%).
+
+  # ------------------------------------------------------------ ECLS-SHOCK 2023
+  ecls_shock:
+    label: ECLS-SHOCK
+    year: !!int 2023
+    intervention: routine extracorporeal life support
+    guideline: >-
+      Against routine ECLS in infarct-related cardiogenic shock; the evidence
+      behind the IIb framing of short-term MCS in the 2023 ESC ACS guideline
+    citation: Thiele H et al. N Engl J Med 2023;389:1286-97
+    published:
+      n: !!int 417
+      age_mean: null
+      age_sd: null
+      age_median: !!float 63.0
+      pct_female: !!float 0.187
+      lactate_median: !!float 7.0
+      sbp_median: null
+      lvef_median: null
+      mortality_control: !!float 0.490 # 30-day, control arm
+      source_note: >-
+        Median age 63 (IQR 56-70), 81.3% men. Lactate ~7 mmol/L. 77.7% had been
+        resuscitated before enrolment, and patients over 80 were excluded
+        outright -- the narrowest population of any trial here.
+
+  # ----------------------------------------------------------- DanGer Shock 2024
+  danger_shock:
+    label: DanGer Shock
+    year: !!int 2024
+    intervention: microaxial flow pump (Impella CP)
+    guideline: >-
+      First positive randomised evidence for a percutaneous MCS device; informs
+      the 2025 ACC CS consensus escalation pathway
+    citation: Moller JE et al. N Engl J Med 2024;390:1382-93
+    published:
+      n: !!int 355
+      age_mean: null
+      age_sd: null
+      age_median: !!float 67.0
+      pct_female: !!float 0.208
+      lactate_median: !!float 4.5
+      sbp_median: !!float 83.0
+      lvef_median: !!float 25.0
+      mortality_control: !!float 0.585 # 180-day, standard-care arm
+      source_note: >-
+        Median age 67 (67 vs 69 by arm), 79.2% men, lactate 4.5-4.6 mmol/L,
+        SBP 82-84 mmHg, LVEF 25%. STEMI only, and patients comatose after
+        out-of-hospital arrest were excluded.
+
+# ------------------------------------------------------- region and orphan rule
+regions:
+  # Trial regions are fitted in the PCA subspace of the embeddings rather than
+  # in the 2-d projection: a neighbour-graph layout is not metric, so a
+  # Mahalanobis radius measured in it would not mean anything.
+  pca_components: !!int 50
+
+  # A region needs enough eligible patients for its covariance to be estimable.
+  # Below this it is reported but not fitted, and no distances are produced.
+  min_eligible: !!int 50
+
+  # Neighbours for the affinity measure. 30 matches the k that 03 uses for
+  # neighbourhood purity, so the two numbers are measured over the same
+  # neighbourhood size and can be read against each other.
+  neighbours: !!int 30
+
+  # An ineligible patient "resembles" a trial's population when their
+  # neighbourhood holds more trial-eligible patients than chance would put
+  # there: the upper binomial tail at the trial's base rate, below this alpha.
+  #
+  # A fixed percentile was tried first and degenerates for the rare trials.
+  # DanGer Shock covers 0.6% of the cohort, so nearly every ineligible patient
+  # has zero eligible neighbours, the 95th percentile of that sits at one
+  # neighbour in thirty, and 4,381 patients were called "inside the DanGer
+  # Shock region" on one neighbour -- which is simply what chance gives. The
+  # binomial rule raises the bar as prevalence falls.
+  enrichment_alpha: !!float 0.01
+
+  # NOTE: there is deliberately no covariance parameter here. Regions share one
+  # whitening fitted on the whole cohort rather than each carrying its own
+  # covariance -- scaling a region by its own spread makes every region the same
+  # size (the distance concentrates at sqrt(d)), which is how the first version
+  # of this analysis produced eight identical radii. See clifcs.trials.whiten.

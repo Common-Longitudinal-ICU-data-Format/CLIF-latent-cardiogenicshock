@@ -588,7 +588,7 @@ def trajectory_is_current(paths, logger=None) -> tuple[bool, str]:
     """
     whether 09's trajectory artifacts describe the cohort 01 last wrote
 
-    Sections 4 to 6 come from 09, which is the most expensive script here and
+    Sections 5 to 7 come from 09, which is the most expensive script here and
     so the one most likely to be left behind when the cohort definition
     changes. Its figures carry no record of which cohort they were drawn from,
     so a report that renders them unconditionally will happily show 7,323
@@ -633,7 +633,7 @@ def trajectory_is_current(paths, logger=None) -> tuple[bool, str]:
     if extra:
         note += f"; {extra:,} of their patients are no longer in the cohort"
     if logger is not None:
-        logger.warning(f"skipping sections 4-6: {note}")
+        logger.warning(f"skipping sections 5-7: {note}")
     return False, note
 
 
@@ -702,6 +702,137 @@ def section_projections(paths, out: list) -> None:
         "than it is."))
 
 
+def section_trials(paths, out: list) -> None:
+    """
+    11's comparison of the cohort against the trials behind the guidelines
+
+    Renders only what 11 produced, so it disappears cleanly if 11 has not run.
+    """
+    table_home = paths.output_home / "tables" / "GEM-all"
+    anchors = [
+        anchor
+        for anchor in ANCHORS
+        if (table_home / f"trial_eligibility_{anchor}.csv").is_file()
+    ]
+    if not anchors:
+        return
+
+    out.append('<h2 id="trials">4 &middot; Guideline fit</h2>')
+    out.append(
+        "<p>Every cardiogenic shock recommendation rests on a trial that "
+        "enrolled a narrow slice of the people who present in shock. This asks "
+        "two questions that are easy to conflate: <b>eligibility</b> &mdash; "
+        "would the trial have enrolled this patient? &mdash; and "
+        "<b>proximity</b> &mdash; do they resemble the patients it did enrol? "
+        "Proximity is the share of a patient's 30 nearest neighbours in the "
+        "50-d PCA space that the trial would have taken, the same "
+        "neighbourhood measure section 7 uses for site purity.</p>"
+    )
+
+    anchor_tabs = []
+    for anchor in anchors:
+        blocks = []
+        eligibility = pl.read_csv(table_home / f"trial_eligibility_{anchor}.csv")
+        blocks.append(
+            ("Eligibility", table(
+                eligibility.select(
+                    "trial", "year", "n_eligible", "share_eligible",
+                    "mortality_eligible", "n_inside_not_eligible",
+                    "centroid_separation_spreads", "criteria_not_applied",
+                ),
+                {
+                    "n_eligible": thousands,
+                    "share_eligible": pct,
+                    "mortality_eligible": pct,
+                    "n_inside_not_eligible": thousands,
+                    "centroid_separation_spreads": num(2),
+                },
+                key_column="trial",
+            ))
+        )
+        representativeness = table_home / f"trial_representativeness_{anchor}.csv"
+        if representativeness.is_file():
+            blocks.append(
+                ("Us vs them", table(
+                    pl.read_csv(representativeness).select(
+                        "trial", "n_published", "n_eligible_here",
+                        "age_published", "age_here",
+                        "pct_female_published", "pct_female_here",
+                        "lactate_published", "lactate_here",
+                    ),
+                    {
+                        "n_published": thousands,
+                        "n_eligible_here": thousands,
+                        "age_published": num(1), "age_here": num(1),
+                        "pct_female_published": pct, "pct_female_here": pct,
+                        "lactate_published": num(1), "lactate_here": num(1),
+                    },
+                    key_column="trial",
+                ))
+            )
+        coverage = table_home / f"trial_coverage_{anchor}.csv"
+        if coverage.is_file():
+            blocks.append(
+                ("Coverage", table(
+                    pl.read_csv(coverage),
+                    {
+                        "n": thousands, "share": pct, "mortality": pct,
+                        "median_age": num(0), "pct_female": pct,
+                        "median_lactate": num(1), "median_icu_los": num(1),
+                    },
+                    key_column="n_eligible_trials",
+                ))
+            )
+        home = paths.output_home / "figures" / "GEM-all" / f"anchor-{anchor}"
+        for name, label in (("trial_regions", "Where each trial sits"),
+                            ("trial_coverage", "Coverage")):
+            body = figure(home / f"{name}.png")
+            if body:
+                blocks.append((label, body))
+        anchor_tabs.append((anchor, tabs(blocks)))
+
+    out.append(tabs(anchor_tabs))
+
+    out.append(callout(
+        "<b>Three of the eight trials reduce to the same computable criteria.</b> "
+        "Once the parts we cannot evaluate are dropped &mdash; shock due to LV "
+        "failure for SHOCK, planned revascularisation for IABP-SHOCK II, "
+        "multivessel disease for CULPRIT-SHOCK &mdash; all three become "
+        "&ldquo;acute MI plus shock&rdquo; and select the identical 4,397 "
+        "patients. The figure labels the duplicates rather than implying three "
+        "independent pieces of evidence. The missing criteria matter in the "
+        "other direction too: left ventricular ejection fraction is unavailable "
+        "at both sites, so every eligibility count here is a <i>superset</i> of "
+        "what the trial would really have enrolled.", "warn"))
+
+    out.append(callout(
+        "<b>The trial populations are not distinct regions of the latent "
+        "space.</b> Centroid separation &mdash; the distance from a trial's "
+        "centroid to the cohort's, in within-group spreads &mdash; runs from "
+        "0.03 to 0.32. Anything under about 0.5 means the trial's patients sit "
+        "essentially where everyone else does, so no distance-to-centroid "
+        "measure can separate them however it is fitted. That is why the "
+        "proximity measure here is a local neighbourhood rate and not a "
+        "Mahalanobis radius; the first two versions of this analysis used the "
+        "latter and returned the same number, 8.5, for all eight trials, which "
+        "is the chi quantile for 50 dimensions and says nothing about any "
+        "trial."))
+
+    out.append(callout(
+        "<b>Most of this cohort is covered by no trial at all.</b> 62.6% of "
+        "patients at the 24 h anchor meet no specific trial's criteria "
+        "<i>and</i> have no trial-enriched neighbourhood. They are much less "
+        "sick than the covered patients &mdash; 8.7% in-hospital mortality "
+        "against 27.2% &mdash; and 72.9% of them carry no shock diagnosis code "
+        "either, so the two independent measures of &ldquo;not really the "
+        "population the evidence is about&rdquo; agree. Read together with the "
+        "shock-type section, the reading is that criteria 1 and 2 enrol a large "
+        "mild population that neither the coders nor the trialists would "
+        "recognise as cardiogenic shock. <b>Even among the "
+        "cardiogenic-coded patients, 26.3% are covered by nothing.</b>",
+        "warn"))
+
+
 def section_patient_embeddings(paths, out: list) -> None:
     home = paths.output_home / "figures" / "GEM-all" / "trajectory"
     panels = [
@@ -710,7 +841,7 @@ def section_patient_embeddings(paths, out: list) -> None:
     ]
     if not any(body for _, body in panels):
         return
-    out.append('<h2 id="patients">4 &middot; Embeddings over time</h2>')
+    out.append('<h2 id="patients">5 &middot; Embeddings over time</h2>')
     out.append(
         "<p>Every patient embedded every 6 hours from 24 h before cardiogenic "
         "shock onset to 48 h after, so one patient contributes a sequence of "
@@ -733,7 +864,7 @@ def section_patient_paths(paths, out: list) -> None:
     ]
     if not any(body for _, body in panels):
         return
-    out.append('<h2 id="paths">5 &middot; Individual trajectories</h2>')
+    out.append('<h2 id="paths">6 &middot; Individual trajectories</h2>')
     out.append(
         "<p>Five patients drawn at random from those with at least five "
         "timepoints, each shown in its own panel against the same cloud, with "
@@ -766,7 +897,7 @@ def section_flow(paths, out: list) -> None:
     if flow is None:
         return
     projection_label = "PaCMAP" if flow.stem.endswith("pacmap") else "UMAP"
-    out.append('<h2 id="flow">6 &middot; Latent flow</h2>')
+    out.append('<h2 id="flow">7 &middot; Latent flow</h2>')
     out.append(
         "<p>The mean displacement between consecutive timepoints, drawn as a "
         "streamplot after scVelo's velocity embedding. One difference favours "
@@ -833,7 +964,7 @@ def section_sites(paths, out: list) -> None:
     shared = paths.output_home / "figures" / "shared"
     if not (shared / "site_features.png").is_file():
         return
-    out.append('<h2 id="sites">7 &middot; UCMC versus NU</h2>')
+    out.append('<h2 id="sites">8 &middot; UCMC versus NU</h2>')
     out.append(
         "<p>The embedding separates the two sites almost perfectly (section 7), "
         "so the first question is whether the patients differ that much. "
@@ -890,7 +1021,7 @@ def section_models(paths, out: list, logger) -> None:
     if results is None and not purity_rows:
         return
 
-    out.append('<h2 id="models">8 &middot; Models</h2>')
+    out.append('<h2 id="models">9 &middot; Models</h2>')
     out.append(
         "<p>Three frozen checkpoints of the same architecture, differing only "
         "in what they were trained on: <b>GEM-all</b> on MIMIC + UCMC + NU, "
@@ -1019,6 +1150,15 @@ def section_methods(paths, cfg, out: list) -> None:
         "both. 01 warns on per-format coverage.</li>"
         "<li><b>AMS is GCS-based</b> and cannot distinguish organ dysfunction "
         "from sedation in a ventilated population.</li>"
+        "<li><b>Trial eligibility is a superset, not a match.</b> Left "
+        "ventricular ejection fraction and coronary anatomy are unavailable at "
+        "both sites, so DanGer Shock's LVEF &lt; 45%, SHOCK's LV-failure "
+        "requirement and CULPRIT-SHOCK's multivessel requirement cannot be "
+        "applied. Three trials consequently collapse to one criterion set. "
+        "Trial regions are also fitted from <i>our</i> eligible patients, never "
+        "from trial participants &mdash; we have no embeddings for those &mdash; "
+        "so &ldquo;inside the SHOCK region&rdquo; means &ldquo;resembles the "
+        "patients here who would have qualified&rdquo;.</li>"
         "<li><b>Shock type is a coded label, not an adjudicated one.</b> "
         "<code>clif_hospital_diagnosis</code> is hospitalization-level, so a "
         "code entered on day 20 is indistinguishable from one entered on "
@@ -1059,6 +1199,7 @@ def main() -> None:
     section_cohort(paths, cfg, out)
     section_tokens(paths, out)
     section_projections(paths, out)
+    section_trials(paths, out)
     current, note = trajectory_is_current(paths, logger)
     if current:
         section_patient_embeddings(paths, out)
@@ -1066,10 +1207,10 @@ def main() -> None:
         section_flow(paths, out)
     else:
         out.append(
-            '<h2 id="patients">4 &middot; Embeddings over time</h2>'
+            '<h2 id="patients">5 &middot; Embeddings over time</h2>'
         )
         out.append(callout(
-            "<b>Sections 4 to 6 are omitted: 09 has not been rerun for this "
+            "<b>Sections 5 to 7 are omitted: 09 has not been rerun for this "
             f"cohort.</b> {html.escape(note)}. Trajectory figures carry no "
             "record of the cohort they were drawn from, so showing them here "
             "would put one cohort's figures under another's tables. Run "
@@ -1097,16 +1238,17 @@ def main() -> None:
         ("cohort", "1 &middot; Cohort"),
         ("tokens", "2 &middot; Token embeddings"),
         ("projections", "3 &middot; Patient embeddings"),
-        ("patients", "4 &middot; Embeddings over time"),
+        ("trials", "4 &middot; Guideline fit"),
+        ("patients", "5 &middot; Embeddings over time"),
     ]
     if current:
         entries += [
-            ("paths", "5 &middot; Individual trajectories"),
-            ("flow", "6 &middot; Latent flow"),
+            ("paths", "6 &middot; Individual trajectories"),
+            ("flow", "7 &middot; Latent flow"),
         ]
     entries += [
-        ("sites", "7 &middot; UCMC versus NU"),
-        ("models", "8 &middot; Models"),
+        ("sites", "8 &middot; UCMC versus NU"),
+        ("models", "9 &middot; Models"),
         ("methods", "Methods &amp; caveats"),
     ]
     toc = "".join(

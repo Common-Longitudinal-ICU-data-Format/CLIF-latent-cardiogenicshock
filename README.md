@@ -25,7 +25,8 @@ which filtering to one of them would make unanswerable.
 |---|---|
 | [code/01_data_processing.py](code/01_data_processing.py) | Cardiogenic shock cohort, filter ledger, outcomes, phenotypes; then CLIF subset → clifpy derived tables → cocoa collate/tokenize/winnow |
 | [code/02_model_embedding.py](code/02_model_embedding.py) | Reports model structure and embedding dimension; runs `cotorra.Extractor`; writes `output/patient_level_data/` |
-| [code/03_embedding_analysis.py](code/03_embedding_analysis.py) | PCA + UMAP, and the scatterplots |
+| [code/03_embedding_analysis.py](code/03_embedding_analysis.py) | PCA + UMAP + PaCMAP, and the scatterplots |
+| [code/11_trial_alignment.py](code/11_trial_alignment.py) | Where the guideline trials' populations sit, who falls inside them, and who falls inside none |
 
 ```bash
 python code/01_data_processing.py          # all six stages
@@ -171,6 +172,108 @@ code entered on day 20 is indistinguishable from one entered on admission; and
 `poa_present` would narrow that but is populated for every UCMC row and only 61%
 of NU's, so it is reported rather than required
 (`shock_type.require_present_on_arrival`).
+
+## Guideline fit
+
+Every cardiogenic shock recommendation rests on a trial that enrolled a narrow
+slice of the people who present in shock.
+[code/11_trial_alignment.py](code/11_trial_alignment.py) asks where those slices
+sit in the latent space, which of our patients fall inside them, and who falls
+inside none. The eight trials and the populations they enrolled are in
+[code/config/trials.yaml](code/config/trials.yaml); the eligibility logic is in
+[code/clifcs/trials.py](code/clifcs/trials.py), one commented predicate per
+criterion.
+
+Two questions, kept apart because they are easy to conflate:
+
+- **Eligibility** — would the trial have enrolled this patient? A boolean from
+  the published criteria.
+- **Proximity** — do they resemble the patients it did enrol? The share of the
+  patient's 30 nearest neighbours (50-d PCA space) that the trial would have
+  taken, against the trial's cohort-wide base rate. Same neighbourhood measure
+  `03` uses for site purity, so the numbers are comparable.
+
+At the 24 h anchor:
+
+| trial | eligible | mortality | inside, not eligible | centroid separation |
+|---|---|---|---|---|
+| SHOCK 1999 | 4,397 (12.9%) | 28.7% | 1,072 | 0.17 |
+| SOAP II 2010 | 30,497 (89.3%) | 17.4% | 45 | 0.03 |
+| IABP-SHOCK II 2012 | 4,397 (12.9%) | 28.7% | 1,072 | 0.17 |
+| CULPRIT-SHOCK 2017 | 4,397 (12.9%) | 28.7% | 1,072 | 0.17 |
+| OptimaCC 2018 | 3,990 (11.7%) | 30.2% | 1,405 | 0.18 |
+| ECMO-CS 2022 | 7,756 (22.7%) | 31.6% | 1,769 | 0.19 |
+| ECLS-SHOCK 2023 | 1,163 (3.4%) | 43.4% | 1,204 | 0.32 |
+| DanGer Shock 2024 | 199 (0.6%) | 37.7% | 192 | 0.27 |
+
+### Most of the cohort is covered by nothing
+
+**62.6% of patients meet no specific trial's criteria and have no
+trial-enriched neighbourhood.** They run 8.7% in-hospital mortality against
+27.2% for the covered, and **72.9% of them also carry no shock diagnosis code** —
+two independent measures of "not the population the evidence is about" agreeing
+on largely the same 13,574 patients. Even among the cardiogenic-coded patients,
+**26.3% are covered by nothing**.
+
+Read with [Shock type](#shock-type), the conclusion is the same from both
+directions: criteria 1 and 2 enrol a large, mild population that neither the
+coders nor the trialists would recognise as cardiogenic shock.
+
+### Three trials collapse into one
+
+Once the criteria we cannot evaluate are dropped, SHOCK, IABP-SHOCK II and
+CULPRIT-SHOCK all become "acute MI plus shock" and select the identical 4,397
+patients. The figure labels the duplicates rather than implying three
+independent pieces of evidence.
+
+What cannot be applied, and so makes every count a **superset**:
+
+| trial | criterion dropped | why |
+|---|---|---|
+| SHOCK | shock due to LV failure | no echo table at either site |
+| DanGer Shock | LVEF < 45% | same |
+| CULPRIT-SHOCK | multivessel disease | no coronary anatomy in CLIF 2.1 |
+| IABP-SHOCK II | planned early revascularisation | not recorded |
+| OptimaCC | after successful PCI | not recorded |
+| ECMO-CS | cardiac index / SvO2 severity | not recorded |
+| ECLS-SHOCK | CPR > 45 min | arrest is coded, its duration is not |
+
+### Why proximity is a neighbourhood rate and not a distance
+
+The first two versions measured each patient's distance to the centroid of a
+trial's eligible patients — Mahalanobis under each region's own covariance, then
+Euclidean under one shared whitening. Both returned a median distance of 7.1 and
+a 95th-percentile radius of **8.5 for all eight trials**, which is the chi
+quantile for 50 dimensions and says nothing about any trial. Distances
+concentrate as dimension grows, and the trial centroids sit far closer to the
+global centroid than the patients sit to any of them.
+
+`centroid_separation` now reports that directly, because it is a finding rather
+than a nuisance: at 0.03–0.32 within-group spreads, **the trial populations are
+not distinct regions of the latent space at all.** Local neighbourhood structure
+survives in high dimensions where centroid distance does not, which is why the
+measure is a neighbour rate — and it is also what `03` already uses.
+
+The "inside a region" threshold is the point at which a neighbourhood holds more
+trial-eligible patients than chance would put there (upper binomial tail at the
+base rate, α = 0.01). A fixed percentile was tried first and degenerates for the
+rare trials: DanGer Shock covers 0.6%, so almost every ineligible patient has
+zero eligible neighbours, the 95th percentile sits at one neighbour in thirty,
+and 4,381 patients were called "inside the DanGer Shock region" on the strength
+of a single neighbour. The binomial rule raises the bar to three as prevalence
+falls.
+
+### A circularity worth naming
+
+A trial region is fitted from **our** eligible patients, never from the trial's —
+there are no embeddings for trial participants and never will be. So "inside the
+SHOCK region" means "resembles the patients here who would have qualified for
+SHOCK", not "resembles the patients SHOCK enrolled". What links the two is the
+representativeness table (`trial_representativeness_*.csv`), which puts our
+eligible subset beside the enrolled population on the few variables trials
+report. Where they diverge — our ECLS-SHOCK-eligible patients are 37.9% women
+against the trial's 18.7% — the region is ours and the trial's name on it is a
+label of convenience.
 
 ## Embedding anchors
 
