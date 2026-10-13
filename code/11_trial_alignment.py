@@ -593,6 +593,10 @@ def analyse(paths, anchor: str, cohort_cfg, trial_cfg, args, logger) -> None:
             "hospitalization_id", "site", "met_vasoactive_support",
             "met_sustained_hypotension", "gcs_min_in_window", "lactate",
             "cs_onset_dttm", "age_at_admission", "sex_category",
+            # the per-agent flags are derived from this; without it they all
+            # silently read False, which is how every "norepinephrine running"
+            # comparison first came out at 0.0% against a published 85.5%
+            "vasoactives_used",
         )
         if c in cohort.columns
     ]

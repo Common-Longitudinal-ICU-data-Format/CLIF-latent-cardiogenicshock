@@ -211,22 +211,44 @@ At the 24 h anchor:
 Enrolment criteria are thresholds, so they admit a much wider range than a trial
 ends up containing. The published baseline tables in
 [code/config/trials.yaml](code/config/trials.yaml) are what the result was
-actually observed in. DanGer Shock, ECLS-SHOCK, IABP-SHOCK II and CULPRIT-SHOCK
-are transcribed in full; the `criteria` block alongside them records each
+actually observed in. DanGer Shock, ECLS-SHOCK, IABP-SHOCK II, CULPRIT-SHOCK, ECMO-CS and
+OptimaCC are transcribed in full; the `criteria` block alongside them records each
 trial's published inclusion and exclusion criteria and whether this pipeline can
 apply it — 19 of 39 in full, 14 partly, 6 not at all.
 
 **The discrepancy is blood pressure, and essentially nothing else.** Three
 independent trials give the same answer:
 
-| trial | systolic, ours vs theirs | below their Q1 | net shift |
-|---|---|---|---|
-| ECLS-SHOCK | 73 vs 96 (80–120) | 66.8% | low by 65 pts |
-| CULPRIT-SHOCK | 79 vs 100 (84–125) | 62.6% | low by 61 pts |
-| DanGer Shock | 76 vs 83 (72–91) | 37.9% | low by 16 pts |
+| trial | systolic, ours vs theirs | below their Q1 (null 25%) |
+|---|---|---|
+| OptimaCC | 78 vs 104 (94–120.5) | **77.9%** |
+| ECLS-SHOCK | 73 vs 96 (80–120) | **66.8%** |
+| CULPRIT-SHOCK | 79 vs 100 (84–125) | **62.6%** |
+| ECMO-CS | 75 vs 85 (80–100) | **58.9%** |
+| DanGer Shock | 76 vs 83 (72–91) | 37.9% |
 
-Mean arterial pressure runs the same way (67.2% below CULPRIT-SHOCK's first
-quartile, 44.6% below DanGer Shock's), as does diastolic. Age, weight, height,
+Mean arterial pressure runs the same way: 79.1% below OptimaCC's first
+quartile, 67.2% below CULPRIT-SHOCK's, 48.1% below ECMO-CS's, 44.6% below
+DanGer Shock's.
+
+**And it is not that our patients are less supported.** ECMO-CS is the one trial
+that published which drugs were running at randomisation:
+
+| agent | ours | ECMO-CS |
+|---|---|---|
+| norepinephrine | 86.4% | 85.5% |
+| vasopressin | 48.3% | 35.0% |
+| epinephrine | 29.6% | 3.4% |
+| dobutamine | 10.5% | **54.7%** |
+| milrinone | 6.8% | **32.5%** |
+
+Vasopressor use matches or exceeds theirs; what differs is **inotropes**, by a
+factor of five. So the pressure gap is not lighter vasopressor treatment. The
+readings left are genuinely deeper shock, a cardiology-led trial population
+managed with far more inotropic support than an undifferentiated ICU shock
+cohort receives, or both.
+
+Age, weight, height,
 body-mass index, lactate, arterial pH and heart rate show **no net shift** —
 each sits within a few points of the 25% a representative sample would put below
 a first quartile.

@@ -901,21 +901,36 @@ def section_trials(paths, out: list) -> None:
     out.append(tabs(anchor_tabs))
 
     out.append(callout(
-        "<b>The discrepancy is blood pressure, and essentially nothing else.</b> "
-        "Our criteria-eligible patients match the enrolled populations on age, "
-        "weight, height, body-mass index, lactate, arterial pH and heart rate "
-        "&mdash; every one of those sits within a few points of the 25% a "
-        "representative sample would put below the trial's first quartile. The "
-        "pressures do not. <b>66.8% of our ECLS-SHOCK-eligible patients fall "
-        "below that trial's first systolic quartile and 67.7% below its "
-        "diastolic</b>, against a 25% null: a shift of some 42 points. "
-        "ECLS-SHOCK reported a median systolic of 96 mmHg (IQR 80&ndash;120) "
-        "despite requiring &ldquo;SBP &lt; 90 for &gt; 30 min <i>or</i> "
-        "catecholamines&rdquo;, so its population was largely supported on "
-        "catecholamines at a near-normal pressure; ours sits at 73 mmHg. DanGer "
-        "Shock runs the same way, 44.6% below its mean-arterial quartile. A "
-        "recommendation tested at those pressures is being read across to "
-        "patients in considerably deeper shock.", "warn"))
+        "<b>The discrepancy is blood pressure, and it replicates across every "
+        "trial that published one.</b> Our criteria-eligible patients match the "
+        "enrolled populations on age, weight, height, body-mass index, lactate, "
+        "arterial pH and heart rate &mdash; each within a few points of the 25% "
+        "a representative sample would put below a first quartile. The "
+        "pressures do not, and the gap is in the same direction every time: "
+        "below each trial's first systolic quartile sit <b>77.9%</b> of our "
+        "OptimaCC-eligible patients, <b>66.8%</b> of ECLS-SHOCK's, "
+        "<b>62.6%</b> of CULPRIT-SHOCK's, <b>58.9%</b> of ECMO-CS's and "
+        "<b>37.9%</b> of DanGer Shock's, against a 25% null. Mean arterial "
+        "pressure runs the same way.</p><p>The trials' own numbers explain it. "
+        "OptimaCC enrolled at a median systolic of 104 mmHg, CULPRIT-SHOCK at "
+        "100 and ECLS-SHOCK at 96, despite each requiring profound hypotension "
+        "<i>or</i> vasopressor support &mdash; so their populations were "
+        "largely supported at a near-normal pressure. DanGer Shock, the only "
+        "one whose threshold is SBP &lt; 100 rather than &lt; 90, enrolled at "
+        "83 and is the least shifted of the five. Ours sit at 73&ndash;79.",
+        "warn"))
+
+    out.append(callout(
+        "<b>It is not that our patients are less supported.</b> ECMO-CS is the "
+        "one trial that published which drugs were running at randomisation, "
+        "and norepinephrine use is almost identical &mdash; 86.4% of our "
+        "eligible patients against its 85.5% &mdash; with vasopressin and "
+        "epinephrine higher here, not lower. What differs is inotropes: "
+        "dobutamine 10.5% against 54.7%, milrinone 6.8% against 32.5%. So the "
+        "pressure gap is not explained by lighter vasopressor treatment, and "
+        "the most likely readings are genuinely deeper shock, a cardiology-led "
+        "trial population managed with far more inotropic support than an "
+        "undifferentiated ICU shock cohort receives, or both."))
 
     out.append(callout(
         "<b>Do not read the &ldquo;inside every IQR&rdquo; column as a measure "

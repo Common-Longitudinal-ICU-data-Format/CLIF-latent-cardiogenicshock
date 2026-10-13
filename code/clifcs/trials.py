@@ -261,6 +261,45 @@ def attach_features(data_dir, cohort: pl.DataFrame, cfg, logger) -> pl.DataFrame
         if name not in cohort.columns:
             cohort = cohort.with_columns(pl.lit(None, dtype=pl.Float64).alias(name))
 
+    # ------------------------------------------- which vasoactive agents
+    # ECMO-CS reports "therapy at randomisation" -- which drugs were running --
+    # and that is a *measured* comparison: a medication administration record
+    # against a trial's own drug chart. It also bears directly on the pressure
+    # gap. If our patients sit 60 points lower on systolic than the trials'
+    # while receiving the same agents, the gap is severity; if they are less
+    # supported, the gap is partly treatment intensity.
+    #
+    # Read from the cohort's `vasoactives_used`, which 01 builds as a sorted
+    # comma-joined list of med_categories seen at or after onset.
+    agents = (
+        "norepinephrine",
+        "epinephrine",
+        "dobutamine",
+        "milrinone",
+        "vasopressin",
+        "phenylephrine",
+        "dopamine",
+    )
+    if "vasoactives_used" in cohort.columns:
+        # Split and match exactly, never substring: "norepinephrine" contains
+        # "epinephrine", so a contains() test put 87.9% of ECMO-CS-eligible
+        # patients on epinephrine against a published 3.4% -- it was really
+        # reporting norepinephrine again.
+        used = pl.col("vasoactives_used").fill_null("").str.split(",")
+        cohort = cohort.with_columns(
+            **{f"on_{agent}": used.list.contains(agent) for agent in agents}
+        )
+    else:
+        # Loudly, not silently: every per-agent comparison reads 0% without
+        # this column, which looks like a finding rather than a missing join.
+        logger.warning(
+            "vasoactives_used is not on the frame, so no vasoactive-agent "
+            "flag can be computed; every 'running' comparison will read 0%"
+        )
+        cohort = cohort.with_columns(
+            **{f"on_{agent}": pl.lit(None, dtype=pl.Boolean) for agent in agents}
+        )
+
     # ------------------------------------------- weight, height and BMI
     # Reported by IABP-SHOCK II and ECLS-SHOCK, and directly comparable: a
     # scale is a scale. Charted for 96-100% of this cohort's weights and
@@ -908,6 +947,11 @@ TABLE1_LABELS: dict[str, str] = {
     "weight_kg": "weight (kg)",
     "height_cm": "height (cm)",
     "bmi": "body-mass index",
+    "on_norepinephrine": "norepinephrine running",
+    "on_epinephrine": "epinephrine running",
+    "on_dobutamine": "dobutamine running",
+    "on_milrinone": "milrinone running",
+    "on_vasopressin": "vasopressin running",
     "dx_prior_pci": "prior PCI",
     "dx_prior_cabg": "prior bypass surgery",
     "dx_stemi": "ST-elevation infarction",
@@ -953,6 +997,14 @@ VARIABLE_CONFIDENCE: dict[str, str] = {
     "weight_kg": "measured",
     "height_cm": "measured",
     "bmi": "measured",
+    # a medication administration record against a trial's drug chart: the
+    # same kind of observation on both sides, unlike the ICD-derived history
+    "on_norepinephrine": "measured",
+    "on_epinephrine": "measured",
+    "on_dobutamine": "measured",
+    "on_milrinone": "measured",
+    "on_vasopressin": "measured",
+    "imv_before_onset": "measured",
     "male": "measured",
     "dx_hypertension": "ascertainment",
     "dx_diabetes": "ascertainment",
@@ -960,7 +1012,6 @@ VARIABLE_CONFIDENCE: dict[str, str] = {
     "dx_heart_failure": "ascertainment",
     "dx_chronic_kidney_disease": "ascertainment",
     "dx_cardiac_arrest": "ascertainment",
-    "imv_before_onset": "ascertainment",
     "dx_anterior_mi": "ascertainment",
     "dx_stemi": "ascertainment",
     "dx_stroke": "ascertainment",

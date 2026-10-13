@@ -237,8 +237,42 @@ trials:
       mortality_control: null
       source_note: >-
         57 patients, stopped early for excess refractory shock on epinephrine.
-        Sex was imbalanced between arms (reported as 48% vs 20% female in a
-        secondary summary), so the 0.34 pooled figure is approximate.
+        Sex was imbalanced between arms (48% vs 20% female), so the pooled
+        figure averages over a randomisation that did not balance.
+
+    # J Am Coll Cardiol 2018;72:173-82, Table 1. Arms are (epinephrine, n=27)
+    # and (norepinephrine, n=30); midpoints for medians and IQRs, pooled
+    # numerator over 57 for proportions.
+    #
+    # The smallest trial here by an order of magnitude, so every proportion
+    # moves in steps of 1.8 points and the IQRs are wide. Read the comparison
+    # as indicative.
+    #
+    # Lactate is the one row where the arms genuinely differ -- 5.00
+    # (2.70-6.06) against 2.93 (1.94-4.82), p = 0.068 -- so the midpoint is a
+    # poor summary of either and is marked approximate.
+    #
+    # Not transferred: SAPS 2 (not computed here), left ventricular ejection
+    # fraction (no echo), duration of shock before randomisation, and
+    # vasopressor treatment before inclusion (ours is support at or after
+    # onset, not before it, so the two are not the same quantity).
+    table1:
+      age_at_admission: {median: !!float 67.0, iqr: [!!float 55.0, !!float 78.0]}
+      bmi: {median: !!float 25.3, iqr: [!!float 22.15, !!float 27.5]}
+      heart_rate_at_onset: {median: !!float 94.0, iqr: [!!float 72.5, !!float 114.0]}
+      sbp_at_onset: {median: !!float 103.5, iqr: [!!float 94.0, !!float 120.5]}
+      dbp_at_onset: {median: !!float 55.5, iqr: [!!float 47.5, !!float 63.0]}
+      map_at_onset: {median: !!float 71.5, iqr: [!!float 67.5, !!float 81.0]}
+      lactate:
+        {median: !!float 3.97, iqr: [!!float 2.32, !!float 5.44], approximate: !!bool true}
+      male: {pct: !!float 0.667}
+      dx_hypertension: {pct: !!float 0.246}
+      dx_diabetes: {pct: !!float 0.105}
+      dx_stroke: {pct: !!float 0.070}
+      dx_prior_mi: {pct: !!float 0.070}
+      dx_cardiac_arrest: {pct: !!float 0.509}
+      dx_stemi: {pct: !!float 0.965}
+      imv_before_onset: {pct: !!float 0.982}
 
   # -------------------------------------------------------------- ECMO-CS 2022
   ecmo_cs:
@@ -264,10 +298,35 @@ trials:
         here as the pooled value. Lactate 5.3 / 4.7 mmol/L by arm. Roughly
         three-quarters male. The one trial here with a substantial non-AMI
         population (STEMI 50.4%, heart-failure exacerbation 23.1%).
+    # Circulation 2023;147:454-64, Table 2, the "All (N=117)" column -- so no
+    # pooling across arms was needed for this one.
+    #
+    # Not transferred: dilated cardiomyopathy and chronic coronary syndrome (no
+    # clean code set), levosimendan (not used at either site), the
+    # vasoactive-inotropic score and the per-drug doses (our doses are
+    # unit-converted by clifpy for the SOFA subset only, so a dose comparison
+    # would not be like for like), intra-aortic balloon pump and renal
+    # replacement therapy at randomisation.
     table1:
-      age_at_admission: {median: !!float 66.0}
-      lactate: {median: !!float 5.0}
-      male: {pct: !!float 0.75}
+      age_at_admission: {median: !!float 66.0, iqr: [!!float 59.0, !!float 73.0]}
+      lactate: {median: !!float 5.0, iqr: [!!float 3.2, !!float 8.0]}
+      sbp_at_onset: {median: !!float 85.0, iqr: [!!float 80.0, !!float 100.0]}
+      map_at_onset: {median: !!float 63.3, iqr: [!!float 55.3, !!float 72.0]}
+      heart_rate_at_onset: {median: !!float 102.0, iqr: [!!float 84.0, !!float 120.0]}
+      male: {pct: !!float 0.735}
+      dx_hypertension: {pct: !!float 0.640}
+      dx_diabetes: {pct: !!float 0.325}
+      dx_heart_failure: {pct: !!float 0.237}
+      dx_chronic_kidney_disease: {pct: !!float 0.142}
+      dx_severe_pvd: {pct: !!float 0.088}
+      dx_stemi: {pct: !!float 0.504}
+      # therapy running at randomisation
+      imv_before_onset: {pct: !!float 0.723}
+      on_norepinephrine: {pct: !!float 0.855}
+      on_epinephrine: {pct: !!float 0.034}
+      on_dobutamine: {pct: !!float 0.547}
+      on_milrinone: {pct: !!float 0.325}
+      on_vasopressin: {pct: !!float 0.350}
 
   # ------------------------------------------------------------ ECLS-SHOCK 2023
   ecls_shock:
