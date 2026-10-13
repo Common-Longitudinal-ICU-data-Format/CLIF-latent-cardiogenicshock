@@ -9,6 +9,7 @@ from __future__ import annotations
 import dataclasses
 import glob
 import logging
+import os
 import pathlib
 import sys
 
@@ -23,6 +24,55 @@ CONFIG_HOME = CODE_HOME / "config"
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
         _stream.reconfigure(encoding="utf-8", errors="replace")
+
+
+def _redirect_hf_cache() -> None:
+    """
+    send HuggingFace `datasets` scratch into scratch_home, not ~/.cache
+
+    cotorra loads the winnowed token streams through
+    `datasets.load_dataset("parquet", ...)`, which caches the Arrow conversion
+    and every `.map()` output under HF_DATASETS_CACHE -- by default
+    ~/.cache/huggingface. Nothing is downloaded; the files there are *our*
+    tokenized patient data.
+
+    Two reasons that default is wrong here, and both bit:
+
+    * It is unbounded. The transform cotorra maps is a closure, so `datasets`
+      cannot fingerprint it, warns that it "will consider it to be different
+      from the previous calls and recompute everything", and writes a fresh
+      build every run. 02 makes four per run and 09 twenty-six. 172 builds
+      accumulated over four days and reached 119 GB, which filled the system
+      disk and killed 09 at grid point 23 of 26.
+    * It puts patient-derived data somewhere this project does not document or
+      manage. The README promises that large regenerable intermediates live in
+      scratch_home, deliberately off the Box-synced tree; a cache in the home
+      directory is a third location holding the same class of data, and it is
+      the one nobody thinks to clear or exclude from a backup.
+
+    Set at import of this module, which every numbered script reaches before it
+    imports cotorra or datasets -- `datasets.config` reads these variables once,
+    at its own import, so setting them later would have no effect. An
+    HF_DATASETS_CACHE already in the environment is left alone.
+    """
+    if os.environ.get("HF_DATASETS_CACHE") or os.environ.get("HF_HOME"):
+        return
+    config = CONFIG_HOME / "paths.yaml"
+    if not config.is_file():
+        return
+    try:
+        scratch = OmegaConf.load(config).get("scratch_home")
+    except Exception:  # a malformed paths.yaml is load_paths' problem to report
+        return
+    if not scratch:
+        return
+    cache = pathlib.Path(str(scratch)).expanduser() / "hf-cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    os.environ["HF_HOME"] = str(cache)
+    os.environ["HF_DATASETS_CACHE"] = str(cache / "datasets")
+
+
+_redirect_hf_cache()
 
 #: embedding anchors; each produces its own set of representations
 ANCHORS: tuple[str, ...] = ("24h", "onset")
