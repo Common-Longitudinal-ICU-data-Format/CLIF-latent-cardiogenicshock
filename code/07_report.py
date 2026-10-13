@@ -921,6 +921,27 @@ def section_trials(paths, out: list) -> None:
         "warn"))
 
     out.append(callout(
+        "<b>The size of the gap tracks how selectively the trial enrolled, and "
+        "SOAP II is the control case.</b> Below each trial's first "
+        "mean-arterial quartile sit 79.1% of our OptimaCC-eligible patients "
+        "(the trial enrolled post-PCI at a median MAP of 72), 67.2% of "
+        "CULPRIT-SHOCK's (76), 48.1% of ECMO-CS's (63) and 44.6% of DanGer "
+        "Shock's (64) &mdash; but only <b>16.9%</b> of SOAP II's, which is "
+        "<i>below</i> the 25% null. SOAP II enrolled any shock requiring a "
+        "vasopressor, of any cause, and its own population sat at a MAP of 58: "
+        "genuinely hypotensive, like ours. The specialised cardiogenic shock "
+        "trials enrolled at 63 to 76. The more narrowly a trial selected, the "
+        "further its population sits from routine ICU shock, and the one "
+        "pragmatic all-comers trial is the only one whose patients ours "
+        "resemble.</p><p>That has an uncomfortable corollary. The single "
+        "recommendation whose trial population matches these patients &mdash; "
+        "norepinephrine rather than dopamine &mdash; is also the one resting "
+        "on the thinnest evidence for cardiogenic shock specifically: a "
+        "280-patient subgroup of a 1,679-patient trial that was 62% septic, "
+        "and whose baseline characteristics were never published. The SOAP II "
+        "row set here is the whole trial, not that subgroup.", "warn"))
+
+    out.append(callout(
         "<b>It is not that our patients are less supported.</b> ECMO-CS is the "
         "one trial that published which drugs were running at randomisation, "
         "and norepinephrine use is almost identical &mdash; 86.4% of our "

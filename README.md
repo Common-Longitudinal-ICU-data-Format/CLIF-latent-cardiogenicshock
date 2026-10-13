@@ -211,8 +211,8 @@ At the 24 h anchor:
 Enrolment criteria are thresholds, so they admit a much wider range than a trial
 ends up containing. The published baseline tables in
 [code/config/trials.yaml](code/config/trials.yaml) are what the result was
-actually observed in. DanGer Shock, ECLS-SHOCK, IABP-SHOCK II, CULPRIT-SHOCK, ECMO-CS and
-OptimaCC are transcribed in full; the `criteria` block alongside them records each
+actually observed in. Seven of the eight are transcribed in full (SHOCK published no
+interquartile ranges at all, so it contributes only an approximate one for age); the `criteria` block alongside them records each
 trial's published inclusion and exclusion criteria and whether this pipeline can
 apply it — 19 of 39 in full, 14 partly, 6 not at all.
 
@@ -227,9 +227,34 @@ independent trials give the same answer:
 | ECMO-CS | 75 vs 85 (80–100) | **58.9%** |
 | DanGer Shock | 76 vs 83 (72–91) | 37.9% |
 
-Mean arterial pressure runs the same way: 79.1% below OptimaCC's first
-quartile, 67.2% below CULPRIT-SHOCK's, 48.1% below ECMO-CS's, 44.6% below
-DanGer Shock's.
+### The gap tracks how selectively the trial enrolled
+
+Mean arterial pressure separates the trials cleanly, and SOAP II is the control
+case:
+
+| trial | their MAP | ours | below their Q1 (null 25%) | enrolled |
+|---|---|---|---|---|
+| OptimaCC | 72 | 58 | **79.1%** | post-PCI AMI shock |
+| CULPRIT-SHOCK | 76 | 58 | **67.2%** | AMI + multivessel disease |
+| ECMO-CS | 63 | 56 | 48.1% | severe or deteriorating CS |
+| DanGer Shock | 64 | 56 | 44.6% | STEMI, SBP < 100 |
+| SOAP II | 58 | 61 | **16.9%** | any shock on a vasopressor |
+
+SOAP II enrolled any shock requiring a vasopressor, of any cause, and its own
+population sat at a MAP of 58 — genuinely hypotensive, like ours. The
+specialised cardiogenic shock trials enrolled at 63 to 76. **The more narrowly a
+trial selected, the further its population sits from routine ICU shock**, and the
+one pragmatic all-comers trial is the only one whose patients ours resemble
+(16.9% is *below* the 25% null).
+
+That has an uncomfortable corollary. The single recommendation whose trial
+population matches these patients — norepinephrine rather than dopamine — is
+also the one resting on the thinnest evidence for cardiogenic shock
+specifically: a 280-patient subgroup of a 1,679-patient trial that was 62%
+septic, and whose baseline characteristics were never published. The SOAP II
+table transcribed here is the whole trial, not that subgroup, and is the only
+one in this file describing a different disease from the patients compared
+against it.
 
 **And it is not that our patients are less supported.** ECMO-CS is the one trial
 that published which drugs were running at randomisation:

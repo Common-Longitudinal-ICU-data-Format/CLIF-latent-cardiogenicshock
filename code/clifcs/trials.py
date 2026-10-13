@@ -211,7 +211,11 @@ def attach_features(data_dir, cohort: pl.DataFrame, cfg, logger) -> pl.DataFrame
     # 0.00, because that is how NU computes it.
     paired = (
         scan(data_dir, "clif_vitals", dttm_cols=("recorded_dttm",))
-        .filter(pl.col("vital_category").is_in(["sbp", "dbp", "map", "heart_rate"]))
+        .filter(
+            pl.col("vital_category").is_in(
+                ["sbp", "dbp", "map", "heart_rate", "temp_c"]
+            )
+        )
         .join(window, on="hospitalization_id", how="inner")
         .filter(pl.col("recorded_dttm").is_between(pl.col("win_start"), pl.col("win_end")))
         .select("hospitalization_id", "recorded_dttm", "vital_category", "vital_value")
@@ -224,7 +228,7 @@ def attach_features(data_dir, cohort: pl.DataFrame, cfg, logger) -> pl.DataFrame
             values="vital_value",
             aggregate_function="median",
         )
-        for name in ("sbp", "dbp", "map", "heart_rate"):
+        for name in ("sbp", "dbp", "map", "heart_rate", "temp_c"):
             if name not in wide.columns:
                 wide = wide.with_columns(pl.lit(None, dtype=pl.Float64).alias(name))
         wide = wide.with_columns(
@@ -239,6 +243,11 @@ def attach_features(data_dir, cohort: pl.DataFrame, cfg, logger) -> pl.DataFrame
             heart_rate_ok=pl.when(
                 pl.col("heart_rate").is_between(20.0, 250.0)
             ).then(pl.col("heart_rate")),
+            # 30-43 C: temp_c carries unconverted Fahrenheit readings at these
+            # sites, the same artefact the phenotype module guards against
+            temp_ok=pl.when(pl.col("temp_c").is_between(30.0, 43.0)).then(
+                pl.col("temp_c")
+            ),
         )
         # the lowest MAP and the heart rate at that same instant, which is what
         # a baseline table records: the state the clinician was looking at
@@ -252,12 +261,18 @@ def attach_features(data_dir, cohort: pl.DataFrame, cfg, logger) -> pl.DataFrame
                 # the diastolic reading at that same instant, which ECLS-SHOCK
                 # reports alongside the systolic
                 dbp_at_onset=pl.col("dbp").first(),
+                temp_at_onset=pl.col("temp_ok").first(),
             )
         )
         cohort = cohort.join(
             at_onset, on="hospitalization_id", how="left", validate="1:1"
         )
-    for name in ("map_at_onset", "heart_rate_at_onset", "dbp_at_onset"):
+    for name in (
+        "map_at_onset",
+        "heart_rate_at_onset",
+        "dbp_at_onset",
+        "temp_at_onset",
+    ):
         if name not in cohort.columns:
             cohort = cohort.with_columns(pl.lit(None, dtype=pl.Float64).alias(name))
 
@@ -943,6 +958,7 @@ TABLE1_LABELS: dict[str, str] = {
     "lactate": "arterial lactate (mmol/L)",
     "dbp_at_onset": "diastolic BP (mmHg)",
     "ph_at_onset": "arterial pH",
+    "temp_at_onset": "temperature (C)",
     "creatinine": "creatinine (mg/dL)",
     "weight_kg": "weight (kg)",
     "height_cm": "height (cm)",
@@ -993,6 +1009,7 @@ VARIABLE_CONFIDENCE: dict[str, str] = {
     "lactate": "measured",
     "dbp_at_onset": "measured",
     "ph_at_onset": "measured",
+    "temp_at_onset": "measured",
     "creatinine": "measured",
     "weight_kg": "measured",
     "height_cm": "measured",

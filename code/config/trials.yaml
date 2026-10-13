@@ -88,9 +88,10 @@ trials:
       source_note: >-
         Age and sex from the NEJM abstract. Per-arm baseline values were not
         retrievable without journal access; no lactate or SBP reported.
-    # Mean 66 (SD 10) converted to an approximate interquartile range as
-    # mean +/- 0.674 SD, which holds only if age is near-normal. Flagged as
-    # approximate so it is not mistaken for a published IQR.
+    # SHOCK published no interquartile ranges at all, so age's is approximated
+    # from the reported mean 66 (SD 10) as mean +/- 0.674 SD, which holds only
+    # if age is near-normal. Flagged, and it is the only quartile this trial
+    # contributes.
     table1:
       age_at_admission:
         {median: !!float 66.0, iqr: [!!float 59.3, !!float 72.7], approximate: !!bool true}
@@ -212,9 +213,38 @@ trials:
       lvef_median: null
       mortality_control: null
       source_note: >-
-        The 280 is the prespecified cardiogenic subgroup. The paper reports
-        baseline characteristics for the whole 1,679-patient trial, not for the
-        subgroup, so no subgroup demographics are available.
+        The 280 is the prespecified cardiogenic subgroup, and the table below
+        is NOT its baseline -- see the warning there.
+
+    # N Engl J Med 2010;362:779-89, Table 1. Arms are (dopamine, N=858) and
+    # (norepinephrine, N=821); midpoints for medians and IQRs, pooled numerator
+    # over 1,679 for proportions.
+    #
+    # READ THIS BEFORE THE COMPARISON. These are the baseline characteristics
+    # of the WHOLE TRIAL: 1,679 patients of whom 62.2% had septic shock, 16.7%
+    # a cardiogenic source and 15.7% hypovolaemia. The recommendation this
+    # trial supports for cardiogenic shock rests on the 280-patient cardiogenic
+    # subgroup, whose baseline characteristics the paper never published. So
+    # this row set describes a predominantly septic population and our
+    # comparison against it is between different diseases -- the only trial
+    # here where that is true. The counts confirm the subgroup size (135 + 145
+    # = 280) and nothing else about it.
+    #
+    # Temperature, heart rate and mean arterial pressure are reported as
+    # mean +/- SD rather than median (IQR), so their quartiles are approximated
+    # as mean +/- 0.674 SD and flagged. Heart rate pools 97+/-27 and 95+/-25.
+    #
+    # Not transferred: APACHE II and SOFA (not computed in this pipeline),
+    # reason for admission, mean pulmonary-artery pressure (no catheter data).
+    table1:
+      age_at_admission: {median: !!float 67.5, iqr: [!!float 55.5, !!float 76.0]}
+      map_at_onset:
+        {median: !!float 58.0, iqr: [!!float 49.2, !!float 66.8], approximate: !!bool true}
+      heart_rate_at_onset:
+        {median: !!float 96.0, iqr: [!!float 78.5, !!float 113.5], approximate: !!bool true}
+      temp_at_onset:
+        {median: !!float 36.6, iqr: [!!float 35.6, !!float 37.6], approximate: !!bool true}
+      male: {pct: !!float 0.569}
 
   # --------------------------------------------------------- OptimaCC 2018
   optimacc:
