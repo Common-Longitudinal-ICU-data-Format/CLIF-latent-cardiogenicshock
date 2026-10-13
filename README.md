@@ -211,32 +211,51 @@ At the 24 h anchor:
 Enrolment criteria are thresholds, so they admit a much wider range than a trial
 ends up containing. The published baseline tables in
 [code/config/trials.yaml](code/config/trials.yaml) are what the result was
-actually observed in, and comparing against them asks the question the criteria
-cannot: of the patients who *would* have qualified, how many look like the
-patients who were enrolled?
+actually observed in. DanGer Shock, ECLS-SHOCK, IABP-SHOCK II and CULPRIT-SHOCK
+are transcribed in full; the `criteria` block alongside them records each
+trial's published inclusion and exclusion criteria and whether this pipeline can
+apply it — 19 of 39 in full, 14 partly, 6 not at all.
 
-| trial | comparable | variables | inside every published IQR |
+**The discrepancy is blood pressure, and essentially nothing else.** Three
+independent trials give the same answer:
+
+| trial | systolic, ours vs theirs | below their Q1 | net shift |
 |---|---|---|---|
-| ECLS-SHOCK | 1,163 | 6 | **1.4%** |
-| DanGer Shock | 199 | 5 | **5.0%** |
-| SHOCK | 4,397 | 1 (age only) | 36.1% |
+| ECLS-SHOCK | 73 vs 96 (80–120) | 66.8% | low by 65 pts |
+| CULPRIT-SHOCK | 79 vs 100 (84–125) | 62.6% | low by 61 pts |
+| DanGer Shock | 76 vs 83 (72–91) | 37.9% | low by 16 pts |
 
-Both gaps run the same way — **our patients are far more hypotensive than the
-people the trials enrolled**:
+Mean arterial pressure runs the same way (67.2% below CULPRIT-SHOCK's first
+quartile, 44.6% below DanGer Shock's), as does diastolic. Age, weight, height,
+body-mass index, lactate, arterial pH and heart rate show **no net shift** —
+each sits within a few points of the 25% a representative sample would put below
+a first quartile.
 
-| | ours | ECLS-SHOCK (IQR) | below their Q1 |
-|---|---|---|---|
-| systolic BP | 73 | 96 (80–120) | **66.8%** |
-| diastolic BP | 45 | 60.5 (50–72) | **67.7%** |
-| lactate | 6.2 | 6.85 (4.55–9.8) | 34.1% |
-| arterial pH | 7.2 | 7.2 (7.1–7.3) | 21.7% |
+The reason is visible in the trials' own numbers. CULPRIT-SHOCK enrolled at a
+median systolic of 100 mmHg and ECLS-SHOCK at 96, despite both requiring
+"SBP < 90 for > 30 min **or** catecholamines": their populations were largely
+supported on catecholamines at a near-normal pressure. DanGer Shock, whose
+threshold is SBP < 100, enrolled at 83 and is correspondingly the least shifted.
+Our criteria-matching patients sit at 73–79. A recommendation tested there is
+being read across to patients in considerably deeper shock.
 
-ECLS-SHOCK's own population sat at a median systolic of 96 mmHg despite the
-trial requiring "SBP < 90 for > 30 min **or** catecholamines" — most of those
-patients were supported on catecholamines at a near-normal pressure. Ours sit at
-73. A recommendation tested there is being read across to patients in
-considerably deeper shock. DanGer Shock is the same story at 37.9% below its
-systolic Q1 and 44.6% below its MAP Q1.
+**Do not read "inside every published IQR" as representativeness.** An
+interquartile range holds half the trial's own population by construction, so
+even a perfectly representative cohort would have only 0.5^k inside all k of
+them — 50% at one variable, 6.2% at four, 0.8% at seven. Observed over null:
+
+| trial | k | inside all | null | ratio |
+|---|---|---|---|---|
+| SHOCK | 1 | 36.1% | 50.0% | 0.72 |
+| IABP-SHOCK II | 4 | 7.8% | 6.2% | 1.25 |
+| CULPRIT-SHOCK | 7 | 2.4% | 0.8% | 3.06 |
+| ECLS-SHOCK | 7 | 0.6% | 0.8% | 0.77 |
+| DanGer Shock | 5 | 5.0% | 3.1% | 1.61 |
+
+Every ratio is between 0.7 and 3.1, so on that metric the eligible patients are
+about as concentrated as a representative sample. The column falls with every
+variable added whether or not anything differs, which is why it is reported with
+its null beside it and why the per-variable directional shifts are the result.
 
 Distance is measured in interquartile ranges because that is all a paper
 supports: it reports a median and an IQR, not a covariance, so there is no way
@@ -251,24 +270,18 @@ flags to diagnoses present on arrival helped and did not fix it:
 |---|---|---|---|
 | heart failure | 54.3% | 9.3% | POA-flagged `I50` includes the index event's acute failure |
 | prior MI | 1.0% | 16.1% | `poa_present` is seldom set on a history code |
-| intubated before onset | 37.7% | 17.8% | closest available, still broader than "before randomisation" |
+| prior PCI | 0.3% | 19.2% | same |
 
 `VARIABLE_CONFIDENCE` in [code/clifcs/trials.py](code/clifcs/trials.py) marks
 these `ascertainment`; they are reported and never used to decide whether a
 patient is inside the tested population. Age, the pressures, heart rate,
-lactate, pH, creatinine and sex are what drive it.
+lactate, pH, creatinine, weight, height, BMI and sex are what drive it.
 
-Two further things deliberately left out rather than compared: left ventricular
-ejection fraction and coronary anatomy (unavailable at both sites), and
-peripheral artery disease for ECLS-SHOCK — severe PVD is one of its exclusions,
-so our eligible set is 0% by construction and the comparison would measure the
-filter rather than the patients.
-
-**Completing the other trials needs their Table 1.** DanGer Shock and ECLS-SHOCK
-are transcribed from the published tables. IABP-SHOCK II, CULPRIT-SHOCK and
-ECMO-CS published full baseline tables that were not retrievable without journal
-access, so they carry medians without IQRs and get no per-patient position. The
-config takes a new `table1` block with no code change.
+Left out rather than compared: ejection fraction and coronary anatomy
+(unavailable at both sites), oliguria (no intake/output table), and peripheral
+artery disease for ECLS-SHOCK — severe PVD is one of its exclusions, so our
+eligible set is 0% by construction and the comparison would measure the filter
+rather than the patients.
 
 ### Most of the cohort is covered by nothing
 

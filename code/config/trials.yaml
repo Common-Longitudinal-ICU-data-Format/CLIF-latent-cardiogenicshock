@@ -118,11 +118,29 @@ trials:
       source_note: >-
         Median age and LVEF from the ACC trial summary; female share 31% from
         the trial's sex substudy (187 of 600). Diabetes share not confirmed.
-    # No interquartile ranges retrievable, so only the proportion and the
-    # median are compared for this trial.
+    # N Engl J Med 2012;367:1287-96, Table 1, first page. Arms are (IABP,
+    # N=301) and (control, N=299); values below are the midpoint for medians
+    # and IQRs, and the pooled numerator over the pooled denominator for
+    # proportions (the paper gives no./total no., and the totals differ by row).
+    #
+    # The haemodynamic and laboratory rows -- systolic pressure, heart rate,
+    # lactate, ejection fraction -- are on the table's second page and are not
+    # transcribed here, so this trial gets no hypotension comparison of the
+    # kind ECLS-SHOCK and DanGer Shock support. Adding that page would need no
+    # code change.
     table1:
-      age_at_admission: {median: !!float 70.0}
-      male: {pct: !!float 0.69}
+      age_at_admission: {median: !!float 69.5, iqr: [!!float 58.0, !!float 77.0]}
+      weight_kg: {median: !!float 80.5, iqr: [!!float 73.0, !!float 90.0]}
+      height_cm: {median: !!float 173.5, iqr: [!!float 166.5, !!float 179.0]}
+      bmi: {median: !!float 27.2, iqr: [!!float 24.7, !!float 29.75]}
+      male: {pct: !!float 0.688}
+      dx_hypertension: {pct: !!float 0.692}
+      dx_diabetes: {pct: !!float 0.327}
+      dx_prior_mi: {pct: !!float 0.220}
+      dx_stroke: {pct: !!float 0.073}
+      dx_severe_pvd: {pct: !!float 0.122}
+      dx_prior_pci: {pct: !!float 0.192}
+      dx_prior_cabg: {pct: !!float 0.053}
 
   # ------------------------------------------------------ CULPRIT-SHOCK 2017
   culprit_shock:
@@ -146,9 +164,33 @@ trials:
       source_note: >-
         Median age 70 and roughly 75% male from secondary summaries of the
         trial; the NEJM Table 1 was not retrievable.
+    # N Engl J Med 2017;377:2419-32, Table 1. Arms are (culprit-lesion-only
+    # PCI, N=344) and (multivessel PCI, N=342); midpoints for medians and IQRs,
+    # pooled numerator over pooled denominator for proportions.
+    #
+    # Not transferred: oliguria (no intake/output table), left bundle-branch
+    # block and anterior STEMI as a share of STEMI (not separable here),
+    # "cold, clammy skin and limbs" (not charted), and fibrinolysis.
     table1:
-      age_at_admission: {median: !!float 70.0}
-      male: {pct: !!float 0.75}
+      age_at_admission: {median: !!float 70.0, iqr: [!!float 60.0, !!float 77.5]}
+      weight_kg: {median: !!float 80.0, iqr: [!!float 72.5, !!float 90.0]}
+      height_cm: {median: !!float 174.5, iqr: [!!float 169.0, !!float 180.0]}
+      bmi: {median: !!float 26.65, iqr: [!!float 24.45, !!float 29.4]}
+      sbp_at_onset: {median: !!float 100.0, iqr: [!!float 84.0, !!float 125.0]}
+      dbp_at_onset: {median: !!float 60.5, iqr: [!!float 50.0, !!float 80.0]}
+      map_at_onset: {median: !!float 76.0, iqr: [!!float 63.0, !!float 92.5]}
+      male: {pct: !!float 0.765}
+      dx_hypertension: {pct: !!float 0.602}
+      dx_diabetes: {pct: !!float 0.323}
+      dx_prior_mi: {pct: !!float 0.168}
+      dx_stroke: {pct: !!float 0.072}
+      dx_severe_pvd: {pct: !!float 0.118}
+      dx_prior_pci: {pct: !!float 0.188}
+      dx_prior_cabg: {pct: !!float 0.049}
+      dx_stemi: {pct: !!float 0.624}
+      dx_cardiac_arrest: {pct: !!float 0.536}
+      ams_gcs_lt15: {pct: !!float 0.676}
+      met_lactate: {pct: !!float 0.663} # arterial lactate > 2.0 mmol/L
 
   # ----------------------------------------------------------- SOAP II 2010
   soap_ii:
@@ -254,9 +296,8 @@ trials:
     # NEJM 2023;389:1286-97, Table 1. Arms are (ECLS, N=209) and (control,
     # N=208); values below are the midpoint of the two.
     #
-    # Not transferred, and why: body-mass index (weight and height are charted
-    # too sparsely per patient here), oliguria (no intake/output table at
-    # either site), left ventricular ejection fraction (no echo), number of
+    # Not transferred, and why: oliguria (no intake/output table at either
+    # site), left ventricular ejection fraction (no echo), number of
     # diseased vessels and infarct-related artery (no coronary anatomy),
     # time to return of spontaneous circulation (arrest is coded, its duration
     # is not), and high-sensitivity troponin T -- UCMC runs troponin-T and NU
@@ -269,6 +310,11 @@ trials:
       lactate: {median: !!float 6.85, iqr: [!!float 4.55, !!float 9.8]}
       ph_at_onset: {median: !!float 7.2, iqr: [!!float 7.1, !!float 7.3]}
       creatinine: {median: !!float 1.25, iqr: [!!float 1.05, !!float 1.55]}
+      # 27 (25-30) and 28 (25-31) by arm. An earlier revision of this file
+      # claimed weight and height were charted too sparsely to use; that was
+      # wrong -- weight is present for 96-100% of this cohort and height for
+      # 93-94%.
+      bmi: {median: !!float 27.5, iqr: [!!float 25.0, !!float 30.5]}
       male: {pct: !!float 0.8125}
       dx_hypertension: {pct: !!float 0.564}
       dx_diabetes: {pct: !!float 0.314}
@@ -361,3 +407,177 @@ regions:
   # covariance -- scaling a region by its own spread makes every region the same
   # size (the distance concentrates at sqrt(d)), which is how the first version
   # of this analysis produced eight identical radii. See clifcs.trials.whiten.
+
+# --------------------------------------------------- inclusion and exclusion
+# Each trial's criteria as published, with whether this pipeline can apply
+# each one. `applied` is yes / partly / no, and the note says what is given
+# up. Read this before any eligibility count: a `no` on a substantive
+# criterion means the count is a superset, sometimes a large one.
+#
+# This is prose, kept in the config so it sits beside the numbers it
+# qualifies and can be checked against the paper without reading code.
+criteria:
+  shock:
+    - kind: inclusion
+      criterion: 'acute MI with ST elevation or new LBBB, or posterior infarction'
+      applied: 'yes'
+      note: 'ICD-coded acute MI'
+    - kind: inclusion
+      criterion: 'cardiogenic shock from predominant left ventricular failure'
+      applied: 'partly'
+      note: 'shock yes; LV failure as the cause needs an echo, which neither site has'
+    - kind: inclusion
+      criterion: 'SBP < 90 mmHg for >= 30 min, or support to keep SBP >= 90'
+      applied: 'yes'
+      note: 'criterion 1 of this cohort'
+    - kind: inclusion
+      criterion: 'end-organ hypoperfusion'
+      applied: 'yes'
+      note: 'criterion 2 of this cohort'
+    - kind: exclusion
+      criterion: 'mechanical cause of shock, severe systemic illness'
+      applied: 'no'
+      note: 'not ascertainable'
+  soap_ii:
+    - kind: inclusion
+      criterion: 'shock requiring a vasopressor'
+      applied: 'yes'
+      note: 'continuous vasoactive infusion'
+    - kind: inclusion
+      criterion: 'adequate fluid resuscitation given'
+      applied: 'no'
+      note: 'no intake/output table at either site'
+    - kind: exclusion
+      criterion: 'age < 18, already on a vasopressor > 4 h'
+      applied: 'partly'
+      note: 'age yes; prior-vasopressor duration not timed'
+  iabp_shock_ii:
+    - kind: inclusion
+      criterion: 'acute MI (STEMI or NSTEMI) planned for early revascularisation'
+      applied: 'partly'
+      note: 'MI yes; the revascularisation plan is not recorded'
+    - kind: inclusion
+      criterion: 'cardiogenic shock: SBP < 90 for > 30 min or catecholamines to maintain > 90'
+      applied: 'yes'
+      note: 'criterion 1 of this cohort'
+    - kind: inclusion
+      criterion: 'pulmonary congestion and impaired end-organ perfusion'
+      applied: 'partly'
+      note: 'end-organ yes; congestion needs imaging'
+    - kind: exclusion
+      criterion: 'resuscitation > 30 min, no intrinsic heart action, severe PAD'
+      applied: 'partly'
+      note: 'severe PAD yes; resuscitation duration is not timed'
+    - kind: exclusion
+      criterion: 'age > 90, shock > 12 h, mechanical cause'
+      applied: 'partly'
+      note: 'age and shock duration yes; mechanical cause no'
+  culprit_shock:
+    - kind: inclusion
+      criterion: 'acute MI, STEMI or NSTEMI'
+      applied: 'yes'
+      note: 'ICD-coded acute MI'
+    - kind: inclusion
+      criterion: 'multivessel coronary disease, >= 70% stenosis in >= 2 major vessels'
+      applied: 'no'
+      note: 'no coronary anatomy in CLIF 2.1 -- the criterion that most inflates this eligible set'
+    - kind: inclusion
+      criterion: 'cardiogenic shock, planned for PCI'
+      applied: 'yes'
+      note: 'criterion 1 of this cohort'
+    - kind: exclusion
+      criterion: 'resuscitation > 45 min, mechanical cause, age > 90'
+      applied: 'partly'
+      note: 'age yes; resuscitation duration not timed'
+  optimacc:
+    - kind: inclusion
+      criterion: 'cardiogenic shock after successful PCI for acute MI'
+      applied: 'partly'
+      note: 'MI with shock yes; PCI and its success are not recorded'
+    - kind: inclusion
+      criterion: 'cardiac index < 2.2 and need for a vasopressor'
+      applied: 'partly'
+      note: 'vasopressor yes; cardiac index is not measured here'
+    - kind: exclusion
+      criterion: 'other cause of shock'
+      applied: 'yes'
+      note: 'shock type is labelled from diagnoses'
+  ecmo_cs:
+    - kind: inclusion
+      criterion: 'rapidly deteriorating or severe cardiogenic shock'
+      applied: 'partly'
+      note: 'vasopressor plus lactate > 3 stands in for severity'
+    - kind: inclusion
+      criterion: 'haemodynamic criteria: cardiac index, SvO2, or escalating pressors'
+      applied: 'no'
+      note: 'cardiac index and SvO2 are not recorded'
+    - kind: exclusion
+      criterion: 'another indication for ECMO, age > 78, mechanical cause'
+      applied: 'partly'
+      note: 'age could be applied; the trial''s cut is not'
+  ecls_shock:
+    - kind: inclusion
+      criterion: 'acute MI with planned revascularisation'
+      applied: 'partly'
+      note: 'MI yes; the revascularisation plan is not recorded'
+    - kind: inclusion
+      criterion: 'SBP < 90 for > 30 min or catecholamines to maintain > 90'
+      applied: 'yes'
+      note: 'criterion 1 of this cohort'
+    - kind: inclusion
+      criterion: 'signs of impaired organ perfusion'
+      applied: 'yes'
+      note: 'criterion 2 of this cohort'
+    - kind: inclusion
+      criterion: 'arterial lactate > 3 mmol/L'
+      applied: 'yes'
+      note: 'lactate nearest onset'
+    - kind: exclusion
+      criterion: 'age > 80'
+      applied: 'yes'
+      note: 'applied'
+    - kind: exclusion
+      criterion: 'CPR > 45 min before enrolment'
+      applied: 'no'
+      note: 'arrest is coded, its duration is not'
+    - kind: exclusion
+      criterion: 'severe peripheral vascular disease'
+      applied: 'yes'
+      note: 'applied'
+    - kind: exclusion
+      criterion: 'mechanical or non-cardiac cause, shock > 12 h'
+      applied: 'partly'
+      note: 'shock duration could be applied; cause cannot'
+  danger_shock:
+    - kind: inclusion
+      criterion: 'STEMI or STEMI equivalent'
+      applied: 'yes'
+      note: 'ICD-coded ST-elevation infarction'
+    - kind: inclusion
+      criterion: 'SBP < 100 mmHg or ongoing vasopressor support'
+      applied: 'yes'
+      note: 'criterion 1 of this cohort'
+    - kind: inclusion
+      criterion: 'arterial lactate > 2.5 mmol/L'
+      applied: 'yes'
+      note: 'lactate nearest onset'
+    - kind: inclusion
+      criterion: 'left ventricular ejection fraction < 45%'
+      applied: 'no'
+      note: 'no echo table at either site -- the eligible set is a superset on this'
+    - kind: exclusion
+      criterion: 'comatose after out-of-hospital arrest (GCS < 8)'
+      applied: 'yes'
+      note: 'arrest code plus lowest GCS in the window'
+    - kind: exclusion
+      criterion: 'severe aortic stenosis or regurgitation'
+      applied: 'yes'
+      note: 'applied'
+    - kind: exclusion
+      criterion: 'severe peripheral arterial disease'
+      applied: 'yes'
+      note: 'applied'
+    - kind: exclusion
+      criterion: 'shock duration > 24 h, severe right ventricular failure'
+      applied: 'partly'
+      note: 'duration could be applied; RV failure needs an echo'

@@ -65,11 +65,13 @@ from clifcs.palette import (
 )
 from clifcs.trials import (
     add_distances,
+    criteria_frame,
     add_eligibility,
     attach_features,
     compare_to_published,
     fit_regions,
     load_trials,
+    inside_all_null,
     rank_and_orphans,
     table1_comparison,
     table1_position,
@@ -668,6 +670,12 @@ def analyse(paths, anchor: str, cohort_cfg, trial_cfg, args, logger) -> None:
     )
     eligibility.write_csv(paths.table_home / f"trial_eligibility_{anchor}.csv")
 
+    # the published criteria, with what we can and cannot apply. Anchor-free,
+    # but written per anchor so the report can find it the same way as the rest.
+    criteria = criteria_frame(trial_cfg)
+    if criteria.height:
+        criteria.write_csv(paths.table_home / "trial_criteria.csv")
+
     if table1.height:
         table1.write_csv(paths.table_home / f"trial_table1_{anchor}.csv")
 
@@ -680,13 +688,21 @@ def analyse(paths, anchor: str, cohort_cfg, trial_cfg, args, logger) -> None:
             )
             if usable.height == 0:
                 continue
+            k = int(usable[compared].median())
+            observed = float((usable[column] == 0).mean())
+            null = inside_all_null(k)
             summary.append(
                 {
                     "trial": trial.label,
                     "n_eligible": int(frame[f"elig_{trial.key}"].sum()),
                     "n_comparable": usable.height,
-                    "n_variables_compared": int(usable[compared].median()),
-                    "share_inside_all_iqrs": float((usable[column] == 0).mean()),
+                    "n_variables_compared": k,
+                    "share_inside_all_iqrs": observed,
+                    # what a representative cohort would give, 0.5^k. Without
+                    # it the share is unreadable: it falls with every variable
+                    # added whether or not the cohort differs at all.
+                    "null_inside_all_iqrs": null,
+                    "ratio_to_null": observed / null if null > 0 else None,
                     "median_variables_outside": float(usable[column].median()),
                     "median_max_distance_iqrs": float(
                         usable[f"t1_maxdist_{trial.key}"].median()
@@ -696,15 +712,23 @@ def analyse(paths, anchor: str, cohort_cfg, trial_cfg, args, logger) -> None:
         if summary:
             inside = pl.DataFrame(summary)
             inside.write_csv(paths.table_home / f"trial_inside_tested_{anchor}.csv")
-            logger.info("eligible patients who match the enrolled population:")
+            logger.info(
+                "inside every published IQR, against the 0.5^k a representative "
+                "cohort would give:"
+            )
             for row in inside.iter_rows(named=True):
                 logger.info(
                     f"  {row['trial']:<22} {row['share_inside_all_iqrs']:>6.1%} "
-                    f"inside all {row['n_variables_compared']} IQRs "
-                    f"({row['n_comparable']:,} comparable); median "
-                    f"{row['median_variables_outside']:.0f} variables outside, "
-                    f"worst {row['median_max_distance_iqrs']:.2f} IQRs"
+                    f"of {row['n_comparable']:>6,} across "
+                    f"{row['n_variables_compared']} IQRs  "
+                    f"(null {row['null_inside_all_iqrs']:>5.1%}, "
+                    f"ratio {row['ratio_to_null']:.2f})"
                 )
+            logger.info(
+                "  a ratio near 1 means the eligible patients are as "
+                "concentrated as a representative sample; read the per-variable "
+                "shifts above for where they actually differ"
+            )
 
     representativeness = compare_to_published(frame, trials, logger)
     representativeness.write_csv(

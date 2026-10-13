@@ -739,6 +739,15 @@ def section_trials(paths, out: list) -> None:
         "tables here; the others published medians without IQRs, or nothing "
         "retrievable.</p>"
     )
+    out.append(
+        "<p>The <b>By trial</b> tab pairs each trial's published criteria with "
+        "its enrolment characteristics. <code>applied_here</code> says whether "
+        "this pipeline can evaluate a criterion: 19 of the 39 published "
+        "criteria across the eight trials are applied in full, 14 partly, and "
+        "6 not at all. Every <code>no</code> on a substantive criterion makes "
+        "that trial's eligible count a superset &mdash; CULPRIT-SHOCK's "
+        "multivessel requirement is the largest of them.</p>"
+    )
 
     anchor_tabs = []
     for anchor in anchors:
@@ -794,6 +803,75 @@ def section_trials(paths, out: list) -> None:
                     key_column="n_eligible_trials",
                 ))
             )
+        # --------------------------------------------- one tab per trial
+        # Criteria and enrolment characteristics side by side, which is the
+        # pairing that matters: the criteria say who a recommendation nominally
+        # covers, the characteristics say who it was observed in.
+        criteria_file = table_home / "trial_criteria.csv"
+        baseline_file = table_home / f"trial_table1_{anchor}.csv"
+        if criteria_file.is_file() or baseline_file.is_file():
+            criteria = (
+                pl.read_csv(criteria_file) if criteria_file.is_file()
+                else pl.DataFrame()
+            )
+            baseline = (
+                pl.read_csv(baseline_file) if baseline_file.is_file()
+                else pl.DataFrame()
+            )
+            names = []
+            for source in (criteria, baseline):
+                if source.height:
+                    names += source["trial"].unique(maintain_order=True).to_list()
+            seen, ordered = set(), []
+            for name in names:
+                if name not in seen:
+                    seen.add(name)
+                    ordered.append(name)
+
+            per_trial = []
+            for name in ordered:
+                parts = []
+                if criteria.height:
+                    rows = criteria.filter(pl.col("trial") == name)
+                    if rows.height:
+                        parts.append(
+                            "<h4>Inclusion and exclusion criteria</h4>"
+                            + table(
+                                rows.select("kind", "criterion", "applied_here",
+                                            "note"),
+                                None,
+                                key_column="criterion",
+                            )
+                        )
+                if baseline.height:
+                    rows = baseline.filter(pl.col("trial") == name)
+                    if rows.height:
+                        parts.append(
+                            "<h4>Enrolment characteristics: ours vs the trial</h4>"
+                            + table(
+                                rows.select(
+                                    "variable", "confidence", "published",
+                                    "published_q1", "published_q3", "ours",
+                                    "pct_below_q1", "pct_above_q3",
+                                    "net_shift_low",
+                                ),
+                                {
+                                    "published": num(2),
+                                    "published_q1": num(2),
+                                    "published_q3": num(2),
+                                    "ours": num(2),
+                                    "pct_below_q1": pct,
+                                    "pct_above_q3": pct,
+                                    "net_shift_low": pct,
+                                },
+                                key_column="variable",
+                            )
+                        )
+                if parts:
+                    per_trial.append((name, "".join(parts)))
+            if per_trial:
+                blocks.append(("By trial", tabs(per_trial)))
+
         inside = table_home / f"trial_inside_tested_{anchor}.csv"
         if inside.is_file():
             blocks.append(
@@ -809,33 +887,6 @@ def section_trials(paths, out: list) -> None:
                     key_column="trial",
                 ))
             )
-        baseline = table_home / f"trial_table1_{anchor}.csv"
-        if baseline.is_file():
-            full = pl.read_csv(baseline)
-            # one sub-tab per trial, because a single table of every trial's
-            # every variable is unreadable and the comparison is per trial
-            per_trial = [
-                (
-                    name,
-                    table(
-                        full.filter(pl.col("trial") == name).select(
-                            "variable", "confidence", "published",
-                            "published_q1", "published_q3", "ours",
-                            "pct_below_q1", "pct_above_q3", "pct_outside_iqr",
-                        ),
-                        {
-                            "published": num(2), "published_q1": num(2),
-                            "published_q3": num(2), "ours": num(2),
-                            "pct_below_q1": pct, "pct_above_q3": pct,
-                            "pct_outside_iqr": pct,
-                        },
-                        key_column="variable",
-                    ),
-                )
-                for name in full["trial"].unique(maintain_order=True).to_list()
-            ]
-            blocks.append(("Published baseline tables", tabs(per_trial)))
-
         home = paths.output_home / "figures" / "GEM-all" / f"anchor-{anchor}"
         for name, label in (
             ("trial_eligible_vs_tested", "Would qualify vs resembles"),
@@ -850,19 +901,34 @@ def section_trials(paths, out: list) -> None:
     out.append(tabs(anchor_tabs))
 
     out.append(callout(
-        "<b>Meeting the criteria is not the same as resembling the patients "
-        "enrolled, and the gap is large.</b> Enrolment criteria are thresholds, "
-        "so they admit a far wider range than a trial ends up containing. Of "
-        "our ECLS-SHOCK-eligible patients, <b>1.4%</b> fall inside all six of "
-        "its published interquartile ranges; for DanGer Shock it is <b>5.0%</b> "
-        "of five. Both gaps are driven the same way: our patients are much more "
-        "hypotensive than the people the trials enrolled. ECLS-SHOCK reported a "
-        "median systolic pressure of 96 mmHg (IQR 80&ndash;120) &mdash; its "
-        "population was largely supported on catecholamines at a near-normal "
-        "pressure &mdash; while ours sits at 73 mmHg, with <b>66.8% below the "
-        "trial's first quartile</b>. Diastolic runs the same way (67.7% below). "
-        "A recommendation tested at those pressures is being read across to "
+        "<b>The discrepancy is blood pressure, and essentially nothing else.</b> "
+        "Our criteria-eligible patients match the enrolled populations on age, "
+        "weight, height, body-mass index, lactate, arterial pH and heart rate "
+        "&mdash; every one of those sits within a few points of the 25% a "
+        "representative sample would put below the trial's first quartile. The "
+        "pressures do not. <b>66.8% of our ECLS-SHOCK-eligible patients fall "
+        "below that trial's first systolic quartile and 67.7% below its "
+        "diastolic</b>, against a 25% null: a shift of some 42 points. "
+        "ECLS-SHOCK reported a median systolic of 96 mmHg (IQR 80&ndash;120) "
+        "despite requiring &ldquo;SBP &lt; 90 for &gt; 30 min <i>or</i> "
+        "catecholamines&rdquo;, so its population was largely supported on "
+        "catecholamines at a near-normal pressure; ours sits at 73 mmHg. DanGer "
+        "Shock runs the same way, 44.6% below its mean-arterial quartile. A "
+        "recommendation tested at those pressures is being read across to "
         "patients in considerably deeper shock.", "warn"))
+
+    out.append(callout(
+        "<b>Do not read the &ldquo;inside every IQR&rdquo; column as a measure "
+        "of representativeness.</b> An interquartile range contains half the "
+        "trial's own population by construction, so even a perfectly "
+        "representative cohort would have only 0.5<sup>k</sup> of its patients "
+        "inside all k of them &mdash; 50% at one variable, 6.2% at four, 0.8% "
+        "at seven. The observed shares here are 0.72 to 1.61 times that null, "
+        "which is to say the eligible patients are about as concentrated as a "
+        "representative sample would be. The column falls with every variable "
+        "added whether or not anything differs, and it is reported with its "
+        "null beside it for that reason. The per-variable directional shifts "
+        "are where the signal is."))
 
     out.append(callout(
         "<b>Only the measured variables count toward that judgement.</b> A "

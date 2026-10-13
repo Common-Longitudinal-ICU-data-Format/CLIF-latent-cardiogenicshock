@@ -77,6 +77,8 @@ DX_CODES: dict[str, tuple[str, ...]] = {
     # anterior wall STEMI, reported separately by DanGer Shock
     "anterior_mi": ("I210", "I2109"),
     "stroke": ("I63", "I64", "Z8673", "434", "436"),
+    "prior_pci": ("Z9861", "Z955", "V4582"),
+    "prior_cabg": ("Z951", "Z955", "V4581"),
 }
 
 
@@ -95,6 +97,8 @@ HISTORY_FLAGS = (
     "heart_failure",
     "chronic_kidney_disease",
     "stroke",
+    "prior_pci",
+    "prior_cabg",
 )
 
 
@@ -254,6 +258,50 @@ def attach_features(data_dir, cohort: pl.DataFrame, cfg, logger) -> pl.DataFrame
             at_onset, on="hospitalization_id", how="left", validate="1:1"
         )
     for name in ("map_at_onset", "heart_rate_at_onset", "dbp_at_onset"):
+        if name not in cohort.columns:
+            cohort = cohort.with_columns(pl.lit(None, dtype=pl.Float64).alias(name))
+
+    # ------------------------------------------- weight, height and BMI
+    # Reported by IABP-SHOCK II and ECLS-SHOCK, and directly comparable: a
+    # scale is a scale. Charted for 96-100% of this cohort's weights and
+    # 93-94% of its heights, so the comparison is not thinned by missingness.
+    #
+    # The plausible ranges are load-bearing. height_cm reaches 36 at UCMC and
+    # 91 at NU, which are transcription errors rather than patients, and a
+    # single one of those produces a BMI in the hundreds.
+    anthropometry = (
+        scan(data_dir, "clif_vitals")
+        .join(ids.lazy(), on="hospitalization_id", how="inner")
+        .filter(
+            pl.col("vital_category").is_in(["weight_kg", "height_cm"]),
+            pl.col("vital_value").is_not_null(),
+        )
+        .group_by("hospitalization_id", "vital_category")
+        .agg(value=pl.col("vital_value").median())
+        .collect()
+    )
+    if anthropometry.height:
+        wide = anthropometry.pivot(
+            on="vital_category", index="hospitalization_id", values="value"
+        )
+        for name in ("weight_kg", "height_cm"):
+            if name not in wide.columns:
+                wide = wide.with_columns(pl.lit(None, dtype=pl.Float64).alias(name))
+        wide = wide.select(
+            "hospitalization_id",
+            weight_kg=pl.when(pl.col("weight_kg").is_between(25.0, 350.0)).then(
+                pl.col("weight_kg")
+            ),
+            height_cm=pl.when(pl.col("height_cm").is_between(120.0, 230.0)).then(
+                pl.col("height_cm")
+            ),
+        ).with_columns(
+            bmi=pl.col("weight_kg") / (pl.col("height_cm") / 100.0) ** 2
+        )
+        cohort = cohort.join(
+            wide, on="hospitalization_id", how="left", validate="1:1"
+        )
+    for name in ("weight_kg", "height_cm", "bmi"):
         if name not in cohort.columns:
             cohort = cohort.with_columns(pl.lit(None, dtype=pl.Float64).alias(name))
 
@@ -857,6 +905,11 @@ TABLE1_LABELS: dict[str, str] = {
     "dbp_at_onset": "diastolic BP (mmHg)",
     "ph_at_onset": "arterial pH",
     "creatinine": "creatinine (mg/dL)",
+    "weight_kg": "weight (kg)",
+    "height_cm": "height (cm)",
+    "bmi": "body-mass index",
+    "dx_prior_pci": "prior PCI",
+    "dx_prior_cabg": "prior bypass surgery",
     "dx_stemi": "ST-elevation infarction",
     "dx_stroke": "prior stroke",
     "dx_severe_pvd": "peripheral artery disease",
@@ -897,6 +950,9 @@ VARIABLE_CONFIDENCE: dict[str, str] = {
     "dbp_at_onset": "measured",
     "ph_at_onset": "measured",
     "creatinine": "measured",
+    "weight_kg": "measured",
+    "height_cm": "measured",
+    "bmi": "measured",
     "male": "measured",
     "dx_hypertension": "ascertainment",
     "dx_diabetes": "ascertainment",
@@ -909,11 +965,36 @@ VARIABLE_CONFIDENCE: dict[str, str] = {
     "dx_stemi": "ascertainment",
     "dx_stroke": "ascertainment",
     "dx_severe_pvd": "ascertainment",
+    "dx_prior_pci": "ascertainment",
+    "dx_prior_cabg": "ascertainment",
     # GCS is measured, but a trial's "altered mental status" is a clinician's
     # judgement and ours is a threshold on a chart value that cannot separate
     # organ dysfunction from sedation. Not comparable.
     "ams_gcs_lt15": "ascertainment",
 }
+
+
+def criteria_frame(cfg) -> pl.DataFrame:
+    """
+    every trial's published criteria, with whether this pipeline applies it
+
+    Kept as data rather than rendered in the report, so the same table can be
+    read from a notebook and so a reader can sort it by what is missing.
+    """
+    rows = []
+    labels = {k: str(cfg.trials[k].label) for k in cfg.trials}
+    for key in cfg.get("criteria", {}) or {}:
+        for row in cfg.criteria[key]:
+            rows.append(
+                {
+                    "trial": labels.get(key, key),
+                    "kind": str(row.kind),
+                    "criterion": str(row.criterion),
+                    "applied_here": str(row.applied),
+                    "note": str(row.note),
+                }
+            )
+    return pl.DataFrame(rows)
 
 
 def table1_variables(trial) -> dict:
@@ -1003,6 +1084,20 @@ def table1_position(frame: pl.DataFrame, trial, logger) -> pl.DataFrame:
     ).drop([f"_t1d_{n}" for n in continuous])
 
 
+def inside_all_null(k: int) -> float:
+    """
+    the share of a *representative* cohort that would fall inside all k IQRs
+
+    0.5 ** k, because each published interquartile range contains half the
+    trial's own population. This is here because the raw "inside all k" share
+    is not comparable between trials and is easy to over-read: ECLS-SHOCK's
+    0.6% across seven variables and IABP-SHOCK II's 7.8% across four look very
+    different and are both approximately the null. Report the ratio, and read
+    the per-variable directional shifts for the actual signal.
+    """
+    return 0.5**k
+
+
 def table1_comparison(frame: pl.DataFrame, trial, logger) -> pl.DataFrame:
     """
     per variable: the trial's published value, ours among the eligible, and the
@@ -1060,12 +1155,21 @@ def table1_comparison(frame: pl.DataFrame, trial, logger) -> pl.DataFrame:
             q1, q3 = (float(x) for x in published["iqr"])
             below = float((values < q1).mean())
             above = float((values > q3).mean())
+            # An interquartile range contains half the trial's own population
+            # by construction, so a perfectly representative cohort would put
+            # 25% below the first quartile and 25% above the third. The excess
+            # over that null is the signal; the raw share is not. 66.8% below
+            # is a shift of 42 points; 26% below is nothing.
             row.update(
                 published_q1=q1,
                 published_q3=q3,
                 pct_below_q1=below,
                 pct_above_q3=above,
                 pct_outside_iqr=below + above,
+                excess_below_q1=below - 0.25,
+                excess_above_q3=above - 0.25,
+                # positive means shifted low, negative means shifted high
+                net_shift_low=below - above,
             )
         rows.append(row)
 
@@ -1087,11 +1191,17 @@ def table1_comparison(frame: pl.DataFrame, trial, logger) -> pl.DataFrame:
                     f"published {row['published']:>6.1f} (no IQR published)"
                 )
             else:
+                shift = row["net_shift_low"]
+                direction = (
+                    f"shifted LOW by {shift:+.0%}"
+                    if abs(shift) >= 0.10
+                    else "no net shift"
+                )
                 logger.info(
-                    f"      {row['variable']:<30} ours {row['ours']:>6.1f} vs "
-                    f"published {row['published']:>6.1f} "
-                    f"[{row['published_q1']:g}-{row['published_q3']:g}]; "
-                    f"{row['pct_outside_iqr']:>5.1%} outside "
-                    f"({row['pct_below_q1']:.1%} below, {row['pct_above_q3']:.1%} above)"
+                    f"      {row['variable']:<30} ours {row['ours']:>7.1f} vs "
+                    f"{row['published']:>6.1f} "
+                    f"[{row['published_q1']:g}-{row['published_q3']:g}]  "
+                    f"below {row['pct_below_q1']:>5.1%} (null 25%), "
+                    f"above {row['pct_above_q3']:>5.1%}  -> {direction}"
                 )
     return out
