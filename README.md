@@ -206,6 +206,70 @@ At the 24 h anchor:
 | ECLS-SHOCK 2023 | 1,163 (3.4%) | 43.4% | 1,204 | 0.32 |
 | DanGer Shock 2024 | 199 (0.6%) | 37.7% | 192 | 0.27 |
 
+### Eligible is not the same as represented
+
+Enrolment criteria are thresholds, so they admit a much wider range than a trial
+ends up containing. The published baseline tables in
+[code/config/trials.yaml](code/config/trials.yaml) are what the result was
+actually observed in, and comparing against them asks the question the criteria
+cannot: of the patients who *would* have qualified, how many look like the
+patients who were enrolled?
+
+| trial | comparable | variables | inside every published IQR |
+|---|---|---|---|
+| ECLS-SHOCK | 1,163 | 6 | **1.4%** |
+| DanGer Shock | 199 | 5 | **5.0%** |
+| SHOCK | 4,397 | 1 (age only) | 36.1% |
+
+Both gaps run the same way — **our patients are far more hypotensive than the
+people the trials enrolled**:
+
+| | ours | ECLS-SHOCK (IQR) | below their Q1 |
+|---|---|---|---|
+| systolic BP | 73 | 96 (80–120) | **66.8%** |
+| diastolic BP | 45 | 60.5 (50–72) | **67.7%** |
+| lactate | 6.2 | 6.85 (4.55–9.8) | 34.1% |
+| arterial pH | 7.2 | 7.2 (7.1–7.3) | 21.7% |
+
+ECLS-SHOCK's own population sat at a median systolic of 96 mmHg despite the
+trial requiring "SBP < 90 for > 30 min **or** catecholamines" — most of those
+patients were supported on catecholamines at a near-normal pressure. Ours sit at
+73. A recommendation tested there is being read across to patients in
+considerably deeper shock. DanGer Shock is the same story at 37.9% below its
+systolic Q1 and 44.6% below its MAP Q1.
+
+Distance is measured in interquartile ranges because that is all a paper
+supports: it reports a median and an IQR, not a covariance, so there is no way
+to weight variables against one another or to account for their correlation.
+
+**Only `measured` variables count toward the judgement.** A trial's
+medical-history rows come from a case-report form and ours from ICD codes, and
+they do not measure the same thing in either direction. Restricting history
+flags to diagnoses present on arrival helped and did not fix it:
+
+| | ours | published | why it is not comparable |
+|---|---|---|---|
+| heart failure | 54.3% | 9.3% | POA-flagged `I50` includes the index event's acute failure |
+| prior MI | 1.0% | 16.1% | `poa_present` is seldom set on a history code |
+| intubated before onset | 37.7% | 17.8% | closest available, still broader than "before randomisation" |
+
+`VARIABLE_CONFIDENCE` in [code/clifcs/trials.py](code/clifcs/trials.py) marks
+these `ascertainment`; they are reported and never used to decide whether a
+patient is inside the tested population. Age, the pressures, heart rate,
+lactate, pH, creatinine and sex are what drive it.
+
+Two further things deliberately left out rather than compared: left ventricular
+ejection fraction and coronary anatomy (unavailable at both sites), and
+peripheral artery disease for ECLS-SHOCK — severe PVD is one of its exclusions,
+so our eligible set is 0% by construction and the comparison would measure the
+filter rather than the patients.
+
+**Completing the other trials needs their Table 1.** DanGer Shock and ECLS-SHOCK
+are transcribed from the published tables. IABP-SHOCK II, CULPRIT-SHOCK and
+ECMO-CS published full baseline tables that were not retrievable without journal
+access, so they carry medians without IQRs and get no per-patient position. The
+config takes a new `table1` block with no code change.
+
 ### Most of the cohort is covered by nothing
 
 **62.6% of patients meet no specific trial's criteria and have no

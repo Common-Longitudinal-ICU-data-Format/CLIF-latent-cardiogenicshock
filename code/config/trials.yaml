@@ -251,13 +251,35 @@ trials:
         resuscitated before enrolment, and patients over 80 were excluded
         outright -- the narrowest population of any trial here.
 
-    # Only the variables retrievable without journal access. The full NEJM
-    # Table 1 would add systolic pressure, the SOFA components and the
-    # comorbidity rates; see the note in the README on completing these.
+    # NEJM 2023;389:1286-97, Table 1. Arms are (ECLS, N=209) and (control,
+    # N=208); values below are the midpoint of the two.
+    #
+    # Not transferred, and why: body-mass index (weight and height are charted
+    # too sparsely per patient here), oliguria (no intake/output table at
+    # either site), left ventricular ejection fraction (no echo), number of
+    # diseased vessels and infarct-related artery (no coronary anatomy),
+    # time to return of spontaneous circulation (arrest is coded, its duration
+    # is not), and high-sensitivity troponin T -- UCMC runs troponin-T and NU
+    # troponin-I, so one absolute cut is not equivalent across the two sites.
     table1:
-      age_at_admission: {median: !!float 63.0, iqr: [!!float 56.0, !!float 70.0]}
-      male: {pct: !!float 0.813}
+      age_at_admission: {median: !!float 62.5, iqr: [!!float 56.5, !!float 70.0]}
+      sbp_at_onset: {median: !!float 96.0, iqr: [!!float 80.0, !!float 120.0]}
+      dbp_at_onset: {median: !!float 60.5, iqr: [!!float 50.0, !!float 72.0]}
+      heart_rate_at_onset: {median: !!float 92.5, iqr: [!!float 73.0, !!float 110.0]}
+      lactate: {median: !!float 6.85, iqr: [!!float 4.55, !!float 9.8]}
+      ph_at_onset: {median: !!float 7.2, iqr: [!!float 7.1, !!float 7.3]}
+      creatinine: {median: !!float 1.25, iqr: [!!float 1.05, !!float 1.55]}
+      male: {pct: !!float 0.8125}
+      dx_hypertension: {pct: !!float 0.564}
+      dx_diabetes: {pct: !!float 0.314}
+      dx_prior_mi: {pct: !!float 0.130}
+      dx_stroke: {pct: !!float 0.075}
+      # Peripheral artery disease (published 9.0%) is deliberately omitted:
+      # severe PVD is an ECLS-SHOCK *exclusion*, so our eligible set is 0% by
+      # construction and the comparison measures the filter, not the patients.
+      dx_stemi: {pct: !!float 0.672}
       dx_cardiac_arrest: {pct: !!float 0.777}
+      ams_gcs_lt15: {pct: !!float 0.954}
 
   # ----------------------------------------------------------- DanGer Shock 2024
   danger_shock:

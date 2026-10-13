@@ -726,7 +726,18 @@ def section_trials(paths, out: list) -> None:
         "<b>proximity</b> &mdash; do they resemble the patients it did enrol? "
         "Proximity is the share of a patient's 30 nearest neighbours in the "
         "50-d PCA space that the trial would have taken, the same "
-        "neighbourhood measure section 7 uses for site purity.</p>"
+        "neighbourhood measure section 8 uses for site purity.</p>"
+    )
+    out.append(
+        "<p>A third question sits between them and is the one the published "
+        "baseline tables answer: of the patients who <i>would</i> have "
+        "qualified, how many look like the patients who were actually enrolled? "
+        "Distance is measured in interquartile ranges, which is all a paper "
+        "supports &mdash; it reports a median and an IQR, not a covariance, so "
+        "there is no way to weight variables against one another or to account "
+        "for their correlation. DanGer Shock and ECLS-SHOCK have complete "
+        "tables here; the others published medians without IQRs, or nothing "
+        "retrievable.</p>"
     )
 
     anchor_tabs = []
@@ -783,15 +794,90 @@ def section_trials(paths, out: list) -> None:
                     key_column="n_eligible_trials",
                 ))
             )
+        inside = table_home / f"trial_inside_tested_{anchor}.csv"
+        if inside.is_file():
+            blocks.append(
+                ("Inside the tested population", table(
+                    pl.read_csv(inside),
+                    {
+                        "n_eligible": thousands,
+                        "n_comparable": thousands,
+                        "share_inside_all_iqrs": pct,
+                        "median_variables_outside": num(0),
+                        "median_max_distance_iqrs": num(2),
+                    },
+                    key_column="trial",
+                ))
+            )
+        baseline = table_home / f"trial_table1_{anchor}.csv"
+        if baseline.is_file():
+            full = pl.read_csv(baseline)
+            # one sub-tab per trial, because a single table of every trial's
+            # every variable is unreadable and the comparison is per trial
+            per_trial = [
+                (
+                    name,
+                    table(
+                        full.filter(pl.col("trial") == name).select(
+                            "variable", "confidence", "published",
+                            "published_q1", "published_q3", "ours",
+                            "pct_below_q1", "pct_above_q3", "pct_outside_iqr",
+                        ),
+                        {
+                            "published": num(2), "published_q1": num(2),
+                            "published_q3": num(2), "ours": num(2),
+                            "pct_below_q1": pct, "pct_above_q3": pct,
+                            "pct_outside_iqr": pct,
+                        },
+                        key_column="variable",
+                    ),
+                )
+                for name in full["trial"].unique(maintain_order=True).to_list()
+            ]
+            blocks.append(("Published baseline tables", tabs(per_trial)))
+
         home = paths.output_home / "figures" / "GEM-all" / f"anchor-{anchor}"
-        for name, label in (("trial_regions", "Where each trial sits"),
-                            ("trial_coverage", "Coverage")):
+        for name, label in (
+            ("trial_eligible_vs_tested", "Would qualify vs resembles"),
+            ("trial_regions", "Where each trial sits"),
+            ("trial_coverage", "Coverage"),
+        ):
             body = figure(home / f"{name}.png")
             if body:
                 blocks.append((label, body))
         anchor_tabs.append((anchor, tabs(blocks)))
 
     out.append(tabs(anchor_tabs))
+
+    out.append(callout(
+        "<b>Meeting the criteria is not the same as resembling the patients "
+        "enrolled, and the gap is large.</b> Enrolment criteria are thresholds, "
+        "so they admit a far wider range than a trial ends up containing. Of "
+        "our ECLS-SHOCK-eligible patients, <b>1.4%</b> fall inside all six of "
+        "its published interquartile ranges; for DanGer Shock it is <b>5.0%</b> "
+        "of five. Both gaps are driven the same way: our patients are much more "
+        "hypotensive than the people the trials enrolled. ECLS-SHOCK reported a "
+        "median systolic pressure of 96 mmHg (IQR 80&ndash;120) &mdash; its "
+        "population was largely supported on catecholamines at a near-normal "
+        "pressure &mdash; while ours sits at 73 mmHg, with <b>66.8% below the "
+        "trial's first quartile</b>. Diastolic runs the same way (67.7% below). "
+        "A recommendation tested at those pressures is being read across to "
+        "patients in considerably deeper shock.", "warn"))
+
+    out.append(callout(
+        "<b>Only the measured variables count toward that judgement.</b> A "
+        "trial's medical-history rows come from a case-report form and ours "
+        "from ICD codes, and the two do not measure the same thing in either "
+        "direction. Restricting history flags to diagnoses present on arrival "
+        "helped but did not fix it: heart failure still reads 54.3% against "
+        "DanGer Shock's published 9.3%, because a present-on-arrival I50 "
+        "includes the acute failure of the index event, while prior myocardial "
+        "infarction collapses to 1.0% against 16.1% because present-on-arrival "
+        "is seldom set on a history code. Those rows are marked "
+        "<code>ascertainment</code> in the baseline tables and are reported "
+        "but never used to decide whether a patient is inside the tested "
+        "population; age, the pressures, heart rate, lactate, pH, creatinine "
+        "and sex are what drive it."))
 
     out.append(callout(
         "<b>Three of the eight trials reduce to the same computable criteria.</b> "

@@ -76,6 +76,7 @@ DX_CODES: dict[str, tuple[str, ...]] = {
     "chronic_kidney_disease": ("N18", "585"),
     # anterior wall STEMI, reported separately by DanGer Shock
     "anterior_mi": ("I210", "I2109"),
+    "stroke": ("I63", "I64", "Z8673", "434", "436"),
 }
 
 
@@ -93,6 +94,7 @@ HISTORY_FLAGS = (
     "prior_mi",
     "heart_failure",
     "chronic_kidney_disease",
+    "stroke",
 )
 
 
@@ -243,14 +245,54 @@ def attach_features(data_dir, cohort: pl.DataFrame, cfg, logger) -> pl.DataFrame
             .agg(
                 map_at_onset=pl.col("map_best").first(),
                 heart_rate_at_onset=pl.col("heart_rate_ok").first(),
+                # the diastolic reading at that same instant, which ECLS-SHOCK
+                # reports alongside the systolic
+                dbp_at_onset=pl.col("dbp").first(),
             )
         )
         cohort = cohort.join(
             at_onset, on="hospitalization_id", how="left", validate="1:1"
         )
-    for name in ("map_at_onset", "heart_rate_at_onset"):
+    for name in ("map_at_onset", "heart_rate_at_onset", "dbp_at_onset"):
         if name not in cohort.columns:
             cohort = cohort.with_columns(pl.lit(None, dtype=pl.Float64).alias(name))
+
+    # ------------------------------------------------- arterial pH at onset
+    # ECLS-SHOCK reports admission pH, and ph_arterial is a lab_category at
+    # both sites. Taken as the lowest value in the window, matching how the
+    # other onset values are taken: the worst reading the clinician saw.
+    ph = (
+        scan(data_dir, "clif_labs", dttm_cols=("lab_result_dttm",))
+        .filter(
+            pl.col("lab_category") == "ph_arterial",
+            pl.col("lab_value_numeric").is_between(6.5, 8.0),
+        )
+        .join(
+            cohort.lazy().select(
+                "hospitalization_id",
+                win_start=pl.col("cs_onset_dttm") - pl.duration(hours=window_hours),
+                win_end=pl.col("cs_onset_dttm") + pl.duration(hours=window_hours),
+            ),
+            on="hospitalization_id",
+            how="inner",
+        )
+        .filter(
+            pl.col("lab_result_dttm").is_between(pl.col("win_start"), pl.col("win_end"))
+        )
+        .group_by("hospitalization_id")
+        .agg(ph_at_onset=pl.col("lab_value_numeric").min())
+        .collect()
+    )
+    cohort = cohort.join(ph, on="hospitalization_id", how="left", validate="1:1")
+    if "ph_at_onset" not in cohort.columns:
+        cohort = cohort.with_columns(
+            ph_at_onset=pl.lit(None, dtype=pl.Float64)
+        )
+
+    # altered mental status, as a baseline table reports it
+    cohort = cohort.with_columns(
+        ams_gcs_lt15=(pl.col("gcs_min_in_window") < 15).fill_null(False)
+    )
 
     # --------------------------------------------- ventilated before onset
     # A baseline table records "intubation before randomisation", so this is
@@ -812,6 +854,13 @@ TABLE1_LABELS: dict[str, str] = {
     "map_at_onset": "mean arterial BP (mmHg)",
     "heart_rate_at_onset": "heart rate (bpm)",
     "lactate": "arterial lactate (mmol/L)",
+    "dbp_at_onset": "diastolic BP (mmHg)",
+    "ph_at_onset": "arterial pH",
+    "creatinine": "creatinine (mg/dL)",
+    "dx_stemi": "ST-elevation infarction",
+    "dx_stroke": "prior stroke",
+    "dx_severe_pvd": "peripheral artery disease",
+    "ams_gcs_lt15": "altered mental status",
     "male": "male sex",
     "dx_hypertension": "hypertension",
     "dx_diabetes": "diabetes",
@@ -845,6 +894,9 @@ VARIABLE_CONFIDENCE: dict[str, str] = {
     "map_at_onset": "measured",
     "heart_rate_at_onset": "measured",
     "lactate": "measured",
+    "dbp_at_onset": "measured",
+    "ph_at_onset": "measured",
+    "creatinine": "measured",
     "male": "measured",
     "dx_hypertension": "ascertainment",
     "dx_diabetes": "ascertainment",
@@ -854,6 +906,13 @@ VARIABLE_CONFIDENCE: dict[str, str] = {
     "dx_cardiac_arrest": "ascertainment",
     "imv_before_onset": "ascertainment",
     "dx_anterior_mi": "ascertainment",
+    "dx_stemi": "ascertainment",
+    "dx_stroke": "ascertainment",
+    "dx_severe_pvd": "ascertainment",
+    # GCS is measured, but a trial's "altered mental status" is a clinician's
+    # judgement and ours is a threshold on a chart value that cannot separate
+    # organ dysfunction from sedation. Not comparable.
+    "ams_gcs_lt15": "ascertainment",
 }
 
 
