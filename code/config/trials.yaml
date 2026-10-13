@@ -37,6 +37,33 @@
 # in CLIF 2.1 -- which is why CULPRIT-SHOCK's multivessel requirement and
 # OptimaCC's "after successful PCI" cannot be applied.
 
+# ---------------------------------------------------------------------------
+# PUBLISHED BASELINE TABLES (`table1`)
+#
+# The baseline characteristics table of each paper, which is what makes it
+# possible to ask whether a patient who *would have qualified* actually looks
+# like the people who were enrolled. Enrolment criteria are thresholds and
+# admit a wide range; a DanGer Shock-eligible patient with a systolic pressure
+# of 60 and a heart rate of 70 clears every criterion and still sits outside
+# both interquartile ranges the trial reported, so the result was never tested
+# on anyone much like them.
+#
+# Schema, per variable:
+#   {median: m, iqr: [q1, q3]}   a continuous variable
+#   {pct: p}                     a proportion, 0-1
+# A variable absent from a trial's block was not reported by that paper (or not
+# retrievable), and is skipped for that trial rather than guessed at.
+#
+# Variable names are the cohort's own column names where one exists, so
+# clifcs.trials.table1_position can look them up directly.
+#
+# POOLING ACROSS ARMS. These trials randomised, so their arms are balanced by
+# construction and their baseline tables nearly identical. Where a paper
+# reports per-arm values, the midpoint is used and the arms' own values are
+# noted in `source_note`. Medians and IQRs cannot be pooled exactly; the
+# midpoint of two near-identical arms is a good approximation and a poor one
+# would be visible as a wide gap between the arms.
+
 trials:
 
   # -------------------------------------------------------------- SHOCK 1999
@@ -61,6 +88,13 @@ trials:
       source_note: >-
         Age and sex from the NEJM abstract. Per-arm baseline values were not
         retrievable without journal access; no lactate or SBP reported.
+    # Mean 66 (SD 10) converted to an approximate interquartile range as
+    # mean +/- 0.674 SD, which holds only if age is near-normal. Flagged as
+    # approximate so it is not mistaken for a published IQR.
+    table1:
+      age_at_admission:
+        {median: !!float 66.0, iqr: [!!float 59.3, !!float 72.7], approximate: !!bool true}
+      male: {pct: !!float 0.68}
 
   # ------------------------------------------------------- IABP-SHOCK II 2012
   iabp_shock_ii:
@@ -84,6 +118,11 @@ trials:
       source_note: >-
         Median age and LVEF from the ACC trial summary; female share 31% from
         the trial's sex substudy (187 of 600). Diabetes share not confirmed.
+    # No interquartile ranges retrievable, so only the proportion and the
+    # median are compared for this trial.
+    table1:
+      age_at_admission: {median: !!float 70.0}
+      male: {pct: !!float 0.69}
 
   # ------------------------------------------------------ CULPRIT-SHOCK 2017
   culprit_shock:
@@ -107,6 +146,9 @@ trials:
       source_note: >-
         Median age 70 and roughly 75% male from secondary summaries of the
         trial; the NEJM Table 1 was not retrievable.
+    table1:
+      age_at_admission: {median: !!float 70.0}
+      male: {pct: !!float 0.75}
 
   # ----------------------------------------------------------- SOAP II 2010
   soap_ii:
@@ -180,6 +222,10 @@ trials:
         here as the pooled value. Lactate 5.3 / 4.7 mmol/L by arm. Roughly
         three-quarters male. The one trial here with a substantial non-AMI
         population (STEMI 50.4%, heart-failure exacerbation 23.1%).
+    table1:
+      age_at_admission: {median: !!float 66.0}
+      lactate: {median: !!float 5.0}
+      male: {pct: !!float 0.75}
 
   # ------------------------------------------------------------ ECLS-SHOCK 2023
   ecls_shock:
@@ -205,6 +251,14 @@ trials:
         resuscitated before enrolment, and patients over 80 were excluded
         outright -- the narrowest population of any trial here.
 
+    # Only the variables retrievable without journal access. The full NEJM
+    # Table 1 would add systolic pressure, the SOFA components and the
+    # comorbidity rates; see the note in the README on completing these.
+    table1:
+      age_at_admission: {median: !!float 63.0, iqr: [!!float 56.0, !!float 70.0]}
+      male: {pct: !!float 0.813}
+      dx_cardiac_arrest: {pct: !!float 0.777}
+
   # ----------------------------------------------------------- DanGer Shock 2024
   danger_shock:
     label: DanGer Shock
@@ -228,6 +282,29 @@ trials:
         Median age 67 (67 vs 69 by arm), 79.2% men, lactate 4.5-4.6 mmol/L,
         SBP 82-84 mmHg, LVEF 25%. STEMI only, and patients comatose after
         out-of-hospital arrest were excluded.
+
+    # NEJM 2024;390:1382-93, Table 1. Arms are (microaxial flow pump + standard
+    # care, N=179) and (standard care alone, N=176); values below are the
+    # midpoint of the two, which differ by at most 2 units on any continuous
+    # variable.
+    table1:
+      age_at_admission: {median: !!float 68.0, iqr: [!!float 59.0, !!float 76.0]}
+      sbp_at_onset: {median: !!float 83.0, iqr: [!!float 72.0, !!float 91.0]}
+      map_at_onset: {median: !!float 63.5, iqr: [!!float 55.0, !!float 72.5]}
+      heart_rate_at_onset: {median: !!float 94.5, iqr: [!!float 76.5, !!float 110.5]}
+      lactate: {median: !!float 4.55, iqr: [!!float 3.3, !!float 7.0]}
+      # LVEF 25% (IQR 20-31 / 15-30) is reported but not computable here --
+      # neither site has an echo table -- so it is deliberately omitted rather
+      # than left to be silently skipped.
+      male: {pct: !!float 0.792}
+      dx_hypertension: {pct: !!float 0.515}
+      dx_diabetes: {pct: !!float 0.225}
+      dx_prior_mi: {pct: !!float 0.161}
+      dx_heart_failure: {pct: !!float 0.093}
+      dx_chronic_kidney_disease: {pct: !!float 0.099}
+      dx_cardiac_arrest: {pct: !!float 0.203} # resuscitation before randomisation
+      imv_before_onset: {pct: !!float 0.178} # intubation before randomisation
+      dx_anterior_mi: {pct: !!float 0.719}
 
 # ------------------------------------------------------- region and orphan rule
 regions:

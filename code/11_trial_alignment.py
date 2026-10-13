@@ -54,6 +54,7 @@ from clifcs import ANCHORS, get_logger, load_cohort_cfg, load_paths
 from clifcs.config import CONFIG_HOME
 from clifcs.figures import save_figure, style
 from clifcs.palette import (
+    CATEGORICAL,
     CONTEXT,
     GRID,
     HIGHLIGHT,
@@ -70,6 +71,8 @@ from clifcs.trials import (
     fit_regions,
     load_trials,
     rank_and_orphans,
+    table1_comparison,
+    table1_position,
 )
 
 #: the projection the figures are drawn in; 03 writes all three
@@ -84,6 +87,13 @@ PROJECTION = "pacmap"
 LOCAL_RATE_CMAP = LinearSegmentedColormap.from_list(
     "local_rate", list(SEQUENTIAL_BLUE)
 )
+
+#: reference palette slot 2, for "eligible but outside the published IQRs"
+#:
+#: Slots 1 and 2 against the context grey is a three-series panel, which is
+#: what the all-pairs gate validates -- worst pair orange<->aqua is not in play
+#: here, and blue<->orange clears every floor comfortably.
+OUTSIDE_COLOUR = CATEGORICAL[1]
 
 
 def embedding_matrix(frame: pl.DataFrame) -> np.ndarray:
@@ -257,6 +267,121 @@ def plot_regions(frame, trials, regions, out_path, anchor, model_key) -> None:
         x=0.01, ha="left", fontsize=9, color=INK_PRIMARY,
     )
     figure.subplots_adjust(hspace=0.26, wspace=0.05, top=0.90, bottom=0.02)
+    save_figure(figure, out_path)
+    plt.close(figure)
+
+
+def plot_eligible_vs_tested(frame, trials, out_path, anchor, model_key) -> None:
+    """
+    per trial, a pair of panels: who would qualify, and who matches the people
+    actually enrolled
+
+    The left panel of each pair is the binary question the criteria answer --
+    eligible or not. The right panel splits the eligible patients by whether
+    they fall inside every interquartile range the paper published.
+
+    The pair is the point. Enrolment criteria are thresholds, so they admit a
+    much wider range of patients than a trial ends up containing: somebody can
+    satisfy every DanGer Shock criterion with a systolic pressure of 60 and a
+    heart rate of 70 and still sit below both published IQRs, meaning the
+    result was never observed in anyone much like them. The left panel counts
+    them in; the right panel is where that shows.
+
+    Three colours per panel, which is what the all-pairs colourblind gate
+    allows -- the panels are scatters with every series on screen together.
+    """
+    x, y = f"{PROJECTION}_1", f"{PROJECTION}_2"
+    xs, ys = frame[x].to_numpy(), frame[y].to_numpy()
+    size = _marker_size(frame.height)
+
+    pairs_per_row = 2
+    rows = int(np.ceil(len(trials) / pairs_per_row))
+    figure, axes = plt.subplots(
+        rows, pairs_per_row * 2,
+        figsize=(2.5 * pairs_per_row * 2, 2.9 * rows), squeeze=False,
+    )
+
+    def blank(ax):
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_aspect("equal", adjustable="datalim")
+        for side in ("top", "right", "bottom", "left"):
+            ax.spines[side].set_visible(False)
+
+    for position, trial in enumerate(trials):
+        row = position // pairs_per_row
+        base = (position % pairs_per_row) * 2
+        eligible = frame[f"elig_{trial.key}"].to_numpy()
+
+        # ---- left: eligible or not
+        ax = axes[row][base]
+        ax.scatter(xs[~eligible], ys[~eligible], s=size, c=CONTEXT,
+                   linewidths=0, rasterized=True, zorder=1)
+        ax.scatter(xs[eligible], ys[eligible], s=size, c=HIGHLIGHT,
+                   linewidths=0, alpha=0.9, rasterized=True, zorder=2)
+        ax.set_title(
+            f"{trial.label} ({trial.year})\nwould qualify: "
+            f"{int(eligible.sum()):,} ({eligible.mean():.1%})",
+            loc="left", pad=4, fontsize=7,
+        )
+        blank(ax)
+
+        # ---- right: of those, inside the published population
+        ax = axes[row][base + 1]
+        outside_col = f"t1_outside_{trial.key}"
+        compared = frame[f"t1_n_compared_{trial.key}"].to_numpy()
+        usable = eligible & (compared > 0)
+        if outside_col in frame.columns and usable.any():
+            n_outside = frame[outside_col].fill_null(-1).to_numpy()
+            inside = usable & (n_outside == 0)
+            outside = usable & (n_outside > 0)
+            ax.scatter(xs[~usable], ys[~usable], s=size, c=CONTEXT,
+                       linewidths=0, rasterized=True, zorder=1)
+            ax.scatter(xs[outside], ys[outside], s=size, c=OUTSIDE_COLOUR,
+                       linewidths=0, alpha=0.9, rasterized=True, zorder=2)
+            ax.scatter(xs[inside], ys[inside], s=size, c=HIGHLIGHT,
+                       linewidths=0, alpha=0.9, rasterized=True, zorder=3)
+            share = inside.sum() / max(usable.sum(), 1)
+            n_vars = int(np.median(compared[usable]))
+            ax.set_title(
+                f"inside all {n_vars} published IQRs\n"
+                f"{int(inside.sum()):,} of {int(usable.sum()):,} eligible "
+                f"({share:.1%})",
+                loc="left", pad=4, fontsize=7,
+            )
+        else:
+            ax.scatter(xs, ys, s=size, c=CONTEXT, linewidths=0,
+                       rasterized=True, zorder=1)
+            ax.set_title("no usable published IQRs", loc="left", pad=4,
+                         fontsize=7, color=INK_SECONDARY)
+        blank(ax)
+
+    for position in range(len(trials), rows * pairs_per_row):
+        row = position // pairs_per_row
+        base = (position % pairs_per_row) * 2
+        axes[row][base].axis("off")
+        axes[row][base + 1].axis("off")
+
+    handles = [
+        Line2D([], [], marker="o", linestyle="none", markersize=5,
+               markerfacecolor=HIGHLIGHT, markeredgecolor="none",
+               label="eligible (left) / inside every published IQR (right)"),
+        Line2D([], [], marker="o", linestyle="none", markersize=5,
+               markerfacecolor=OUTSIDE_COLOUR, markeredgecolor="none",
+               label="eligible but outside at least one published IQR"),
+        Line2D([], [], marker="o", linestyle="none", markersize=5,
+               markerfacecolor=CONTEXT, markeredgecolor="none",
+               label="not eligible"),
+    ]
+    figure.legend(handles=handles, loc="lower center", ncol=3, frameon=False,
+                  fontsize=7, labelcolor=INK_SECONDARY,
+                  bbox_to_anchor=(0.5, -0.012))
+    figure.suptitle(
+        f"{model_key}: would qualify, and resembles who was enrolled "
+        f"({PROJECTION.upper()}, anchor {anchor})",
+        x=0.01, ha="left", fontsize=9, color=INK_PRIMARY,
+    )
+    figure.tight_layout(rect=(0, 0.025, 1, 0.965))
     save_figure(figure, out_path)
     plt.close(figure)
 
@@ -492,6 +617,18 @@ def analyse(paths, anchor: str, cohort_cfg, trial_cfg, args, logger) -> None:
     frame = add_distances(frame, coords, regions)
     frame = rank_and_orphans(frame, regions)
 
+    # how far each eligible patient sits outside the population the paper
+    # actually reported, in interquartile ranges
+    logger.info("position of eligible patients within the published baselines:")
+    for trial in trials:
+        frame = table1_position(frame, trial, logger)
+    comparisons = [table1_comparison(frame, trial, logger) for trial in trials]
+    comparisons = [c for c in comparisons if c.height]
+    table1 = (
+        pl.concat(comparisons, how="diagonal_relaxed") if comparisons
+        else pl.DataFrame()
+    )
+
     # ----------------------------------------------------------------- tables
     paths.table_home.mkdir(parents=True, exist_ok=True)
     eligibility = pl.DataFrame(
@@ -530,6 +667,44 @@ def analyse(paths, anchor: str, cohort_cfg, trial_cfg, args, logger) -> None:
         ]
     )
     eligibility.write_csv(paths.table_home / f"trial_eligibility_{anchor}.csv")
+
+    if table1.height:
+        table1.write_csv(paths.table_home / f"trial_table1_{anchor}.csv")
+
+        summary = []
+        for trial in trials:
+            column = f"t1_outside_{trial.key}"
+            compared = f"t1_n_compared_{trial.key}"
+            usable = frame.filter(
+                pl.col(f"elig_{trial.key}") & (pl.col(compared) > 0)
+            )
+            if usable.height == 0:
+                continue
+            summary.append(
+                {
+                    "trial": trial.label,
+                    "n_eligible": int(frame[f"elig_{trial.key}"].sum()),
+                    "n_comparable": usable.height,
+                    "n_variables_compared": int(usable[compared].median()),
+                    "share_inside_all_iqrs": float((usable[column] == 0).mean()),
+                    "median_variables_outside": float(usable[column].median()),
+                    "median_max_distance_iqrs": float(
+                        usable[f"t1_maxdist_{trial.key}"].median()
+                    ),
+                }
+            )
+        if summary:
+            inside = pl.DataFrame(summary)
+            inside.write_csv(paths.table_home / f"trial_inside_tested_{anchor}.csv")
+            logger.info("eligible patients who match the enrolled population:")
+            for row in inside.iter_rows(named=True):
+                logger.info(
+                    f"  {row['trial']:<22} {row['share_inside_all_iqrs']:>6.1%} "
+                    f"inside all {row['n_variables_compared']} IQRs "
+                    f"({row['n_comparable']:,} comparable); median "
+                    f"{row['median_variables_outside']:.0f} variables outside, "
+                    f"worst {row['median_max_distance_iqrs']:.2f} IQRs"
+                )
 
     representativeness = compare_to_published(frame, trials, logger)
     representativeness.write_csv(
@@ -582,8 +757,18 @@ def analyse(paths, anchor: str, cohort_cfg, trial_cfg, args, logger) -> None:
         "n_specific_trials", "n_specific_inside",
         f"{PROJECTION}_1", f"{PROJECTION}_2",
     ]
-    keep_cols += [c for c in frame.columns
-                  if c.startswith(("elig_", "inside_", "affinity_", "lift_", "dx_"))]
+    keep_cols += [
+        c
+        for c in frame.columns
+        if c.startswith(
+            ("elig_", "inside_", "affinity_", "lift_", "dx_", "t1_")
+        )
+    ]
+    keep_cols += [
+        c
+        for c in ("map_at_onset", "heart_rate_at_onset", "imv_before_onset", "male")
+        if c in frame.columns
+    ]
     paths.patient_level_home.mkdir(parents=True, exist_ok=True)
     frame.select([c for c in keep_cols if c in frame.columns]).write_parquet(
         paths.patient_level_home / f"patient_trial_alignment_{anchor}.parquet"
@@ -594,6 +779,8 @@ def analyse(paths, anchor: str, cohort_cfg, trial_cfg, args, logger) -> None:
     home.mkdir(parents=True, exist_ok=True)
     plot_regions(frame, trials, regions, home / "trial_regions.png", anchor,
                  paths.model_key)
+    plot_eligible_vs_tested(frame, trials, home / "trial_eligible_vs_tested.png",
+                            anchor, paths.model_key)
     plot_coverage(frame, home / "trial_coverage.png", anchor, paths.model_key,
                   paths)
     if anchor == "onset":

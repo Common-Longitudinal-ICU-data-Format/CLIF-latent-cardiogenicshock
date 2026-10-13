@@ -65,7 +65,35 @@ DX_CODES: dict[str, tuple[str, ...]] = {
     # severe aortic stenosis or regurgitation, a DanGer Shock exclusion
     "aortic_valve": ("I350", "I351", "I352", "I06"),
     "esrd": ("N186", "Z992"),
+    # the medical-history rows of a baseline table
+    "hypertension": ("I10", "I11", "I12", "I13", "I15", "I16", "401", "402",
+                     "403", "404", "405"),
+    "diabetes": ("E08", "E09", "E10", "E11", "E13", "250"),
+    # *prior* infarction, which is what a medical-history row means -- the
+    # index event is dx_ami. I25.2 is old MI, Z86.71 a personal history of one.
+    "prior_mi": ("I252", "Z8671", "412"),
+    "heart_failure": ("I50", "I110", "I130", "I132", "428"),
+    "chronic_kidney_disease": ("N18", "585"),
+    # anterior wall STEMI, reported separately by DanGer Shock
+    "anterior_mi": ("I210", "I2109"),
 }
+
+
+#: the flags that stand for a *medical history* row of a baseline table, and
+#: so must be restricted to diagnoses present on arrival
+#:
+#: Without that restriction the comparison is meaningless rather than merely
+#: noisy. clif_hospital_diagnosis is hospitalization-level, so I50 catches the
+#: acute heart failure of the index event as readily as pre-existing disease,
+#: and the DanGer Shock comparison came out at 66.8% against a published 9.3%
+#: -- a sevenfold gap that is ascertainment, not case mix.
+HISTORY_FLAGS = (
+    "hypertension",
+    "diabetes",
+    "prior_mi",
+    "heart_failure",
+    "chronic_kidney_disease",
+)
 
 
 def _normalized_code() -> pl.Expr:
@@ -90,18 +118,40 @@ def attach_features(data_dir, cohort: pl.DataFrame, cfg, logger) -> pl.DataFrame
     # ---------------------------------------------------------- diagnosis flags
     if has_table(data_dir, "clif_hospital_diagnosis"):
         code = _normalized_code()
-        flags = (
+        diagnoses = (
             scan(data_dir, "clif_hospital_diagnosis")
             .join(ids.lazy(), on="hospitalization_id", how="inner")
-            .select("hospitalization_id", c=code)
-            .group_by("hospitalization_id")
+            .select("hospitalization_id", c=code, poa=pl.col("poa_present"))
+        )
+        # Event flags use every diagnosis; history flags only those present on
+        # arrival, because that is what a baseline table's medical-history row
+        # means. poa_present is populated for every UCMC row and 61% of NU's,
+        # so a history flag is understated at NU rather than overstated -- the
+        # safer direction, and reported in the comparison table.
+        present_on_arrival = diagnoses.filter(pl.col("poa") == 1)
+        flags = (
+            diagnoses.group_by("hospitalization_id")
             .agg(
                 **{
                     f"dx_{name}": pl.any_horizontal(
                         *(pl.col("c").str.starts_with(p) for p in prefixes)
                     ).any()
                     for name, prefixes in DX_CODES.items()
+                    if name not in HISTORY_FLAGS
                 }
+            )
+            .join(
+                present_on_arrival.group_by("hospitalization_id").agg(
+                    **{
+                        f"dx_{name}": pl.any_horizontal(
+                            *(pl.col("c").str.starts_with(p) for p in DX_CODES[name])
+                        ).any()
+                        for name in HISTORY_FLAGS
+                    }
+                ),
+                on="hospitalization_id",
+                how="full",
+                coalesce=True,
             )
             .collect()
         )
@@ -145,11 +195,99 @@ def attach_features(data_dir, cohort: pl.DataFrame, cfg, logger) -> pl.DataFrame
     )
     cohort = cohort.join(sbp, on="hospitalization_id", how="left", validate="1:1")
 
+    # ----------------------------------------- MAP and heart rate at onset
+    # MAP is derived from SBP/DBP wherever a measured value is missing or
+    # implausible. It has to be: `map` is charted for 99.9% of NU
+    # hospitalizations and only 15.1% of UCMC's, so a comparison against a
+    # trial's published MAP would otherwise be a comparison between sites. The
+    # substitution is validated -- at NU, where both exist, DBP + (SBP-DBP)/3
+    # reproduces the charted value at r = 0.995 with a median difference of
+    # 0.00, because that is how NU computes it.
+    paired = (
+        scan(data_dir, "clif_vitals", dttm_cols=("recorded_dttm",))
+        .filter(pl.col("vital_category").is_in(["sbp", "dbp", "map", "heart_rate"]))
+        .join(window, on="hospitalization_id", how="inner")
+        .filter(pl.col("recorded_dttm").is_between(pl.col("win_start"), pl.col("win_end")))
+        .select("hospitalization_id", "recorded_dttm", "vital_category", "vital_value")
+        .collect()
+    )
+    if paired.height:
+        wide = paired.pivot(
+            on="vital_category",
+            index=["hospitalization_id", "recorded_dttm"],
+            values="vital_value",
+            aggregate_function="median",
+        )
+        for name in ("sbp", "dbp", "map", "heart_rate"):
+            if name not in wide.columns:
+                wide = wide.with_columns(pl.lit(None, dtype=pl.Float64).alias(name))
+        wide = wide.with_columns(
+            map_best=pl.coalesce(
+                pl.when(pl.col("map").is_between(20.0, 200.0)).then(pl.col("map")),
+                pl.when(
+                    pl.col("sbp").is_between(20.0, 300.0)
+                    & pl.col("dbp").is_between(5.0, 200.0)
+                    & (pl.col("sbp") > pl.col("dbp"))
+                ).then(pl.col("dbp") + (pl.col("sbp") - pl.col("dbp")) / 3.0),
+            ),
+            heart_rate_ok=pl.when(
+                pl.col("heart_rate").is_between(20.0, 250.0)
+            ).then(pl.col("heart_rate")),
+        )
+        # the lowest MAP and the heart rate at that same instant, which is what
+        # a baseline table records: the state the clinician was looking at
+        at_onset = (
+            wide.drop_nulls("map_best")
+            .sort(["hospitalization_id", "map_best"])
+            .group_by("hospitalization_id")
+            .agg(
+                map_at_onset=pl.col("map_best").first(),
+                heart_rate_at_onset=pl.col("heart_rate_ok").first(),
+            )
+        )
+        cohort = cohort.join(
+            at_onset, on="hospitalization_id", how="left", validate="1:1"
+        )
+    for name in ("map_at_onset", "heart_rate_at_onset"):
+        if name not in cohort.columns:
+            cohort = cohort.with_columns(pl.lit(None, dtype=pl.Float64).alias(name))
+
+    # --------------------------------------------- ventilated before onset
+    # A baseline table records "intubation before randomisation", so this is
+    # invasive ventilation at or before shock onset, not at any point in the
+    # stay. The difference is not cosmetic: ventilated-ever ran at 70.9% of
+    # DanGer Shock-eligible patients against a published 17.8%, almost all of
+    # which was ventilation that started after the shock did.
+    if has_table(data_dir, "clif_respiratory_support"):
+        onset = cohort.lazy().select("hospitalization_id", "cs_onset_dttm")
+        imv = (
+            scan(data_dir, "clif_respiratory_support", dttm_cols=("recorded_dttm",))
+            .join(ids.lazy(), on="hospitalization_id", how="inner")
+            .filter(
+                pl.col("device_category").cast(pl.String).str.to_uppercase() == "IMV"
+            )
+            .join(onset, on="hospitalization_id", how="inner")
+            .filter(pl.col("recorded_dttm") <= pl.col("cs_onset_dttm"))
+            .select("hospitalization_id")
+            .unique()
+            .with_columns(imv_before_onset=True)
+            .collect()
+        )
+        cohort = cohort.join(imv, on="hospitalization_id", how="left", validate="1:1")
+    if "imv_before_onset" not in cohort.columns:
+        cohort = cohort.with_columns(imv_before_onset=pl.lit(False))
+    cohort = cohort.with_columns(
+        imv_before_onset=pl.col("imv_before_onset").fill_null(False),
+        male=pl.col("sex_category") == "Male",
+    )
+
     logger.info(
         f"  trial features: AMI {cohort['dx_ami'].mean():.1%}, "
         f"STEMI {cohort['dx_stemi'].mean():.1%}, "
         f"arrest {cohort['dx_cardiac_arrest'].mean():.1%}, "
-        f"SBP at onset available for {cohort['sbp_at_onset'].is_not_null().mean():.1%}"
+        f"SBP {cohort['sbp_at_onset'].is_not_null().mean():.0%} / "
+        f"MAP {cohort['map_at_onset'].is_not_null().mean():.0%} / "
+        f"HR {cohort['heart_rate_at_onset'].is_not_null().mean():.0%} available"
     )
     return cohort
 
@@ -252,6 +390,8 @@ class Trial:
     eligible: Callable[[], pl.Expr]
     #: criteria we cannot evaluate, so the eligible set is a superset
     not_implementable: tuple[str, ...]
+    #: the paper's baseline characteristics table, keyed by cohort column name
+    table1: dict
 
 
 #: in chronological order, which is also roughly the order the guidelines
@@ -296,6 +436,11 @@ def load_trials(cfg) -> tuple[Trial, ...]:
                 published={k: spec.published[k] for k in spec.published},
                 eligible=rule,
                 not_implementable=gaps,
+                table1=(
+                    {k: dict(spec.table1[k]) for k in spec.table1}
+                    if spec.get("table1")
+                    else {}
+                ),
             )
         )
     return tuple(sorted(out, key=lambda t: t.year))
@@ -654,4 +799,240 @@ def compare_to_published(frame: pl.DataFrame, trials, logger) -> pl.DataFrame:
             f"  {row['trial']:<22} n {row['n_eligible_here']:>6,} here vs "
             f"{row['n_published']:>5,} enrolled   " + "; ".join(bits)
         )
+    return out
+
+
+# ------------------------------------------ inside the population as published
+
+
+#: human-readable names for the baseline-table variables
+TABLE1_LABELS: dict[str, str] = {
+    "age_at_admission": "age (years)",
+    "sbp_at_onset": "systolic BP (mmHg)",
+    "map_at_onset": "mean arterial BP (mmHg)",
+    "heart_rate_at_onset": "heart rate (bpm)",
+    "lactate": "arterial lactate (mmol/L)",
+    "male": "male sex",
+    "dx_hypertension": "hypertension",
+    "dx_diabetes": "diabetes",
+    "dx_prior_mi": "prior myocardial infarction",
+    "dx_heart_failure": "heart failure",
+    "dx_chronic_kidney_disease": "chronic kidney disease",
+    "dx_cardiac_arrest": "resuscitated before enrolment",
+    "imv_before_onset": "intubated before onset",
+    "dx_anterior_mi": "anterior infarction",
+}
+
+
+#: how far a published variable can be trusted against our version of it
+#:
+#: `measured` variables are the same kind of observation in both: a trial nurse
+#: and a CLIF extract both record a systolic pressure from a monitor, so the
+#: comparison is meaningful and these are the only variables that drive the
+#: inside/outside determination.
+#:
+#: `ascertainment` variables are a trial case-report form's medical history
+#: against ICD codes, and the two do not measure the same thing in either
+#: direction. Restricting to diagnoses present on arrival helped but did not
+#: fix it: for DanGer Shock, heart failure still reads 54.3% against a
+#: published 9.3% because POA-flagged I50 includes the acute failure of the
+#: index event, while prior myocardial infarction collapses to 1.0% against
+#: 16.1% because POA is seldom set on a history code. Reported, never used to
+#: judge whether a patient is inside the tested population.
+VARIABLE_CONFIDENCE: dict[str, str] = {
+    "age_at_admission": "measured",
+    "sbp_at_onset": "measured",
+    "map_at_onset": "measured",
+    "heart_rate_at_onset": "measured",
+    "lactate": "measured",
+    "male": "measured",
+    "dx_hypertension": "ascertainment",
+    "dx_diabetes": "ascertainment",
+    "dx_prior_mi": "ascertainment",
+    "dx_heart_failure": "ascertainment",
+    "dx_chronic_kidney_disease": "ascertainment",
+    "dx_cardiac_arrest": "ascertainment",
+    "imv_before_onset": "ascertainment",
+    "dx_anterior_mi": "ascertainment",
+}
+
+
+def table1_variables(trial) -> dict:
+    """the published baseline variables for a trial, or an empty dict"""
+    published = getattr(trial, "table1", None) or {}
+    return {str(k): published[k] for k in published}
+
+
+def table1_position(frame: pl.DataFrame, trial, logger) -> pl.DataFrame:
+    """
+    for each eligible patient, how far outside the published IQR they sit
+
+    Enrolment criteria are thresholds and admit a wide range of patients; the
+    baseline table is what the trial's result was actually observed in. A
+    DanGer Shock-eligible patient with a systolic pressure of 60 and a heart
+    rate of 70 clears every criterion and sits below both published
+    interquartile ranges, so nothing much like them was tested.
+
+    Distance is measured in interquartile ranges, which is the only scale the
+    published summaries support -- a paper gives a median and an IQR, not a
+    covariance, so there is no way to weight variables against each other or to
+    account for their correlation. 0 means inside the IQR; 1 means one full IQR
+    beyond its edge.
+
+    Only variables the trial published *and* this cohort can compute are used,
+    so the comparison is narrower for the older trials. `n_compared` carries
+    that, and should be read alongside the result: two variables agreeing is
+    not the same evidence as nine.
+    """
+    spec = table1_variables(trial)
+    key = trial.key
+    available = [
+        name
+        for name in spec
+        if name in frame.columns and frame[name].is_not_null().any()
+    ]
+    # Only `measured` variables. An ascertainment variable has no IQR anyway,
+    # but the filter is explicit so that adding one to trials.yaml later cannot
+    # quietly start driving the inside/outside determination.
+    continuous = [
+        n
+        for n in available
+        if "iqr" in spec[n] and VARIABLE_CONFIDENCE.get(n) == "measured"
+    ]
+    proportions = [n for n in available if "pct" in spec[n]]
+
+    if not continuous:
+        logger.info(
+            f"  {trial.label}: no published IQRs usable here "
+            f"({len(proportions)} proportions only); no per-patient position"
+        )
+        return frame.with_columns(
+            **{
+                f"t1_outside_{key}": pl.lit(None, dtype=pl.Int32),
+                f"t1_maxdist_{key}": pl.lit(None, dtype=pl.Float64),
+                f"t1_n_compared_{key}": pl.lit(0, dtype=pl.Int32),
+            }
+        )
+
+    distances = []
+    for name in continuous:
+        q1, q3 = (float(x) for x in spec[name]["iqr"])
+        width = max(q3 - q1, 1e-9)
+        value = pl.col(name).cast(pl.Float64)
+        # 0 inside the IQR, otherwise how many IQRs beyond the nearer edge
+        distances.append(
+            pl.max_horizontal(
+                (q1 - value) / width, (value - q3) / width, pl.lit(0.0)
+            ).alias(f"_t1d_{name}")
+        )
+
+    frame = frame.with_columns(distances)
+    outside = [
+        (pl.col(f"_t1d_{n}") > 0).cast(pl.Int32).fill_null(0) for n in continuous
+    ]
+    compared = [
+        pl.col(n).is_not_null().cast(pl.Int32) for n in continuous
+    ]
+    return frame.with_columns(
+        **{
+            f"t1_outside_{key}": pl.sum_horizontal(*outside),
+            f"t1_maxdist_{key}": pl.max_horizontal(
+                *(pl.col(f"_t1d_{n}") for n in continuous)
+            ),
+            f"t1_n_compared_{key}": pl.sum_horizontal(*compared),
+        }
+    ).drop([f"_t1d_{n}" for n in continuous])
+
+
+def table1_comparison(frame: pl.DataFrame, trial, logger) -> pl.DataFrame:
+    """
+    per variable: the trial's published value, ours among the eligible, and the
+    share of our eligible patients falling outside the published IQR
+
+    This is the table that quantifies the gap. A row where 40% of our eligible
+    patients sit below the published first quartile is a row where the
+    recommendation is being applied to people the trial barely saw.
+    """
+    spec = table1_variables(trial)
+    eligible = frame.filter(pl.col(f"elig_{trial.key}"))
+    rows = []
+    for name, published in spec.items():
+        if name not in eligible.columns or eligible.height == 0:
+            continue
+        column = eligible[name]
+        if "pct" in published:
+            if column.null_count() == column.len():
+                continue
+            rows.append(
+                {
+                    "trial": trial.label,
+                    "variable": TABLE1_LABELS.get(name, name),
+                    "kind": "proportion",
+                    "confidence": VARIABLE_CONFIDENCE.get(name, "unknown"),
+                    "published": float(published["pct"]),
+                    "published_q1": None,
+                    "published_q3": None,
+                    "ours": float(column.cast(pl.Float64).mean()),
+                    "pct_below_q1": None,
+                    "pct_above_q3": None,
+                    "pct_outside_iqr": None,
+                    "approximate": bool(published.get("approximate", False)),
+                }
+            )
+            continue
+        values = column.cast(pl.Float64).drop_nulls()
+        if values.len() == 0:
+            continue
+        row = {
+            "trial": trial.label,
+            "variable": TABLE1_LABELS.get(name, name),
+            "kind": "continuous",
+            "confidence": VARIABLE_CONFIDENCE.get(name, "unknown"),
+            "published": float(published["median"]),
+            "published_q1": None,
+            "published_q3": None,
+            "ours": float(values.median()),
+            "pct_below_q1": None,
+            "pct_above_q3": None,
+            "pct_outside_iqr": None,
+            "approximate": bool(published.get("approximate", False)),
+        }
+        if "iqr" in published:
+            q1, q3 = (float(x) for x in published["iqr"])
+            below = float((values < q1).mean())
+            above = float((values > q3).mean())
+            row.update(
+                published_q1=q1,
+                published_q3=q3,
+                pct_below_q1=below,
+                pct_above_q3=above,
+                pct_outside_iqr=below + above,
+            )
+        rows.append(row)
+
+    out = pl.DataFrame(rows) if rows else pl.DataFrame()
+    if out.height:
+        logger.info(f"  {trial.label}: eligible patients vs its baseline table")
+        for row in out.iter_rows(named=True):
+            if row["kind"] == "proportion":
+                mark = " (ascertainment, not comparable)" if row[
+                    "confidence"
+                ] == "ascertainment" else ""
+                logger.info(
+                    f"      {row['variable']:<30} ours {row['ours']:>6.1%} vs "
+                    f"published {row['published']:>6.1%}{mark}"
+                )
+            elif row["pct_outside_iqr"] is None:
+                logger.info(
+                    f"      {row['variable']:<30} ours {row['ours']:>6.1f} vs "
+                    f"published {row['published']:>6.1f} (no IQR published)"
+                )
+            else:
+                logger.info(
+                    f"      {row['variable']:<30} ours {row['ours']:>6.1f} vs "
+                    f"published {row['published']:>6.1f} "
+                    f"[{row['published_q1']:g}-{row['published_q3']:g}]; "
+                    f"{row['pct_outside_iqr']:>5.1%} outside "
+                    f"({row['pct_below_q1']:.1%} below, {row['pct_above_q3']:.1%} above)"
+                )
     return out
