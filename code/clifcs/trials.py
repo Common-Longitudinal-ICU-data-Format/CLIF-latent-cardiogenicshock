@@ -326,6 +326,41 @@ def attach_features(data_dir, cohort: pl.DataFrame, cfg, logger) -> pl.DataFrame
         "phenylephrine",
         "dopamine",
     )
+
+    # Peri-onset, read straight from the medication table rather than from the
+    # cohort's `vasoactives_used` string.
+    #
+    # This exists because the string is built over the whole admission, and a
+    # trial's "therapy at randomisation" is not. Using the admission-wide
+    # version put norepinephrine at 86.4% of ECMO-CS-eligible patients against
+    # a published 85.5% and vasopressin at 48.4% against 35.0%, which read as
+    # "our patients are supported at least as heavily". On the comparable
+    # window they are 78.2% and 29.9% -- slightly *less* on both. The
+    # admission-wide flags are kept as `ever_<agent>`, since for the negative
+    # device trials "never received it" is the right reading.
+    window = cohort.lazy().select(
+        "hospitalization_id",
+        win_start=pl.col("cs_onset_dttm") - pl.duration(hours=6),
+        win_end=pl.col("cs_onset_dttm") + pl.duration(hours=6),
+    )
+    peri = (
+        scan(data_dir, "clif_medication_admin_continuous", dttm_cols=("admin_dttm",))
+        .join(ids.lazy(), on="hospitalization_id", how="inner")
+        .filter(pl.col("med_category").is_in(list(agents)), pl.col("med_dose") > 0)
+        .join(window, on="hospitalization_id", how="inner")
+        .filter(
+            pl.col("admin_dttm").is_between(pl.col("win_start"), pl.col("win_end"))
+        )
+        .group_by("hospitalization_id")
+        .agg(
+            **{
+                f"on_{agent}": (pl.col("med_category") == agent).any()
+                for agent in agents
+            }
+        )
+        .collect()
+    )
+
     if "vasoactives_used" in cohort.columns:
         # Split and match exactly, never substring: "norepinephrine" contains
         # "epinephrine", so a contains() test put 87.9% of ECMO-CS-eligible
@@ -333,7 +368,7 @@ def attach_features(data_dir, cohort: pl.DataFrame, cfg, logger) -> pl.DataFrame
         # reporting norepinephrine again.
         used = pl.col("vasoactives_used").fill_null("").str.split(",")
         cohort = cohort.with_columns(
-            **{f"on_{agent}": used.list.contains(agent) for agent in agents}
+            **{f"ever_{agent}": used.list.contains(agent) for agent in agents}
         )
     else:
         # Loudly, not silently: every per-agent comparison reads 0% without
@@ -343,8 +378,18 @@ def attach_features(data_dir, cohort: pl.DataFrame, cfg, logger) -> pl.DataFrame
             "flag can be computed; every 'running' comparison will read 0%"
         )
         cohort = cohort.with_columns(
-            **{f"on_{agent}": pl.lit(None, dtype=pl.Boolean) for agent in agents}
+            **{f"ever_{agent}": pl.lit(None, dtype=pl.Boolean) for agent in agents}
         )
+
+    cohort = cohort.join(peri, on="hospitalization_id", how="left", validate="1:1")
+    cohort = cohort.with_columns(
+        **{
+            f"on_{agent}": pl.col(f"on_{agent}").fill_null(False)
+            if f"on_{agent}" in cohort.columns
+            else pl.lit(False)
+            for agent in agents
+        }
+    )
 
     # ------------------------------------------------- corticosteroids
     # ADRENAL and APROCCHSS turn on hydrocortisone, and the steroid med_group
@@ -1109,11 +1154,11 @@ TABLE1_LABELS: dict[str, str] = {
     "weight_kg": "weight (kg)",
     "height_cm": "height (cm)",
     "bmi": "body-mass index",
-    "on_norepinephrine": "norepinephrine running",
-    "on_epinephrine": "epinephrine running",
-    "on_dobutamine": "dobutamine running",
-    "on_milrinone": "milrinone running",
-    "on_vasopressin": "vasopressin running",
+    "on_norepinephrine": "norepinephrine running at onset",
+    "on_epinephrine": "epinephrine running at onset",
+    "on_dobutamine": "dobutamine running at onset",
+    "on_milrinone": "milrinone running at onset",
+    "on_vasopressin": "vasopressin running at onset",
     "dx_prior_pci": "prior PCI",
     "dx_prior_cabg": "prior bypass surgery",
     "dx_stemi": "ST-elevation infarction",

@@ -259,19 +259,33 @@ against it.
 **And it is not that our patients are less supported.** ECMO-CS is the one trial
 that published which drugs were running at randomisation:
 
+Measured over a comparable window — six hours either side of onset, which is
+what "at randomisation" means:
+
 | agent | ours | ECMO-CS |
 |---|---|---|
-| norepinephrine | 86.4% | 85.5% |
-| vasopressin | 48.3% | 35.0% |
-| epinephrine | 29.6% | 3.4% |
-| dobutamine | 10.5% | **54.7%** |
-| milrinone | 6.8% | **32.5%** |
+| norepinephrine | 78.2% | 85.5% |
+| vasopressin | 29.9% | 35.0% |
+| epinephrine | 19.6% | 3.4% |
+| dobutamine | **5.6%** | **54.7%** |
+| milrinone | **3.9%** | **32.5%** |
 
-Vasopressor use matches or exceeds theirs; what differs is **inotropes**, by a
-factor of five. So the pressure gap is not lighter vasopressor treatment. The
-readings left are genuinely deeper shock, a cardiology-led trial population
-managed with far more inotropic support than an undifferentiated ICU shock
+Our patients are on slightly *less* norepinephrine and vasopressin, more
+epinephrine, and **tenfold fewer inotropes**. A seven-point norepinephrine
+deficit cannot account for a 10 mmHg difference in achieved systolic pressure,
+so the readings that remain are genuinely deeper shock, a cardiology-led trial
+population carrying far more inotropic support than an undifferentiated ICU
 cohort receives, or both.
+
+**On timing.** These flags are anchored at `cs_onset_dttm`; an earlier version
+built them over the whole admission and reported norepinephrine at 86.4% and
+vasopressin at 48.4%, both *above* the trial. Anchoring reverses the direction
+of both. Physiology (pressures, lactate, pH, temperature) is anchored at onset
+throughout; **diagnosis codes are hospitalization-level with no timestamp at
+all**, and the procedure flags carry no time filter — right for the three
+negative trials, where concordance means the device was never used, and lenient
+for DanGer Shock, where it means the pump was used, so that 14.1% is if anything
+an overestimate of timely use.
 
 Age, weight, height,
 body-mass index, lactate, arterial pH and heart rate show **no net shift** —

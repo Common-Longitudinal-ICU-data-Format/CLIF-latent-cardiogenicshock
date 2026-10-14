@@ -812,7 +812,7 @@ def analyse(paths, anchor: str, cohort_cfg, trial_cfg, args, logger) -> None:
         for c in frame.columns
         if c.startswith(
             ("elig_", "inside_", "affinity_", "lift_", "dx_", "t1_",
-             "concordant_", "had_", "on_")
+             "concordant_", "had_", "on_", "ever_")
         )
     ]
     keep_cols += [

@@ -134,6 +134,14 @@ def attach_procedures(data_dir, cohort: pl.DataFrame, logger) -> pl.DataFrame:
     """
     one flag per device or procedure the guidelines turn on
 
+    NO TIME FILTER, deliberately and with a consequence. These flags say the
+    procedure happened at some point in the admission, not that it happened
+    around the shock. For the three negative trials that is the right reading --
+    concordance there is "the device was never used", and a device placed on day
+    eight still means it was used. For DanGer Shock, where concordance is "the
+    pump *was* used", it is lenient: a pump placed days after onset counts, so
+    that 14.1% is if anything an overestimate of timely use.
+
     UCMC's CPT rows do not key on hospitalization_id -- 1.72M ids, none of
     which match a hospitalization -- so at that site only the ICD-10-PCS arm
     contributes. 01 warns about this already; the consequence here is that any
@@ -205,9 +213,13 @@ def concordance_expressions() -> dict[str, tuple[pl.Expr | None, str]]:
             pl.col("had_revascularisation"),
             "early revascularisation performed (PCI or CABG coded)",
         ),
+        # "avoided" means never given, so these read the admission-wide
+        # ever_ flags; the peri-onset on_ flags answer "what was running then",
+        # which is the right question for a baseline-table comparison and the
+        # wrong one for whether an agent was avoided.
         "soap_ii": (
-            pl.col("on_norepinephrine") & ~pl.col("on_dopamine"),
-            "norepinephrine used and dopamine avoided",
+            pl.col("ever_norepinephrine") & ~pl.col("ever_dopamine"),
+            "norepinephrine used and dopamine never given",
         ),
         "iabp_shock_ii": (
             ~pl.col("had_iabp"),
@@ -219,8 +231,8 @@ def concordance_expressions() -> dict[str, tuple[pl.Expr | None, str]]:
             "CLIF 2.1 carries no lesion-level detail",
         ),
         "optimacc": (
-            pl.col("on_norepinephrine") & ~pl.col("on_epinephrine"),
-            "norepinephrine used and epinephrine avoided",
+            pl.col("ever_norepinephrine") & ~pl.col("ever_epinephrine"),
+            "norepinephrine used and epinephrine never given",
         ),
         "ecmo_cs": (
             ~pl.col("had_ecmo"),
@@ -240,8 +252,8 @@ def concordance_expressions() -> dict[str, tuple[pl.Expr | None, str]]:
             "(the pressure achieved, not the nadir that defined the shock)",
         ),
         "vasst": (
-            pl.col("on_norepinephrine") & pl.col("on_vasopressin"),
-            "vasopressin added to norepinephrine",
+            pl.col("ever_norepinephrine") & pl.col("ever_vasopressin"),
+            "vasopressin added to norepinephrine at any point",
         ),
         "adrenal": (
             pl.col("on_hydrocortisone"),

@@ -1017,16 +1017,26 @@ def section_trials(paths, out: list) -> None:
         "row set here is the whole trial, not that subgroup.", "warn"))
 
     out.append(callout(
-        "<b>It is not that our patients are less supported.</b> ECMO-CS is the "
-        "one trial that published which drugs were running at randomisation, "
-        "and norepinephrine use is almost identical &mdash; 86.4% of our "
-        "eligible patients against its 85.5% &mdash; with vasopressin and "
-        "epinephrine higher here, not lower. What differs is inotropes: "
-        "dobutamine 10.5% against 54.7%, milrinone 6.8% against 32.5%. So the "
-        "pressure gap is not explained by lighter vasopressor treatment, and "
-        "the most likely readings are genuinely deeper shock, a cardiology-led "
-        "trial population managed with far more inotropic support than an "
-        "undifferentiated ICU shock cohort receives, or both."))
+        "<b>Lighter vasopressor treatment does not explain the pressure gap, "
+        "but it is not quite absent either.</b> ECMO-CS is the one trial that "
+        "published which drugs were running at randomisation. Measured over a "
+        "comparable window &mdash; six hours either side of shock onset, which "
+        "is what &ldquo;at randomisation&rdquo; means &mdash; our eligible "
+        "patients run norepinephrine at 78.2% against its 85.5% and vasopressin "
+        "at 29.9% against 35.0%: slightly <i>less</i> on both, not more. "
+        "Epinephrine is higher (19.6% against 3.4%). What dominates is "
+        "inotropes, and the gap there is tenfold: dobutamine 5.6% against "
+        "54.7%, milrinone 3.9% against 32.5%. A seven-point norepinephrine "
+        "deficit cannot account for a 10 mmHg difference in achieved systolic "
+        "pressure, so the readings that remain are genuinely deeper shock, a "
+        "cardiology-led trial population carrying far more inotropic support "
+        "than an undifferentiated ICU cohort receives, or both.</p><p>"
+        "<b>An earlier version of this section said our patients were supported "
+        "at least as heavily, and that was an artefact.</b> The agent flags "
+        "were built over the whole admission rather than around onset, which "
+        "put norepinephrine at 86.4% and vasopressin at 48.4% &mdash; both "
+        "above the trial. Anchoring them to the shock reverses the direction "
+        "of both comparisons."))
 
     out.append(callout(
         "<b>Do not read the &ldquo;inside every IQR&rdquo; column as a measure "
