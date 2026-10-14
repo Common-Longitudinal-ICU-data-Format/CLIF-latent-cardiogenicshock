@@ -887,6 +887,39 @@ def section_trials(paths, out: list) -> None:
                     key_column="trial",
                 ))
             )
+        # the interactive view, embedded verbatim. 11 writes it as a fragment
+        # rather than the report building it, so the payload is produced once
+        # alongside the data it describes.
+        interactive = table_home / f"trial_interactive_{anchor}.html"
+        if interactive.is_file():
+            blocks.append(
+                ("Explore (interactive)",
+                 interactive.read_text(encoding="utf-8"))
+            )
+        outcomes_file = table_home / f"trial_outcomes_{anchor}.csv"
+        if outcomes_file.is_file():
+            blocks.append(
+                ("Outcomes inside vs outside", table(
+                    pl.read_csv(outcomes_file).select(
+                        "trial", "arm", "reliable", "n_inside", "n_outside",
+                        "mortality_inside", "mortality_outside",
+                        "mortality_difference", "mortality_difference_sofa_adj",
+                        "icu_los_inside", "icu_los_outside",
+                        "sofa_non_cv_inside", "sofa_non_cv_outside",
+                    ),
+                    {
+                        "n_inside": thousands, "n_outside": thousands,
+                        "mortality_inside": pct, "mortality_outside": pct,
+                        "mortality_difference": pct,
+                        "mortality_difference_sofa_adj": pct,
+                        "icu_los_inside": num(1), "icu_los_outside": num(1),
+                        "sofa_non_cv_inside": num(0),
+                        "sofa_non_cv_outside": num(0),
+                    },
+                    key_column="trial",
+                ))
+            )
+
         home = paths.output_home / "figures" / "GEM-all" / f"anchor-{anchor}"
         for name, label in (
             ("trial_eligible_vs_tested", "Would qualify vs resembles"),
@@ -919,6 +952,48 @@ def section_trials(paths, out: list) -> None:
         "one whose threshold is SBP &lt; 100 rather than &lt; 90, enrolled at "
         "83 and is the least shifted of the five. Ours sit at 73&ndash;79.",
         "warn"))
+
+    out.append(callout(
+        "<b>Assigning each patient their single most relevant guideline leaves "
+        "68.7% with none.</b> Where a patient qualifies for several trials the "
+        "most specific one wins &mdash; SOAP II is excluded from the contest, "
+        "since a recommendation covering 89% of the cohort is the least "
+        "informative thing one could say about any particular patient. Of the "
+        "31.3% who do get a guideline, only <b>429 patients (1.3% of the "
+        "cohort)</b> match it on both counts: eligible <i>and</i> inside every "
+        "published interquartile range that could be checked. The other 30% are "
+        "covered on criteria alone. The mortality gradient follows: among "
+        "ECMO-CS-assigned patients, 23.1% for those matching the population "
+        "against 28.8% for criteria only; for SHOCK, 7.8% against 25.6%.", "warn"))
+
+    out.append(callout(
+        "<b>Clinicians follow the negative recommendations and not the positive "
+        "one.</b> Among patients each trial would have enrolled, the device was "
+        "correctly withheld in 93.0% (ECMO-CS), 85.6% (ECLS-SHOCK) and 84.5% "
+        "(IABP-SHOCK II) &mdash; but the one device a trial actually supports, "
+        "the microaxial pump, reached only <b>14.1%</b> of the patients DanGer "
+        "Shock would have enrolled. Norepinephrine-without-dopamine was "
+        "delivered in 66.6% and norepinephrine-without-epinephrine in 62.4%. "
+        "Early revascularisation is coded in 28.4%, but UCMC's CPT rows do not "
+        "join on hospitalization_id, so that one is understated at that site "
+        "and should not be compared across the two."))
+
+    out.append(callout(
+        "<b>Outcomes are worse outside the tested population, and severity does "
+        "not explain it &mdash; but nor can this be read causally.</b> Among "
+        "patients treated per the guideline, mortality runs 10.3 points higher "
+        "outside ECMO-CS's published population than inside it (30.9% against "
+        "20.6%), 7.0 higher for OptimaCC and 4.0 for IABP-SHOCK II. Adjusting "
+        "for severity in the five non-circulatory organ systems barely moves "
+        "any of them, and the two groups' non-cardiovascular SOFA differs by at "
+        "most one point &mdash; so the excess is not simply that the outside "
+        "group is sicker everywhere. <b>It cannot be read as an effect.</b> "
+        "Patients fall outside almost entirely because their blood pressure is "
+        "lower, and low blood pressure <i>is</i> severity; the exposure and the "
+        "confounder are close to the same variable. Total SOFA is deliberately "
+        "not used as the adjuster for that reason &mdash; its cardiovascular "
+        "component is scored from mean arterial pressure and vasopressor dose, "
+        "so it would absorb the very difference being measured.", "warn"))
 
     out.append(callout(
         "<b>The size of the gap tracks how selectively the trial enrolled, and "

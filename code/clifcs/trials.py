@@ -1273,3 +1273,79 @@ def table1_comparison(frame: pl.DataFrame, trial, logger) -> pl.DataFrame:
                     f"above {row['pct_above_q3']:>5.1%}  -> {direction}"
                 )
     return out
+
+
+# ------------------------------------------------- assigning one guideline
+
+
+def assign_guideline(frame: pl.DataFrame, trials, logger) -> pl.DataFrame:
+    """
+    the single guideline most relevant to each patient, and how well it fits
+
+    Two columns. `assigned_guideline` names a trial or is null; `guideline_fit`
+    says on what basis:
+
+      criteria and population  eligible, and inside every published IQR that
+                               could be checked -- the strongest claim available
+      criteria only            eligible, but outside at least one published IQR:
+                               nominally covered, not actually tested on
+      no guideline fits        meets no specific trial's criteria
+
+    Where a patient qualifies for several trials the most *specific* one wins,
+    specificity being the trial with the smallest eligible share of this cohort.
+    SOAP II would otherwise take almost everyone by covering 89% of them, and a
+    recommendation that applies to nearly all shock is the least informative
+    thing one could say about any particular patient.
+    """
+    specificity = sorted(
+        (t for t in trials if t.key != "soap_ii"),
+        key=lambda t: float(frame[f"elig_{t.key}"].mean()),
+    )
+
+    # inside every checkable IQR: zero variables outside, and at least one
+    # variable was actually comparable
+    for trial in trials:
+        outside = f"t1_outside_{trial.key}"
+        compared = f"t1_n_compared_{trial.key}"
+        if outside in frame.columns:
+            frame = frame.with_columns(
+                **{
+                    f"inside_t1_{trial.key}": (
+                        (pl.col(outside) == 0) & (pl.col(compared) > 0)
+                    ).fill_null(False)
+                }
+            )
+        else:
+            frame = frame.with_columns(**{f"inside_t1_{trial.key}": pl.lit(False)})
+
+    assigned = pl.lit(None, dtype=pl.String)
+    fit = pl.lit("no guideline fits", dtype=pl.String)
+    # most specific first, so a later (broader) trial cannot override it
+    for trial in reversed(specificity):
+        eligible = pl.col(f"elig_{trial.key}")
+        inside = eligible & pl.col(f"inside_t1_{trial.key}")
+        assigned = pl.when(eligible).then(pl.lit(trial.label)).otherwise(assigned)
+        fit = pl.when(inside).then(pl.lit("criteria and population")).otherwise(
+            pl.when(eligible).then(pl.lit("criteria only")).otherwise(fit)
+        )
+    # re-apply the strongest basis in specificity order, so "criteria and
+    # population" on a specific trial beats "criteria only" on a broader one
+    for trial in reversed(specificity):
+        inside = pl.col(f"elig_{trial.key}") & pl.col(f"inside_t1_{trial.key}")
+        assigned = pl.when(inside).then(pl.lit(trial.label)).otherwise(assigned)
+
+    out = frame.with_columns(assigned_guideline=assigned, guideline_fit=fit)
+
+    summary = (
+        out.group_by("assigned_guideline", "guideline_fit")
+        .agg(n=pl.len(), mortality=pl.col("in_hospital_mortality").mean())
+        .sort("n", descending=True)
+    )
+    logger.info("most relevant guideline per patient:")
+    for row in summary.iter_rows(named=True):
+        name = row["assigned_guideline"] or "(none)"
+        logger.info(
+            f"  {name:<22} {row['guideline_fit']:<24} n={row['n']:>6,} "
+            f"({row['n'] / out.height:>5.1%})  mortality {row['mortality']:>5.1%}"
+        )
+    return out

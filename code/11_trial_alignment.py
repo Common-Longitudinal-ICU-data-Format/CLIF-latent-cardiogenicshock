@@ -51,8 +51,15 @@ from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
 from clifcs import ANCHORS, get_logger, load_cohort_cfg, load_paths
+from clifcs.concordance import (
+    add_concordance,
+    attach_procedures,
+    attach_severity,
+    outcomes_by_position,
+)
 from clifcs.config import CONFIG_HOME
 from clifcs.figures import save_figure, style
+from clifcs.interactive import render as render_interactive
 from clifcs.palette import (
     CATEGORICAL,
     CONTEXT,
@@ -72,6 +79,7 @@ from clifcs.trials import (
     fit_regions,
     load_trials,
     inside_all_null,
+    assign_guideline,
     rank_and_orphans,
     table1_comparison,
     table1_position,
@@ -611,7 +619,9 @@ def analyse(paths, anchor: str, cohort_cfg, trial_cfg, args, logger) -> None:
         part = frame.filter(pl.col("site") == site)
         if part.height == 0:
             continue
-        per_site.append(attach_features(paths.site_data[site], part, cohort_cfg, logger))
+        part = attach_features(paths.site_data[site], part, cohort_cfg, logger)
+        part = attach_procedures(paths.site_data[site], part, logger)
+        per_site.append(part)
     frame = pl.concat(per_site, how="diagonal_relaxed")
 
     frame = add_eligibility(frame, trials)
@@ -628,6 +638,8 @@ def analyse(paths, anchor: str, cohort_cfg, trial_cfg, args, logger) -> None:
     logger.info("position of eligible patients within the published baselines:")
     for trial in trials:
         frame = table1_position(frame, trial, logger)
+    frame = attach_severity(paths, frame, logger)
+    frame = add_concordance(frame, trials, logger)
     comparisons = [table1_comparison(frame, trial, logger) for trial in trials]
     comparisons = [c for c in comparisons if c.height]
     table1 = (
@@ -734,6 +746,11 @@ def analyse(paths, anchor: str, cohort_cfg, trial_cfg, args, logger) -> None:
                 "shifts above for where they actually differ"
             )
 
+    frame = assign_guideline(frame, trials, logger)
+    outcomes = outcomes_by_position(frame, trials, logger)
+    if outcomes.height:
+        outcomes.write_csv(paths.table_home / f"trial_outcomes_{anchor}.csv")
+
     representativeness = compare_to_published(frame, trials, logger)
     representativeness.write_csv(
         paths.table_home / f"trial_representativeness_{anchor}.csv"
@@ -782,6 +799,7 @@ def analyse(paths, anchor: str, cohort_cfg, trial_cfg, args, logger) -> None:
         "lactate", "sbp_at_onset", "in_hospital_mortality", "icu_los_days",
         "shock_type", "cs_phenotype", "n_eligible_trials", "n_regions_inside",
         "nearest_trial", "nearest_lift", "evidence_orphan", "criteria_orphan",
+        "assigned_guideline", "guideline_fit",
         "n_specific_trials", "n_specific_inside",
         f"{PROJECTION}_1", f"{PROJECTION}_2",
     ]
@@ -789,12 +807,17 @@ def analyse(paths, anchor: str, cohort_cfg, trial_cfg, args, logger) -> None:
         c
         for c in frame.columns
         if c.startswith(
-            ("elig_", "inside_", "affinity_", "lift_", "dx_", "t1_")
+            ("elig_", "inside_", "affinity_", "lift_", "dx_", "t1_",
+             "concordant_", "had_", "on_")
         )
     ]
     keep_cols += [
         c
-        for c in ("map_at_onset", "heart_rate_at_onset", "imv_before_onset", "male")
+        for c in (
+            "map_at_onset", "dbp_at_onset", "heart_rate_at_onset", "temp_at_onset",
+            "ph_at_onset", "bmi", "weight_kg", "height_cm",
+            "imv_before_onset", "male", "sofa_total", "sofa_non_cv",
+        )
         if c in frame.columns
     ]
     paths.patient_level_home.mkdir(parents=True, exist_ok=True)
@@ -817,6 +840,16 @@ def analyse(paths, anchor: str, cohort_cfg, trial_cfg, args, logger) -> None:
             paths.figure_home / "trajectory" / "trial_eligibility_paths.png",
             args.seed, logger,
         )
+    # the interactive view, as an HTML fragment 07 embeds verbatim
+    fragment = paths.table_home / f"trial_interactive_{anchor}.html"
+    fragment.write_text(
+        render_interactive(frame, trials, uid=anchor.replace("-", "")),
+        encoding="utf-8",
+    )
+    logger.info(
+        f"[{anchor}] interactive fragment -> {fragment.name} "
+        f"({fragment.stat().st_size / 1e6:.1f} MB)"
+    )
     logger.info(f"[{anchor}] figures -> {home}")
 
 
