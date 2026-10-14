@@ -234,6 +234,32 @@ def concordance_expressions() -> dict[str, tuple[pl.Expr | None, str]]:
             pl.col("had_microaxial"),
             "microaxial flow pump used (the one positive device trial)",
         ),
+        "sepsispam": (
+            pl.col("map_achieved") >= 65.0,
+            "median MAP over the 24 h after onset at least 65 mmHg "
+            "(the pressure achieved, not the nadir that defined the shock)",
+        ),
+        "vasst": (
+            pl.col("on_norepinephrine") & pl.col("on_vasopressin"),
+            "vasopressin added to norepinephrine",
+        ),
+        "adrenal": (
+            pl.col("on_hydrocortisone"),
+            "hydrocortisone given within the shock window",
+        ),
+        # Both hypovolaemic trials turn on something this extract does not
+        # record. Reported as unascertainable rather than guessed: neither site
+        # has a transfusion or blood product table, and tranexamic acid is not
+        # a med_category at either.
+        "villanueva": (
+            None,
+            "transfusion threshold is not ascertainable: no blood product "
+            "table at either site",
+        ),
+        "crash_2": (
+            None,
+            "tranexamic acid is not recorded as a med_category at either site",
+        ),
     }
 
 

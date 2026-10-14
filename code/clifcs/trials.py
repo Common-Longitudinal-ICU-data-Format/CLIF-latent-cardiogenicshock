@@ -76,6 +76,14 @@ DX_CODES: dict[str, tuple[str, ...]] = {
     "chronic_kidney_disease": ("N18", "585"),
     # anterior wall STEMI, reported separately by DanGer Shock
     "anterior_mi": ("I210", "I2109"),
+    # upper gastrointestinal bleeding, for the one hypovolaemic-shock trial
+    # whose population resembles this cohort's
+    "gi_bleed": (
+        "K920", "K921", "K922",  # haematemesis, melaena, unspecified GI bleed
+        "K25", "K26", "K27", "K28",  # peptic ulcer with haemorrhage
+        "K2211", "K226", "I8501", "I8511",  # oesophageal / varices bleeding
+        "5789", "5780", "5781", "4560",
+    ),
     "stroke": ("I63", "I64", "Z8673", "434", "436"),
     "prior_pci": ("Z9861", "Z955", "V4582"),
     "prior_cabg": ("Z951", "Z955", "V4581"),
@@ -251,6 +259,28 @@ def attach_features(data_dir, cohort: pl.DataFrame, cfg, logger) -> pl.DataFrame
         )
         # the lowest MAP and the heart rate at that same instant, which is what
         # a baseline table records: the state the clinician was looking at
+        # The median MAP over the 24 h *after* onset, which is what a
+        # MAP-target recommendation is about: the pressure achieved and held,
+        # not the nadir that defined the shock. Using the nadir put
+        # SEPSISPAM concordance at 11.9%, which only said that a shock
+        # patient's worst pressure is below 65 -- true of nearly all of them
+        # and not a statement about treatment.
+        achieved = (
+            wide.drop_nulls("map_best")
+            .join(
+                cohort.select("hospitalization_id", "cs_onset_dttm"),
+                on="hospitalization_id",
+                how="inner",
+            )
+            .filter(
+                pl.col("recorded_dttm").is_between(
+                    pl.col("cs_onset_dttm"),
+                    pl.col("cs_onset_dttm") + pl.duration(hours=24),
+                )
+            )
+            .group_by("hospitalization_id")
+            .agg(map_achieved=pl.col("map_best").median())
+        )
         at_onset = (
             wide.drop_nulls("map_best")
             .sort(["hospitalization_id", "map_best"])
@@ -266,12 +296,13 @@ def attach_features(data_dir, cohort: pl.DataFrame, cfg, logger) -> pl.DataFrame
         )
         cohort = cohort.join(
             at_onset, on="hospitalization_id", how="left", validate="1:1"
-        )
+        ).join(achieved, on="hospitalization_id", how="left", validate="1:1")
     for name in (
         "map_at_onset",
         "heart_rate_at_onset",
         "dbp_at_onset",
         "temp_at_onset",
+        "map_achieved",
     ):
         if name not in cohort.columns:
             cohort = cohort.with_columns(pl.lit(None, dtype=pl.Float64).alias(name))
@@ -314,6 +345,46 @@ def attach_features(data_dir, cohort: pl.DataFrame, cfg, logger) -> pl.DataFrame
         cohort = cohort.with_columns(
             **{f"on_{agent}": pl.lit(None, dtype=pl.Boolean) for agent in agents}
         )
+
+    # ------------------------------------------------- corticosteroids
+    # ADRENAL and APROCCHSS turn on hydrocortisone, and the steroid med_group
+    # is populated at both sites. Restricted to the shock window so that a
+    # patient's inhaled or oncological steroid weeks earlier is not counted as
+    # treatment for their shock.
+    steroid_cats = ("hydrocortisone", "fludrocortisone", "methylprednisolone")
+    steroids = (
+        scan(
+            data_dir, "clif_medication_admin_intermittent", dttm_cols=("admin_dttm",)
+        )
+        .join(ids.lazy(), on="hospitalization_id", how="inner")
+        .filter(pl.col("med_category").is_in(list(steroid_cats)))
+        .join(
+            cohort.lazy().select(
+                "hospitalization_id",
+                win_start=pl.col("cs_onset_dttm") - pl.duration(hours=24),
+                win_end=pl.col("cs_onset_dttm") + pl.duration(hours=72),
+            ),
+            on="hospitalization_id",
+            how="inner",
+        )
+        .filter(
+            pl.col("admin_dttm").is_between(pl.col("win_start"), pl.col("win_end"))
+        )
+        .group_by("hospitalization_id")
+        .agg(
+            on_hydrocortisone=(pl.col("med_category") == "hydrocortisone").any(),
+            on_any_steroid=pl.lit(True),
+        )
+        .collect()
+    )
+    cohort = cohort.join(steroids, on="hospitalization_id", how="left", validate="1:1")
+    for name in ("on_hydrocortisone", "on_any_steroid"):
+        if name not in cohort.columns:
+            cohort = cohort.with_columns(pl.lit(False).alias(name))
+    cohort = cohort.with_columns(
+        on_hydrocortisone=pl.col("on_hydrocortisone").fill_null(False),
+        on_any_steroid=pl.col("on_any_steroid").fill_null(False),
+    )
 
     # ------------------------------------------- weight, height and BMI
     # Reported by IABP-SHOCK II and ECLS-SHOCK, and directly comparable: a
@@ -520,6 +591,54 @@ def _elig_danger_shock() -> pl.Expr:
     )
 
 
+# ------------------------------------- septic and hypovolaemic shock
+#
+# These gate on the ICD-coded shock type rather than on a derived definition.
+# A Sepsis-3 derivation exists in the sibling CLIF-latent-septicshock
+# repository and reproducing a worse one here would be the wrong trade; the
+# consequence is that these eligible sets inherit every weakness of
+# diagnosis-code ascertainment, including the 1.7x septic-shock coding gap
+# between the two sites.
+
+
+def _elig_sepsispam() -> pl.Expr:
+    # septic shock on a vasopressor. The fluid-resuscitation prerequisite is
+    # not computable -- no intake/output table at either site.
+    return pl.col("shock_septic") & pl.col("met_vasoactive_support")
+
+
+def _elig_vasst() -> pl.Expr:
+    # septic shock on norepinephrine. The trial's ">= 5 mcg/min for 6 h"
+    # threshold needs a dose-time series this pipeline does not assemble.
+    return pl.col("shock_septic") & pl.col("on_norepinephrine")
+
+
+def _elig_adrenal() -> pl.Expr:
+    # septic shock, ventilated, on a vasopressor. The trial also required four
+    # hours of vasopressor, which is not applied.
+    return (
+        pl.col("shock_septic")
+        & pl.col("met_vasoactive_support")
+        & pl.col("imv_before_onset")
+    )
+
+
+def _elig_villanueva() -> pl.Expr:
+    # hypovolaemic shock with coded upper gastrointestinal bleeding. The
+    # transfusion threshold that defines the trial's arms is invisible here.
+    return pl.col("shock_hypovolemic") & pl.col("dx_gi_bleed")
+
+
+def _elig_crash_2() -> pl.Expr:
+    # Deliberately never satisfied. Trauma is not reliably identifiable in this
+    # cohort, time from injury is not recorded, and tranexamic acid is not a
+    # med_category at either site -- so neither the population nor the
+    # intervention can be ascertained. Returning a constant false keeps the
+    # trial visible in every table, with zero eligible and its criteria showing
+    # why, rather than quietly dropping it.
+    return pl.lit(False)
+
+
 @dataclasses.dataclass(frozen=True)
 class Trial:
     """one trial: what it tested, whom it enrolled, and who here qualifies"""
@@ -536,6 +655,8 @@ class Trial:
     not_implementable: tuple[str, ...]
     #: the paper's baseline characteristics table, keyed by cohort column name
     table1: dict
+    #: which coded shock type this trial's evidence is about
+    applies_to: str = "cardiogenic"
 
 
 #: in chronological order, which is also roughly the order the guidelines
@@ -563,6 +684,30 @@ def load_trials(cfg) -> tuple[Trial, ...]:
         ),
         "ecls_shock": (_elig_ecls_shock, ("CPR duration > 45 min (not timed)",)),
         "danger_shock": (_elig_danger_shock, ("LVEF < 45% (no echo)",)),
+        "sepsispam": (
+            _elig_sepsispam,
+            ("adequate fluid resuscitation (no intake/output table)",),
+        ),
+        "vasst": (
+            _elig_vasst,
+            ("norepinephrine >= 5 mcg/min for 6 h (no dose-time series)",),
+        ),
+        "adrenal": (
+            _elig_adrenal,
+            ("vasopressor for >= 4 h (not timed)",),
+        ),
+        "villanueva": (
+            _elig_villanueva,
+            ("transfusion threshold (no blood product table at either site)",),
+        ),
+        "crash_2": (
+            _elig_crash_2,
+            (
+                "trauma population (not identifiable)",
+                "time from injury (not recorded)",
+                "tranexamic acid (not a med_category at either site)",
+            ),
+        ),
     }
     out = []
     for key, spec in cfg.trials.items():
@@ -585,6 +730,7 @@ def load_trials(cfg) -> tuple[Trial, ...]:
                     if spec.get("table1")
                     else {}
                 ),
+                applies_to=str(spec.get("applies_to", "cardiogenic")),
             )
         )
     return tuple(sorted(out, key=lambda t: t.year))

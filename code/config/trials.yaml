@@ -463,6 +463,140 @@ trials:
       imv_before_onset: {pct: !!float 0.178} # intubation before randomisation
       dx_anterior_mi: {pct: !!float 0.719}
 
+  # ===================================================== SEPTIC SHOCK
+  #
+  # The Surviving Sepsis Campaign is a guideline, not a trial, so what is
+  # listed here are the trials its recommendations rest on. Eligibility is
+  # gated on a coded septic shock diagnosis rather than on a Sepsis-3
+  # derivation -- that derivation lives in the sibling CLIF-latent-septicshock
+  # repository, and reproducing it here would duplicate it badly.
+
+  sepsispam:
+    label: SEPSISPAM
+    year: !!int 2014
+    applies_to: septic
+    intervention: mean arterial pressure target of 65-70 rather than 80-85 mmHg
+    guideline: >-
+      Initial MAP target of 65 mmHg in septic shock on vasopressors
+      (Surviving Sepsis Campaign 2021, strong recommendation, moderate evidence)
+    citation: Asfar P et al. N Engl J Med 2014;370:1583-93
+    published:
+      n: !!int 776
+      age_median: null
+      pct_female: null
+      lactate_median: null
+      sbp_median: null
+      lvef_median: null
+      mortality_control: null
+      source_note: >-
+        776 patients, 29 French centres. No mortality difference at 28 or 90
+        days between the two targets. Baseline SAPS II about 56-57 and SOFA
+        about 10.7-10.8 in both arms. A clean median age and lactate were not
+        retrievable without journal access -- the figures that surfaced were
+        flagged as possibly conflated with another trial -- so no `table1`
+        block is given rather than an unverified one.
+
+  vasst:
+    label: VASST
+    year: !!int 2008
+    applies_to: septic
+    intervention: vasopressin added to norepinephrine
+    guideline: >-
+      Add vasopressin rather than escalating norepinephrine when MAP is
+      inadequate (Surviving Sepsis Campaign 2021)
+    citation: Russell JA et al. N Engl J Med 2008;358:877-87
+    published:
+      n: !!int 778
+      age_median: null
+      pct_female: null
+      lactate_median: null
+      sbp_median: null
+      lvef_median: null
+      mortality_control: null
+      source_note: >-
+        778 patients. No overall mortality difference; a prespecified
+        less-severe stratum favoured vasopressin. Table 1 not transcribed.
+
+  adrenal:
+    label: ADRENAL
+    year: !!int 2018
+    applies_to: septic
+    intervention: hydrocortisone infusion
+    guideline: >-
+      Hydrocortisone for septic shock with an ongoing vasopressor requirement
+      (Surviving Sepsis Campaign 2021, weak recommendation)
+    citation: Venkatesh B et al. N Engl J Med 2018;378:797-808
+    published:
+      n: !!int 3800
+      age_median: null
+      pct_female: null
+      lactate_median: null
+      sbp_median: null
+      lvef_median: null
+      mortality_control: null
+      source_note: >-
+        3,800 patients, the largest trial in this file. No 90-day mortality
+        difference; faster shock resolution with hydrocortisone. Table 1 not
+        transcribed.
+
+  # ================================================= HYPOVOLAEMIC SHOCK
+  #
+  # CONCORDANCE CANNOT BE ASSESSED FOR ANY OF THESE, and it is a data limit
+  # rather than a judgement. Every one of them turns on a blood product or on
+  # tranexamic acid: neither site's CLIF-2.1 extract has a transfusion or blood
+  # product table, and tranexamic acid is not a med_category at either. So
+  # eligibility and the population comparison are available and the "was it
+  # followed" arm is not, for all of them.
+
+  villanueva:
+    label: Villanueva (UGIB transfusion)
+    year: !!int 2013
+    applies_to: hypovolemic
+    intervention: restrictive transfusion threshold, haemoglobin < 7 g/dL
+    guideline: >-
+      Restrictive transfusion in acute upper gastrointestinal bleeding; the
+      trial closest to this cohort's hypovolaemic patients, who are largely
+      gastrointestinal bleeding rather than trauma
+    citation: Villanueva C et al. N Engl J Med 2013;368:11-21
+    published:
+      n: !!int 921
+      age_median: null
+      pct_female: null
+      lactate_median: null
+      sbp_median: null
+      lvef_median: null
+      mortality_control: null
+      source_note: >-
+        921 randomised, 889 analysed. 31% had cirrhosis. Lower further bleeding
+        and lower 45-day mortality with the restrictive strategy. Table 1 not
+        transcribed; the trial reports Rockall score, MELD and Child-Pugh, none
+        of which this pipeline computes.
+
+  crash_2:
+    label: CRASH-2
+    year: !!int 2010
+    applies_to: hypovolemic
+    intervention: tranexamic acid within 3 h of injury
+    guideline: >-
+      Tranexamic acid in traumatic haemorrhage (European trauma guideline, 6th
+      edition). Included for completeness and flagged: its population is
+      20,211 trauma patients across 40 countries, which this cohort's
+      hypovolaemic patients are not.
+    citation: CRASH-2 collaborators. Lancet 2010;376:23-32
+    published:
+      n: !!int 20211
+      age_median: null
+      pct_female: null
+      lactate_median: null
+      sbp_median: null
+      lvef_median: null
+      mortality_control: null
+      source_note: >-
+        20,211 patients. Mortality benefit when given within 3 h and harm after
+        it. Injury severity was not described by arm, a documented limitation.
+        Tranexamic acid is not recorded as a med_category at either site, so
+        neither the intervention nor concordance is ascertainable here.
+
 # ------------------------------------------------------- region and orphan rule
 regions:
   # Trial regions are fitted in the PCA subspace of the embeddings rather than
@@ -506,6 +640,55 @@ regions:
 # This is prose, kept in the config so it sits beside the numbers it
 # qualifies and can be checked against the paper without reading code.
 criteria:
+  sepsispam:
+    - kind: inclusion
+      criterion: 'septic shock requiring a vasopressor despite fluid resuscitation'
+      applied: 'partly'
+      note: 'coded septic shock plus a vasopressor; the fluid criterion is not computable'
+    - kind: exclusion
+      criterion: 'age < 18, pregnancy, chronic hypertension excluded from high-target arm'
+      applied: 'partly'
+      note: 'age yes; the rest not'
+  vasst:
+    - kind: inclusion
+      criterion: 'septic shock on norepinephrine >= 5 mcg/min for 6 h'
+      applied: 'partly'
+      note: 'coded septic shock plus norepinephrine; the dose-duration threshold is not applied'
+    - kind: exclusion
+      criterion: 'acute coronary syndrome, severe heart failure'
+      applied: 'partly'
+      note: 'AMI code yes; heart failure severity no'
+  adrenal:
+    - kind: inclusion
+      criterion: 'septic shock, mechanically ventilated, on a vasopressor for >= 4 h'
+      applied: 'partly'
+      note: 'coded septic shock, ventilation and vasopressor yes; the 4 h duration is not applied'
+    - kind: exclusion
+      criterion: 'already receiving systemic corticosteroids for another indication'
+      applied: 'no'
+      note: 'the indication for a steroid is not recorded'
+  villanueva:
+    - kind: inclusion
+      criterion: 'acute upper gastrointestinal bleeding with haematemesis or melaena'
+      applied: 'partly'
+      note: 'coded hypovolaemic shock with a gastrointestinal bleeding diagnosis'
+    - kind: exclusion
+      criterion: 'exsanguinating bleeding, acute coronary syndrome, recent trauma or surgery'
+      applied: 'partly'
+      note: 'AMI code yes; the others not'
+    - kind: inclusion
+      criterion: 'transfusion threshold applied at haemoglobin 7 vs 9 g/dL'
+      applied: 'no'
+      note: 'no transfusion or blood product table at either site, so the intervention is invisible'
+  crash_2:
+    - kind: inclusion
+      criterion: 'adult trauma with significant haemorrhage, within 8 h of injury'
+      applied: 'no'
+      note: 'trauma is not reliably identifiable and time from injury is not recorded'
+    - kind: inclusion
+      criterion: 'tranexamic acid within 3 h'
+      applied: 'no'
+      note: 'tranexamic acid is not a med_category at either site'
   shock:
     - kind: inclusion
       criterion: 'acute MI with ST elevation or new LBBB, or posterior infarction'

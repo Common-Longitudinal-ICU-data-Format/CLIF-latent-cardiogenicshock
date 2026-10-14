@@ -605,6 +605,10 @@ def analyse(paths, anchor: str, cohort_cfg, trial_cfg, args, logger) -> None:
             # silently read False, which is how every "norepinephrine running"
             # comparison first came out at 0.0% against a published 85.5%
             "vasoactives_used",
+            # the coded shock type flags, which gate the septic and
+            # hypovolaemic trials' eligibility
+            "shock_septic", "shock_cardiogenic", "shock_hypovolemic",
+            "shock_other",
         )
         if c in cohort.columns
     ]
@@ -814,7 +818,8 @@ def analyse(paths, anchor: str, cohort_cfg, trial_cfg, args, logger) -> None:
     keep_cols += [
         c
         for c in (
-            "map_at_onset", "dbp_at_onset", "heart_rate_at_onset", "temp_at_onset",
+            "map_at_onset", "map_achieved", "dbp_at_onset", "heart_rate_at_onset",
+            "temp_at_onset",
             "ph_at_onset", "bmi", "weight_kg", "height_cm",
             "imv_before_onset", "male", "sofa_total", "sofa_non_cv",
         )
