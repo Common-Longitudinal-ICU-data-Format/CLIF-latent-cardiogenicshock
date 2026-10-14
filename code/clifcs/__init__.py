@@ -3,7 +3,9 @@
 from clifcs.config import (
     ANCHORS,
     MAX_PLOTTED_SITES,
+    ROLES,
     Paths,
+    RoleViolation,
     get_logger,
     load_cohort_cfg,
     load_paths,
@@ -12,7 +14,9 @@ from clifcs.config import (
 __all__ = [
     "ANCHORS",
     "MAX_PLOTTED_SITES",
+    "ROLES",
     "Paths",
+    "RoleViolation",
     "get_logger",
     "load_cohort_cfg",
     "load_paths",

@@ -37,7 +37,26 @@ def load_pre_anchor_tokens(paths, site: str, anchor: str) -> pl.DataFrame:
     one row per patient: the token ids the model read, and the elapsed seconds
 
     Concatenates cocoa's three splits, which partition the cohort.
+
+    Site role only. A token stream is a reconstruction of the record -- it is
+    the most disclosive thing in this pipeline, more so than the embedding
+    derived from it -- so it never leaves a site, and a pooled-role run is
+    stopped here rather than finding an empty scratch directory and reporting
+    that every site contributed nothing.
     """
+    if getattr(paths, "role", "site") == "pooled":
+        from clifcs.config import RoleViolation
+
+        raise RoleViolation(
+            "token streams do not cross a site boundary: a full `tokens_past` "
+            "sequence reconstructs the record it came from.\n"
+            "What travels instead is per-patient token *family counts* "
+            "(`fam_n_*` in the bundle), which is what the site-effect model in "
+            "04 regresses on, plus the last pre-anchor decile bin per "
+            "allowlisted variable (`tok_*`). Anything needing the sequence "
+            "itself -- 08's token-space geometry -- has to run site-side, with "
+            "only its results pooled."
+        )
     frames = []
     for split in SPLITS:
         f = paths.anchored(site, anchor) / f"{split}_for_inference.parquet"

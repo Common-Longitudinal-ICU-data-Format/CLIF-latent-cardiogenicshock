@@ -87,6 +87,13 @@ def embedding_matrix(frame: pl.DataFrame) -> np.ndarray:
 
 
 def load_embeddings(paths, anchor: str, logger) -> pl.DataFrame:
+    if paths.role == "pooled":
+        from clifcs.export import bundles as bundle_io
+
+        found = bundle_io.discover(paths.export_home, logger)
+        manifests = bundle_io.check(found, paths, logger)
+        return bundle_io.load_patient_level(found, manifests, anchor, logger)
+
     sources = sorted(
         p
         for p in paths.patient_level_home.glob(f"embeddings_anchor-{anchor}_*.parquet")
@@ -116,6 +123,71 @@ def load_embeddings(paths, anchor: str, logger) -> pl.DataFrame:
 
 
 # ============================================================ stage: tokens
+
+
+def stage_tokens_pooled(
+    paths, frame: pl.DataFrame, anchor: str, sites, logger
+) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
+    """
+    the family mix, from the counts the bundles carry
+
+    What survives federation is the **family** comparison -- "NU charts 2.1x the
+    assessment tokens UCMC does" -- which is the level the site effect is
+    actually explained at and is what the tornado figure aggregates to anyway.
+
+    What does not is the **per-token** comparison: which individual token most
+    distinguishes the sites needs the streams, and those do not travel. An
+    empty frame is returned for it and 04 skips the tornado figure, rather than
+    a degraded version being drawn that looks like the real one.
+    """
+    _, families = vocabulary(str(paths.tokenizer_yaml))
+    all_families = sorted(set(families.values()))
+    present_cols = {
+        name: f"fam_n_{name}"
+        for name in all_families
+        if f"fam_n_{name}" in frame.columns
+    }
+    if not present_cols:
+        raise KeyError(
+            "the pooled frame carries no fam_n_* columns, so the token-family "
+            "comparison cannot run. Re-export the bundles with 12_export.py."
+        )
+
+    per_site = (
+        frame.group_by("site")
+        .agg([pl.col(c).fill_null(0).sum().alias(name) for name, c in present_cols.items()])
+        .unpivot(index="site", variable_name="family", value_name="n")
+    )
+    totals = per_site.group_by("site").agg(total=pl.col("n").sum())
+    logger.info(
+        f"[{anchor}] token totals: {dict(zip(totals['site'], totals['total']))}"
+    )
+
+    family_mix = (
+        per_site.join(totals, on="site")
+        .with_columns(share=pl.col("n") / pl.col("total"))
+        .pivot(on="site", index="family", values="share")
+        .fill_null(0.0)
+    )
+    shown = [s for s in sites if s in family_mix.columns]
+    if len(shown) == 2:
+        a, b = shown
+        family_mix = family_mix.with_columns(
+            difference=(pl.col(a) - pl.col(b))
+        ).sort("difference", descending=True)
+
+    logger.info(f"[{anchor}] token-family share by site (from exported counts):")
+    for row in family_mix.iter_rows(named=True):
+        bits = "  ".join(f"{s} {row[s]:6.2%}" for s in shown)
+        diff = f"  diff {row['difference']:+.2%}" if "difference" in row else ""
+        logger.info(f"    {row['family']:<9} {bits}{diff}")
+
+    logger.warning(
+        f"[{anchor}] per-token discrimination and UNK burden are not available "
+        "under the pooled role: both need the token streams, which do not cross "
+        "a site boundary. Run 04 site-side for those."
+    )
+    return family_mix, pl.DataFrame(), pl.DataFrame()
 
 
 def stage_tokens(paths, anchor: str, sites, logger) -> tuple[pl.DataFrame, pl.DataFrame]:
@@ -238,6 +310,78 @@ def stage_tokens(paths, anchor: str, sites, logger) -> tuple[pl.DataFrame, pl.Da
 # ============================================================== stage: axis
 
 
+def _token_statistics(
+    paths, frame, tokens, families, family_order, anchor: str, logger
+):
+    """
+    per-patient family counts, total tokens and stream duration
+
+    Two sources for the same three quantities, because the site effect is the
+    largest single finding in this pipeline and the decomposition that explains
+    it has to survive the federated split.
+
+    **Site role** reads the token streams directly.
+
+    **Pooled role** reads the `fam_n_*` columns the bundles carry. A family
+    count is far coarser than the stream it came from -- `fam_n_LAB-RES = 184`
+    says a patient had 184 lab-result tokens, not which ones or when -- which is
+    why it is on the allowlist and the sequence is not.
+
+    Duration is the one input with no direct federated equivalent, since
+    `s_elapsed_past` does not travel. It is reconstructed instead: at the 24h
+    anchor the pre-anchor window is 24 hours by construction, and at the onset
+    anchor it is `hours_admission_to_cs_onset`, which the contract already
+    carries because the trial analysis needs it.
+    """
+    if paths.role != "pooled":
+        counts = family_matrix(tokens, families, family_order)
+        duration_h = np.asarray(
+            [
+                (e[-1] / 3600.0) if e is not None and len(e) else np.nan
+                for e in tokens["s_elapsed_past"].to_list()
+            ]
+        )
+        return counts, counts.sum(axis=1), duration_h
+
+    wanted = [f"fam_n_{name}" for name in family_order]
+    missing = [c for c in wanted if c not in frame.columns]
+    if missing:
+        raise KeyError(
+            f"the pooled frame is missing {len(missing)} token-family count "
+            f"column(s), e.g. {missing[:3]}. They are produced by "
+            "12_export.py; re-export the bundles with the current site "
+            "pipeline."
+        )
+    counts = frame.select(wanted).fill_null(0).to_numpy().astype(float)
+
+    # every family, not just the per-patient-varying ones, so `n_tokens` is the
+    # stream length rather than the length of the subset being regressed
+    all_families = sorted(set(families.values()))
+    present = [f"fam_n_{name}" for name in all_families if f"fam_n_{name}" in frame.columns]
+    n_tokens = frame.select(present).fill_null(0).to_numpy().astype(float).sum(axis=1)
+
+    if anchor == "24h":
+        duration_h = np.full(frame.height, 24.0)
+    elif "hours_admission_to_cs_onset" in frame.columns:
+        duration_h = (
+            frame["hours_admission_to_cs_onset"].cast(pl.Float64).to_numpy()
+        )
+    else:
+        logger.warning(
+            f"[{anchor}] no stream duration available in the bundles; the "
+            "tokens/hour predictor is dropped from the regression"
+        )
+        duration_h = np.full(frame.height, np.nan)
+
+    logger.info(
+        f"[{anchor}] token statistics from exported family counts "
+        f"({len(family_order)} families; duration reconstructed from "
+        + ("the 24 h window" if anchor == "24h" else "hours_admission_to_cs_onset")
+        + ")"
+    )
+    return counts, n_tokens, duration_h
+
+
 def stage_axis(paths, frame: pl.DataFrame, anchor: str, sites, logger) -> pl.DataFrame:
     """
     find the site-discriminating axis by LDA, and say what drives it
@@ -253,10 +397,13 @@ def stage_axis(paths, frame: pl.DataFrame, anchor: str, sites, logger) -> pl.Dat
     properties of their token stream then says what the model is keying on.
     """
     names, families = vocabulary(str(paths.tokenizer_yaml))
-    tokens = pl.concat([load_pre_anchor_tokens(paths, s, anchor) for s in sites])
-    tokens = frame.select("hospitalization_id", "site").join(
-        tokens.drop("site"), on="hospitalization_id", how="left"
-    )
+    if paths.role != "pooled":
+        tokens = pl.concat([load_pre_anchor_tokens(paths, s, anchor) for s in sites])
+        tokens = frame.select("hospitalization_id", "site").join(
+            tokens.drop("site"), on="hospitalization_id", how="left"
+        )
+    else:
+        tokens = None
 
     embeddings = StandardScaler().fit_transform(embedding_matrix(frame))
     is_first_site = (frame["site"] == sites[0]).to_numpy().astype(int)
@@ -297,13 +444,8 @@ def stage_axis(paths, frame: pl.DataFrame, anchor: str, sites, logger) -> pl.Dat
     # dominate the coefficients and hide the families that vary per patient
     once_per_patient = {"AGE", "SEX", "RACE", "ETHN", "ADMN", "BOS", "EOS", "DSCG"}
     family_order = sorted({f for f in families.values()} - once_per_patient)
-    counts = family_matrix(tokens, families, family_order)
-    n_tokens = counts.sum(axis=1)
-    duration_h = np.asarray(
-        [
-            (e[-1] / 3600.0) if e is not None and len(e) else np.nan
-            for e in tokens["s_elapsed_past"].to_list()
-        ]
+    counts, n_tokens, duration_h = _token_statistics(
+        paths, frame, tokens, families, family_order, anchor, logger
     )
 
     with np.errstate(invalid="ignore", divide="ignore"):
@@ -387,7 +529,18 @@ def stage_regions(
             n=pl.len(),
             mortality=pl.col("in_hospital_mortality").mean(),
             median_icu_los=pl.col("icu_los_days").median(),
-            median_age=pl.col("age_at_admission").median(),
+            # exact age does not leave a site, so a pooled run reports the modal
+            # five-year band instead of a median. A band cannot be averaged.
+            median_age=(
+                pl.col("age_at_admission").median()
+                if "age_at_admission" in frame.columns
+                else pl.lit(None, dtype=pl.Float64)
+            ),
+            modal_age_band=(
+                pl.col("age_band").mode().first()
+                if "age_band" in frame.columns
+                else pl.lit(None, dtype=pl.String)
+            ),
             pct_cardiac=pl.col("cardiac_origin").mean(),
             pct_III=(pl.col("cs_phenotype") == "III cardiometabolic").mean(),
         )
@@ -398,7 +551,8 @@ def stage_regions(
         logger.info(
             f"    {row['region']:<15} {row['site']:<5} n={row['n']:>6}  "
             f"mortality {row['mortality']:>5.1%}  ICU {row['median_icu_los']:>4.1f}d  "
-            f"age {row['median_age']:>3.0f}  cardiac {row['pct_cardiac']:>5.1%}  "
+            f"age {row['median_age'] if row['median_age'] is not None else row['modal_age_band']}  "
+            f"cardiac {row['pct_cardiac']:>5.1%}  "
             f"phenoIII {row['pct_III']:>5.1%}"
         )
     return frame, summary
@@ -418,7 +572,14 @@ def stage_matched(frame: pl.DataFrame, anchor: str, sites, logger) -> pl.DataFra
     strata = frame.with_columns(
         stratum=pl.concat_str(
             [
-                (pl.col("age_at_admission") // 10).cast(pl.Int64).cast(pl.String),
+                # `age_band` under the pooled role: the export replaces exact
+                # age with five-year bands, which is a finer stratum than the
+                # decade this used, so matching is if anything tighter
+                (
+                    (pl.col("age_at_admission") // 10).cast(pl.Int64).cast(pl.String)
+                    if "age_at_admission" in frame.columns
+                    else pl.col("age_band").cast(pl.String)
+                ),
                 pl.col("sex_category").fill_null("?"),
                 pl.col("cs_phenotype").cast(pl.String),
                 pl.col("in_hospital_mortality").cast(pl.String),
@@ -608,9 +769,17 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--anchor", choices=ANCHORS, default=None)
     parser.add_argument("--model", default=None)
+    parser.add_argument(
+        "--role",
+        choices=("site", "pooled"),
+        default=None,
+        help="`pooled` reads received bundles from output/export/ and refuses "
+        "to touch raw CLIF data; `site` reads this machine's own files. "
+        "Defaults to `role` in paths.yaml, then to `site`.",
+    )
     args = parser.parse_args()
 
-    paths = load_paths(model=args.model)
+    paths = load_paths(model=args.model, role=args.role)
     paths.mkdirs()
     logger = get_logger("04_site_effect", paths.log_home / "04_site_effect.log")
     style()
@@ -631,7 +800,14 @@ def main() -> None:
             continue
         logger.info(f"[{anchor}] model {paths.model_key}, sites {sites}")
 
-        family_mix, discriminative, counts = stage_tokens(paths, anchor, sites, logger)
+        if paths.role == "pooled":
+            family_mix, discriminative, counts = stage_tokens_pooled(
+                paths, frame, anchor, sites, logger
+            )
+        else:
+            family_mix, discriminative, counts = stage_tokens(
+                paths, anchor, sites, logger
+            )
         family_mix.write_csv(paths.table_home / f"site_token_families_anchor-{anchor}.csv")
         if discriminative.height:
             discriminative.write_csv(
@@ -645,13 +821,17 @@ def main() -> None:
         site_sizes = dict(
             frame.group_by("site").agg(pl.len().alias("n")).iter_rows()
         )
-        for mode, name in (
-            ("difference", "site_token_tornado.png"),
-            ("exclusive", "site_token_tornado_exclusive.png"),
-        ):
-            plot_token_tornado(
-                counts, site_sizes, sites, figures / name, anchor, logger, rank=mode
-            )
+        # the tornado ranks individual tokens, so it needs the per-token counts
+        # the pooled role does not receive; skipped rather than drawn from the
+        # family aggregate, which would look like the same figure
+        if counts.height:
+            for mode, name in (
+                ("difference", "site_token_tornado.png"),
+                ("exclusive", "site_token_tornado_exclusive.png"),
+            ):
+                plot_token_tornado(
+                    counts, site_sizes, sites, figures / name, anchor, logger, rank=mode
+                )
 
         axis_tables.append(stage_axis(paths, frame, anchor, sites, logger))
         frame, regions = stage_regions(frame, anchor, sites, logger)

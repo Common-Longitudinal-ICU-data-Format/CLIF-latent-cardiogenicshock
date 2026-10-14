@@ -448,7 +448,50 @@ REQUIRED_COVARIATES = (
 
 def load_anchor(paths, anchor: str, logger) -> pl.DataFrame:
     """
-    pool every site's embedding file for one anchor
+    the pooled frame for one anchor, from bundles or from local files
+
+    Two paths, chosen by role, because the two situations are genuinely
+    different rather than one being a special case of the other:
+
+    * **pooled** -- the coordinating site holds no records and no cohort table,
+      only the bundles contributing sites sent. Everything comes from
+      `clifcs.export.bundles`, which checks each one against the same contract
+      the sender applied and against the others for model and tokenizer
+      agreement. There is no cohort refresh because there is no cohort table;
+      what a site exported is what that site's cohort was.
+
+    * **site** -- a single institution running the whole pipeline on its own
+      data, which is how this started and how a site checks its own numbers
+      before exporting. Local embedding files, refreshed against the local
+      cohort table.
+    """
+    if paths.role == "pooled":
+        return _load_anchor_from_bundles(paths, anchor, logger)
+    return _load_anchor_local(paths, anchor, logger)
+
+
+def _load_anchor_from_bundles(paths, anchor: str, logger) -> pl.DataFrame:
+    """pool the received bundles for one anchor"""
+    from clifcs.export import bundles as bundle_io
+
+    logger.info(f"[{anchor}] reading bundles from {paths.export_home}")
+    found = bundle_io.discover(paths.export_home, logger)
+    manifests = bundle_io.check(found, paths, logger)
+    frame = bundle_io.load_patient_level(found, manifests, anchor, logger)
+
+    missing = [c for c in REQUIRED_COVARIATES if c not in frame.columns]
+    if missing:
+        raise KeyError(
+            f"the pooled frame for anchor {anchor} is missing {missing}, which "
+            "every panel is stratified on. Check that the sending sites ran the "
+            "cohort stage before exporting."
+        )
+    return frame
+
+
+def _load_anchor_local(paths, anchor: str, logger) -> pl.DataFrame:
+    """
+    pool every site's embedding file for one anchor, on a machine that holds them
 
     Files are found by glob rather than named, so a collaborating site
     contributes by dropping its `embeddings_anchor-<anchor>_<SITE>.parquet`
@@ -675,9 +718,12 @@ def analyse_anchor(paths, anchor: str, args, logger) -> pl.DataFrame:
 
     # the table view the contrast-relief rule asks for, and a record of the
     # coordinates so the figures can be remade without re-embedding
+    # `row_key` is the federated identifier and comes first; the local ones are
+    # kept for a site-role run, where they still exist.
     projection_cols = [
         c
         for c in (
+            "row_key",
             "hospitalization_id",
             "patient_id",
             "patient_id_pseudonym",
@@ -691,8 +737,15 @@ def analyse_anchor(paths, anchor: str, args, logger) -> pl.DataFrame:
             "cardiac_origin",
             "shock_type",
             "age_at_admission",
+            "age_band",
             "sex_category",
             "split",
+            # the sepsis phenotypes and the ordered token bins, so a projection
+            # can be recoloured by any of them without re-reading a bundle
+            "sepsis_cohort",
+            "seymour_phenotype",
+            "bhavani_phenotype",
+            *sorted(c for c in frame.columns if c.startswith("tok_")),
         )
         if c in frame.columns
     ]
@@ -830,9 +883,17 @@ def main() -> None:
         default=0,
         help="subsample before projecting (0 = use every patient)",
     )
+    parser.add_argument(
+        "--role",
+        choices=("site", "pooled"),
+        default=None,
+        help="`pooled` reads received bundles from output/export/ and refuses "
+        "to touch raw CLIF data; `site` reads this machine's own files. "
+        "Defaults to `role` in paths.yaml, then to `site`.",
+    )
     args = parser.parse_args()
 
-    paths = load_paths(model=args.model)
+    paths = load_paths(model=args.model, role=args.role)
     paths.mkdirs()
     logger = get_logger(
         "03_embedding_analysis", paths.log_home / "03_embedding_analysis.log"

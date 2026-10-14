@@ -255,9 +255,17 @@ def main() -> None:
     parser.add_argument("--anchor", choices=ANCHORS, default=None)
     parser.add_argument("--model", default=None)
     parser.add_argument("--task", default=None)
+    parser.add_argument(
+        "--role",
+        choices=("site", "pooled"),
+        default=None,
+        help="`pooled` reads received bundles from output/export/ and refuses "
+        "to touch raw CLIF data; `site` reads this machine's own files. "
+        "Defaults to `role` in paths.yaml, then to `site`.",
+    )
     args = parser.parse_args()
 
-    paths = load_paths(model=args.model)
+    paths = load_paths(model=args.model, role=args.role)
     paths.mkdirs()
     cfg = load_cohort_cfg()
     logger = get_logger("06_downstream_tasks", paths.log_home / "06_downstream_tasks.log")

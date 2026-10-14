@@ -155,9 +155,17 @@ def main() -> None:
         help="also save the corrected embeddings; 06 refits corrections itself, "
         "so this is only needed for inspection",
     )
+    parser.add_argument(
+        "--role",
+        choices=("site", "pooled"),
+        default=None,
+        help="`pooled` reads received bundles from output/export/ and refuses "
+        "to touch raw CLIF data; `site` reads this machine's own files. "
+        "Defaults to `role` in paths.yaml, then to `site`.",
+    )
     args = parser.parse_args()
 
-    paths = load_paths(model=args.model)
+    paths = load_paths(model=args.model, role=args.role)
     paths.mkdirs()
     logger = get_logger("05_site_correction", paths.log_home / "05_site_correction.log")
 

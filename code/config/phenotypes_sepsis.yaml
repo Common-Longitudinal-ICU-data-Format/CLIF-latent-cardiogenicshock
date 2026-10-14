@@ -1,0 +1,337 @@
+%YAML 1.2
+---
+# Sepsis phenotypes: Seymour and Bhavani.
+#
+# Like trials.yaml, this file holds *literature values only* -- what each paper
+# reported, each traceable to a table in the cited work. The assignment logic
+# lives in code/clifcs/sepsis_phenotype.py, where each decision sits next to the
+# CLIF column it reads.
+#
+# ---------------------------------------------------------------------------
+# WHAT THESE ARE APPLIED TO, AND WHY THAT IS A COMPROMISE
+#
+# Both schemes were derived in *sepsis* cohorts. This pipeline enrols
+# undifferentiated shock on physiology alone, and has no sepsis definition --
+# there is no microbiology or antibiotic logic anywhere in it, so Sepsis-3
+# ("suspected infection plus SOFA >= 2") cannot be evaluated.
+#
+# The denominator used instead is the coded septic-shock flag: ICD-10 R65.21 and
+# its ICD-9 equivalents, via clifcs.shock_type. That is a deliberate and
+# acknowledged weakening, and it fails in both directions:
+#
+#   * a code asserts a condition rather than recording a measurement, which is
+#     the argument this pipeline uses everywhere else for NOT using codes;
+#   * septic-shock coding differs 1.7x between the two current sites (20.3% of
+#     NU's cohort, 12.3% of UCMC's), so the denominator itself is
+#     site-dependent -- see README "Coding practice differs between the sites".
+#
+# So phenotype *shares* are not comparable across sites and are not comparable
+# to the published distributions. They are reported per site, never pooled into
+# a single percentage, and `sepsis_denominator` records which definition was
+# used so a later Sepsis-3 implementation can be compared against this one.
+#
+# ---------------------------------------------------------------------------
+
+sepsis_denominator:
+  # how `sepsis_cohort` is set. `coded` is the only implemented value; `sepsis3`
+  # is named here so the config documents what it would be replaced by.
+  method: coded
+  # ICD prefixes meaning septic shock, matched as clifcs.shock_type does --
+  # by prefix across ICD-10-CM and ICD-9-CM without consulting
+  # diagnosis_code_format, since ICD-9 shock codes are numeric and ICD-10's
+  # begin with a letter and so cannot collide.
+  codes: [R6521, '78552']
+  note: >-
+    A surrogate for Sepsis-3, not an implementation of it. Overcounts patients
+    coded septic without meeting physiological criteria and undercounts those
+    who met them without being coded, and the error differs by site.
+
+# ===========================================================================
+# SEYMOUR -- four clinical phenotypes of sepsis
+# ===========================================================================
+seymour:
+  citation: Seymour CW et al. JAMA 2019;321(20):2003-2017
+  doi: 10.1001/jama.2019.5791
+  # NOTE ON THE YEAR. This is commonly asked for as "Seymour 2016", which is the
+  # Sepsis-3 criteria paper (JAMA 2016;315:762-74) -- a definition, not a
+  # phenotyping. The alpha/beta/gamma/delta phenotypes are the 2019 SENECA
+  # paper, which is what this block transcribes.
+  derivation: >-
+    20,189 patients meeting Sepsis-3 within 6 h of hospital presentation at 12
+    Pennsylvania hospitals, 2010-2012; consensus k-means on 29 variables.
+  n_clusters: !!int 4
+  labels: ['alpha', 'beta', 'gamma', 'delta']
+
+  # Published phenotype profiles, JAMA 2019 Table 2, SENECA derivation cohort
+  # (n = 20,189). `total` is the whole-cohort column, which is what makes the
+  # published values locatable on our own scale.
+  #
+  # Means unless `median: true`, following the paper's own marking.
+  #
+  # These are NOT cluster centroids in the clustering space -- the paper does
+  # not publish those, nor a classifier, and states only that out-of-sample
+  # assignment used Euclidean distance to each phenotype's centroid. So a
+  # transfer here is an approximation built from Table 2, and
+  # sepsis_phenotype.py reports its agreement with an independent refit rather
+  # than presenting either as the answer. See `assignment` below.
+  published:
+    age:               {total: 64,   alpha: 60,   beta: 71,   gamma: 65,  delta: 63}
+    elixhauser:        {total: 1.8,  alpha: 1.5,  beta: 2.4,  gamma: 1.7, delta: 1.7}
+    creatinine:        {total: 1.4,  alpha: 1.1,  beta: 2.3,  gamma: 1.2, delta: 1.8,  median: true}
+    bun:               {total: 24,   alpha: 16,   beta: 38,   gamma: 23,  delta: 32,   median: true}
+    lactate:           {total: 1.5,  alpha: 1.3,  beta: 1.2,  gamma: 1.8, delta: 3.3,  median: true}
+    albumin:           {total: 2.9,  alpha: 3.5,  beta: 3.0,  gamma: 2.4, delta: 2.6}
+    bilirubin_total:   {total: 0.8,  alpha: 0.8,  beta: 0.6,  gamma: 0.8, delta: 1.4,  median: true}
+    alt:               {total: 30,   alpha: 32,   beta: 25,   gamma: 27,  delta: 69,   median: true}
+    ast:               {total: 30,   alpha: 28,   beta: 23,   gamma: 30,  delta: 118,  median: true}
+    platelet_count:    {total: 188,  alpha: 179,  beta: 200,  gamma: 195, delta: 164,  median: true}
+    hemoglobin:        {total: 12,   alpha: 13,   beta: 11,   gamma: 10,  delta: 11}
+    sodium:            {total: 137,  alpha: 137,  beta: 138,  gamma: 136, delta: 138}
+    bicarbonate:       {total: 25,   alpha: 27,   beta: 25,   gamma: 25,  delta: 20}
+    chloride:          {total: 103,  alpha: 103,  beta: 103,  gamma: 101, delta: 106}
+    glucose_serum:     {total: 130,  alpha: 121,  beta: 132,  gamma: 134, delta: 152,  median: true}
+    wbc:               {total: 10,   alpha: 9,    beta: 9,    gamma: 11,  delta: 12,   median: true}
+    bands:             {total: 7,    alpha: 5,    beta: 4,    gamma: 10,  delta: 14,   median: true}
+    crp:               {total: 6,    alpha: 2,    beta: 5,    gamma: 16,  delta: 13,   median: true}
+    esr:               {total: 48,   alpha: 28,   beta: 61,   gamma: 92,  delta: 31,   median: true}
+    troponin_t:        {total: 0.1,  alpha: 0.1,  beta: 0.1,  gamma: 0.1, delta: 0.3,  median: true}
+    inr:               {total: 1.3,  alpha: 1.2,  beta: 1.2,  gamma: 1.3, delta: 1.7,  median: true}
+    temp_c:            {total: 37.0, alpha: 37.1, beta: 36.7, gamma: 37.3, delta: 36.7}
+    heart_rate:        {total: 97,   alpha: 94,   beta: 84,   gamma: 109, delta: 108}
+    respiratory_rate:  {total: 22,   alpha: 20,   beta: 20,   gamma: 25,  delta: 25}
+    sbp:               {total: 110,  alpha: 118,  beta: 120,  gamma: 99,  delta: 91,   median: true}
+    spo2:              {total: 94,   alpha: 94,   beta: 95,   gamma: 93,  delta: 95,   median: true}
+    po2_arterial:      {total: 123,  alpha: 100,  beta: 111,  gamma: 98,  delta: 152}
+    gcs_total:         {total: 11.4, alpha: 12.8, beta: 13.6, gamma: 13.4, delta: 10.5}
+
+  # Published size and mortality, Table 2 and Figure 3. `summarize` checks the
+  # recovered labelling against the mortality ordering the same way the Zweck
+  # refit is checked against I < II < III.
+  published_outcomes:
+    alpha: {share: 0.33, n: !!int 6625, mortality_inhospital: 0.02, mortality_28d: 0.05}
+    beta:  {share: 0.27, n: !!int 5512, mortality_inhospital: 0.05, mortality_28d: 0.13}
+    gamma: {share: 0.27, n: !!int 5385, mortality_inhospital: 0.15, mortality_28d: 0.24}
+    delta: {share: 0.13, n: !!int 2667, mortality_inhospital: 0.32, mortality_28d: 0.40}
+
+  # ------------------------------------------------------------------ inputs
+  #
+  # Of the 29 clustering variables, 27 are available in CLIF 2.1 at both current
+  # sites. Each entry maps a published variable to the CLIF category that
+  # supplies it; `available: false` records a gap rather than dropping it
+  # silently, so the count of what was actually used is reportable.
+  variables:
+    - {name: age,              source: cohort,  column: age_at_admission}
+    - {name: heart_rate,       source: vitals,  category: heart_rate}
+    - {name: respiratory_rate, source: vitals,  category: respiratory_rate}
+    - {name: sbp,              source: vitals,  category: sbp}
+    - {name: temp_c,           source: vitals,  category: temp_c}
+    - {name: spo2,             source: vitals,  category: spo2}
+    - {name: gcs_total,        source: assessment, category: gcs_total}
+    - {name: wbc,              source: labs,    category: wbc}
+    - {name: esr,              source: labs,    category: esr}
+    - {name: crp,              source: labs,    category: crp}
+    - {name: alt,              source: labs,    category: alt}
+    - {name: ast,              source: labs,    category: ast}
+    - {name: bilirubin_total,  source: labs,    category: bilirubin_total}
+    - {name: bun,              source: labs,    category: bun}
+    - {name: creatinine,       source: labs,    category: creatinine}
+    - {name: inr,              source: labs,    category: inr}
+    - {name: po2_arterial,     source: labs,    category: po2_arterial}
+    - {name: platelet_count,   source: labs,    category: platelet_count}
+    - {name: glucose_serum,    source: labs,    category: glucose_serum}
+    - {name: sodium,           source: labs,    category: sodium}
+    - {name: hemoglobin,       source: labs,    category: hemoglobin}
+    - {name: chloride,         source: labs,    category: chloride}
+    - {name: bicarbonate,      source: labs,    category: bicarbonate}
+    - {name: lactate,          source: labs,    category: lactate}
+    - {name: albumin,          source: labs,    category: albumin}
+
+    # ---------------------------------------------------------- not usable
+    # Band neutrophils are not a CLIF lab_category at either site.
+    # `neutrophils_percent` exists and is NOT a substitute: bands are the
+    # immature fraction and total neutrophil percentage is not, and in this
+    # scheme bands are one of the two variables (with CRP) that separate gamma.
+    - {name: bands, source: labs, category: null, available: false,
+       why: "not a lab_category at either site; neutrophils_percent is a different measurement"}
+
+    # Elixhauser needs a comorbidity mapping over clif_hospital_diagnosis, which
+    # this pipeline does not build. The diagnosis table is also
+    # hospitalization-level with no timestamp, so a count over it would include
+    # the index event -- the same problem that made the trial history flags
+    # non-comparable (README "Only `measured` variables count").
+    - {name: elixhauser, source: diagnosis, category: null, available: false,
+       why: "no comorbidity mapping; diagnosis table is undated so the index event cannot be excluded"}
+
+    # Troponin IS available but is NOT used: UCMC runs troponin-T and NU
+    # troponin-I, different assays with different reference limits, so one
+    # scale is not equivalent across sites. The README already establishes this
+    # for the cardiac_origin flag, where the sites diverge 44.1% vs 29.2% at the
+    # assay URL. Including it would cluster on which hospital ran the test.
+    - {name: troponin_t, source: labs, category: troponin_t, available: false,
+       why: "UCMC troponin-T vs NU troponin-I; not equivalent across sites"}
+
+  # Window for the input vector, relative to the anchor. Seymour used the first
+  # 6 h of hospital presentation; this pipeline anchors on shock onset, so the
+  # window is taken around the anchor instead and that difference is recorded
+  # rather than hidden -- the phenotypes are being applied at a different moment
+  # in the illness from the one they were derived at.
+  #
+  # 24 h rather than Seymour's 6: their window starts at presentation, when an
+  # admission panel is drawn, and ours starts at shock onset, which can be days
+  # into a stay with no panel near it. At a 6 h lookback only 28% of patients
+  # have an AST and 33% an INR; at 24 h that is 47% and 51%. The cost is that a
+  # value up to a day old is treated as current, which for a chemistry panel is
+  # how a chart is read anyway.
+  window_lookback_hours: !!float 24.0
+  window_lookahead_hours: !!float 0.0
+
+  # Drop a clustering variable measured in fewer than this share of patients.
+  #
+  # Imputing a variable to the cohort centre for 97% of patients does not make
+  # it contribute nothing -- it makes it contribute a constant, while still
+  # appearing in the feature list as though the phenotype were informed by it.
+  # That is worse than dropping it, because the omission becomes invisible.
+  #
+  # This matters specifically and badly for gamma. CRP and ESR are two of the
+  # three markers Table 2 distinguishes it by (CRP 16 and ESR 92 against a
+  # cohort 6 and 48), and in this cohort they are measured in 3% and 2% of
+  # patients -- 9% and 5% even at a 72 h lookback. They are not ordered in
+  # undifferentiated shock. So gamma here is recovered from WBC and oxygenation
+  # alone, and is correspondingly the least trustworthy of the four labels.
+  #
+  # The decision is made ONCE on the derivation cohort and travels in the model
+  # file. A site that recomputed it against its own data would cluster on a
+  # different feature set, and "beta" would stop meaning the same thing -- the
+  # same failure the transferred centroids exist to prevent.
+  min_availability: !!float 0.30
+
+  # Variables log-transformed before standardising.
+  #
+  # Not cosmetic, and not optional. These labs span orders of magnitude -- AST
+  # runs from 1 to the thousands -- so their standard deviation is set by a
+  # handful of extreme values and a patient with shock liver sits 50 standard
+  # deviations out. Clustered raw, k-means spends a whole centroid on them:
+  # the first run of this config put 71 patients (0.8%) in delta with a hepatic
+  # score of 17.9, which is an outlier bucket rather than the 13% phenotype the
+  # paper describes.
+  #
+  # Table 2 reports a median for every variable in this list and a mean for
+  # almost every variable not in it, which is the paper making the same
+  # judgement about which of them are skewed.
+  log_transform:
+    [alt, ast, bilirubin_total, creatinine, bun, lactate, glucose_serum, wbc,
+     platelet_count, crp, esr, inr, po2_arterial, troponin_t]
+
+  # After transforming and standardising, clip z-scores to this many standard
+  # deviations. A backstop, not the main defence: the log transform is what
+  # makes the distributions clusterable, and this catches whatever is still
+  # extreme afterwards -- a creatinine of 25 is real, and should sit at the edge
+  # of the space rather than defining an axis of it.
+  z_clip: !!float 5.0
+
+  assignment:
+    # `transfer` z-scores the published Table 2 values onto our own pooled
+    # moments and assigns by nearest centroid. `refit` runs k-means at k=4 and
+    # names clusters from their profiles, as the Zweck implementation does.
+    #
+    # Default is refit, with transfer computed alongside and the agreement
+    # between them reported. The reason is specific: a transfer needs the
+    # derivation cohort's standard deviations to put published means on a
+    # common scale, and the paper publishes only the means. Standardising them
+    # against our own spread assumes the two cohorts have the same dispersion,
+    # which for a sepsis cohort versus an undifferentiated shock cohort is
+    # exactly the assumption most likely to be false.
+    method: refit
+    report_agreement: true
+    random_state: !!int 42
+    n_init: !!int 50
+
+# ===========================================================================
+# BHAVANI -- four vital-sign trajectory subphenotypes of sepsis
+# ===========================================================================
+bhavani:
+  citation: Bhavani SV et al. Intensive Care Med 2022;48(11):1582-1592
+  doi: 10.1007/s00134-022-06890-z
+  derivation: >-
+    12,473 patients with suspected infection at four Emory Healthcare hospitals
+    (2014-2017 training, 2018-2019 validation); group-based trajectory modelling
+    of vital signs over the first 8 h of hospitalisation.
+  n_clusters: !!int 4
+  labels: ['A', 'B', 'C', 'D']
+
+  # The trajectory variables, binned into eight one-hour blocks. Where several
+  # measurements fall in one hour the paper takes their mean, which is what
+  # `hourly_mean` below reproduces.
+  variables: [temp_c, heart_rate, respiratory_rate, sbp, dbp]
+  window_hours: !!int 8
+  block_hours: !!int 1
+
+  # The paper required at least three *complete* sets of vital signs in the
+  # window. Applied literally here that costs half the cohort, and for a reason
+  # that is about charting cadence rather than data quality: temperature is
+  # charted roughly four-hourly in an ICU and appears in a mean of 3.4 of the
+  # eight hourly blocks (53% of patients reach three), while heart rate,
+  # respiratory rate and both pressures appear in 7.2 of 8 (95% reach three).
+  #
+  # The paper's window starts at hospital presentation, where vitals are taken
+  # as a set by one person at one time. Ours starts at shock onset in an ICU,
+  # where they are not. So the requirement is split in two: the continuously
+  # charted vitals must reach `min_core_blocks`, and temperature -- which is the
+  # variable the groups are actually named for, and so cannot be dropped -- must
+  # appear at least `min_temp_observations` times and is then carried forward.
+  #
+  # This is a documented departure from the published method, not a
+  # reproduction of it. Setting `require_complete_blocks: true` restores the
+  # literal rule, at the cost of half the patients.
+  require_complete_blocks: false
+  min_core_blocks: !!int 3
+  min_temp_observations: !!int 1
+  core_variables: [heart_rate, respiratory_rate, sbp, dbp]
+  # retained so the literal reading can still be requested
+  min_complete_blocks: !!int 3
+
+  # Published group profiles, from the Results and Figure 1. The paper publishes
+  # NO trajectory coefficients, no classifier and no code -- only these
+  # qualitative shapes -- so a transfer is impossible and the model is refit,
+  # then labelled from these descriptions. That is the same situation as the
+  # Zweck implementation and is handled the same way.
+  #
+  # `vitals` is the level of temperature, heart rate and respiratory rate
+  # together, which move as one across these groups; `bp` is blood pressure,
+  # which is what splits each pair.
+  profiles:
+    A: {vitals: high, bp: low,     description: "hyperthermic, tachycardic, tachypneic, hypotensive"}
+    B: {vitals: high, bp: high,    description: "hyperthermic and tachycardic, less tachypneic, hypertensive"}
+    C: {vitals: low,  bp: normal,  description: "lower temperature, heart rate and respiratory rate; normotensive"}
+    D: {vitals: low,  bp: low,     description: "lower temperature, heart rate and respiratory rate; most hypotensive"}
+
+  # Published sizes and 30-day mortality. The two sepsis cohorts disagree on
+  # whether B or C is the lowest-mortality group, so `summarize` checks only
+  # what both agree on: A and D exceed B and C. Shares are from the sepsis
+  # subsets, not the all-infected cohort, since that is the comparable
+  # denominator.
+  published_outcomes:
+    A: {share_training: 0.29, share_validation: 0.32, mortality_training: 0.038, mortality_validation: 0.047}
+    B: {share_training: 0.11, share_validation: 0.11, mortality_training: 0.022, mortality_validation: 0.038}
+    C: {share_training: 0.27, share_validation: 0.22, mortality_training: 0.024, mortality_validation: 0.023}
+    D: {share_training: 0.33, share_validation: 0.36, mortality_training: 0.037, mortality_validation: 0.052}
+
+  assignment:
+    # k-means over the standardised 8 x 5 trajectory matrix, not group-based
+    # trajectory modelling.
+    #
+    # This is a different estimator for the same construct and the difference is
+    # not cosmetic: GBTM is a finite mixture fitted by maximum likelihood, which
+    # is what lets the paper handle missing hours through the likelihood and
+    # report posterior membership probabilities. k-means has neither, so hours
+    # with no measurement have to be filled (last observation carried forward,
+    # then cohort median) and there is no membership probability to threshold
+    # on. Groups recovered this way are *analogous to* the published ones, and
+    # the agreement with the published shares and mortality ordering is the only
+    # evidence offered that they correspond at all.
+    method: refit_kmeans
+    random_state: !!int 42
+    n_init: !!int 50
+    # carry a measurement forward into an empty hour before falling back to the
+    # cohort median, which is how a chart is read
+    fill: locf_then_median

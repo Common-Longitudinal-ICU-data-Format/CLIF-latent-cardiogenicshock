@@ -30,3 +30,10 @@ __pycache__/
 Thumbs.db
 .vscode/
 .idea/
+
+# ---------------------------------------------------------- federated export
+# Bundles a site assembles for the coordinating site. They hold patient-level
+# embeddings and are NOT de-identified; they move under a DUA, never through git.
+# Anchored to the repository root: a bare `export/` would also match
+# code/clifcs/export/, which is the contract itself and belongs in git.
+/output/export/

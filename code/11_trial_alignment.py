@@ -113,6 +113,15 @@ def embedding_matrix(frame: pl.DataFrame) -> np.ndarray:
 
 def load_anchor(paths, anchor: str, logger) -> pl.DataFrame:
     """the per-site embedding files for one anchor, restricted to the cohort"""
+    if paths.role == "pooled":
+        # the bundles the sites sent, checked against the contract on the way
+        # in -- see clifcs.export.bundles
+        from clifcs.export import bundles as bundle_io
+
+        found = bundle_io.discover(paths.export_home, logger)
+        manifests = bundle_io.check(found, paths, logger)
+        return bundle_io.load_patient_level(found, manifests, anchor, logger)
+
     sources = sorted(
         paths.patient_level_home.glob(f"embeddings_anchor-{anchor}_*.parquet")
     )
@@ -160,9 +169,24 @@ def attach_projection(paths, frame: pl.DataFrame, anchor: str, logger) -> pl.Dat
             f"{path.name} has no {missing}; rerun 03 so it writes {PROJECTION} "
             "coordinates"
         )
+    # The join key depends on the role: a pooled frame is keyed by the salted
+    # `row_key`, since record numbers do not leave a site. Picked from what both
+    # frames actually carry rather than from the role alone, so a projection
+    # file written before the federated split still joins.
+    key = (
+        "row_key"
+        if "row_key" in frame.columns and "row_key" in projections.columns
+        else "hospitalization_id"
+    )
+    if key not in frame.columns or key not in projections.columns:
+        raise KeyError(
+            f"cannot join {path.name} to the cohort frame: neither `row_key` "
+            "nor `hospitalization_id` is present in both. Re-run 03 under the "
+            "same role as this run."
+        )
     return frame.join(
-        projections.select("hospitalization_id", "site", *wanted),
-        on=["hospitalization_id", "site"],
+        projections.select(key, "site", *wanted),
+        on=[key, "site"],
         how="inner",
         validate="1:1",
     )
@@ -593,7 +617,36 @@ def analyse(paths, anchor: str, cohort_cfg, trial_cfg, args, logger) -> None:
     frame = load_anchor(paths, anchor, logger)
     frame = attach_projection(paths, frame, anchor, logger)
 
-    # the eligibility criteria read columns 02 does not carry
+    # Under the pooled role the eligibility booleans arrive precomputed in the
+    # bundles, because the predicates below read raw CLIF tables the
+    # coordinating site does not have. The representativeness tables that need
+    # the underlying measurements cannot be rebuilt from a bundle and are
+    # skipped; what survives is eligibility, the regions fitted from it, and the
+    # coverage analysis -- which is most of what 11 is for.
+    if paths.role == "pooled":
+        present = [c for c in frame.columns if c.startswith("elig_")]
+        if not present:
+            raise KeyError(
+                "no elig_* columns in the pooled frame. Trial eligibility is "
+                "computed site-side by 12_export.py; re-export the bundles "
+                "without --no-eligibility."
+            )
+        missing = [f"elig_{t.key}" for t in trials if f"elig_{t.key}" not in present]
+        if missing:
+            logger.warning(
+                f"the bundles carry {len(present)} of {len(trials)} trials' "
+                f"eligibility; absent: {', '.join(missing)}. Those trials are "
+                "dropped from this run rather than counted as zero-eligible."
+            )
+            trials = tuple(t for t in trials if f"elig_{t.key}" in present)
+        logger.info(
+            f"pooled role: using {len(present)} precomputed eligibility "
+            "column(s) from the bundles; the published-baseline comparison is "
+            "skipped, since it needs measurements that do not leave a site"
+        )
+        return _analyse_pooled(paths, frame, trials, trial_cfg, anchor, args, logger)
+
+    # see `_analyse_pooled`
     cohort = pl.read_parquet(paths.cohort_home / "cohort.parquet")
     keep = [
         c
@@ -858,15 +911,147 @@ def analyse(paths, anchor: str, cohort_cfg, trial_cfg, args, logger) -> None:
     logger.info(f"[{anchor}] figures -> {home}")
 
 
+def _analyse_pooled(paths, frame, trials, trial_cfg, anchor, args, logger):
+    """
+    the trial analysis a coordinating site can run from bundles alone
+
+    What survives the federated split, and what does not, follows from one
+    distinction: whether a number is computed from the eligibility booleans and
+    the embedding, or from the measurements behind them.
+
+    **Survives.** Eligibility counts, the regions fitted in PCA space from the
+    eligible patients, who falls inside a region without qualifying, centroid
+    separation, coverage by number of trials, and the evidence-orphan analysis.
+    These need `elig_*` and the embedding, and both travel.
+
+    **Does not.** The published-baseline comparison -- `table1_position`,
+    `compare_to_published`, `trial_inside_tested` -- measures how far our
+    eligible patients sit from each trial's reported medians, in interquartile
+    ranges, variable by variable. It needs each patient's pressures, lactate,
+    pH and heart rate as *values*, and those are exactly what the contract
+    replaces with decile ranks. A rank cannot be placed in a published IQR: the
+    bin edges are the cohort's own quantiles, not the trial's, so "below their
+    Q1" is not recoverable from "in our decile 2".
+
+    That is the real cost of the federated design, and it falls on the strongest
+    result in the README -- the blood-pressure gap against OptimaCC,
+    ECLS-SHOCK and CULPRIT-SHOCK. That comparison has to be computed site-side
+    and exported as an aggregate table if it is to survive; see
+    `docs/FEDERATION.md`.
+    """
+    frame = add_distances_from_eligibility(paths, frame, trials, trial_cfg, args, logger)
+    paths.table_home.mkdir(parents=True, exist_ok=True)
+
+    eligibility = pl.DataFrame(
+        [
+            {
+                "trial": t.label,
+                "year": t.year,
+                "intervention": t.intervention,
+                "citation": t.citation,
+                "n_eligible": int(frame[f"elig_{t.key}"].sum()),
+                "share_eligible": float(frame[f"elig_{t.key}"].mean()),
+                "mortality_eligible": float(
+                    frame.filter(pl.col(f"elig_{t.key}"))["in_hospital_mortality"].mean()
+                )
+                if frame[f"elig_{t.key}"].sum()
+                else None,
+                "criteria_not_applied": "; ".join(t.not_implementable) or "none",
+            }
+            for t in trials
+        ]
+    )
+    eligibility.write_csv(paths.table_home / f"trial_eligibility_{anchor}.csv")
+    logger.info("eligibility, pooled across bundles:")
+    for row in eligibility.iter_rows(named=True):
+        logger.info(
+            f"  {row['trial']:<22} {row['n_eligible']:>7,} "
+            f"({row['share_eligible']:>5.1%})  mortality "
+            f"{row['mortality_eligible'] or float('nan'):>5.1%}"
+        )
+
+    criteria = criteria_frame(trial_cfg)
+    if criteria.height:
+        criteria.write_csv(paths.table_home / "trial_criteria.csv")
+
+    # coverage, on the stratifiers a bundle carries. `age_band` replaces the
+    # median age the site-role version reports -- a band cannot be averaged, so
+    # the modal band is given instead.
+    frame = frame.with_columns(
+        n_eligible_trials=pl.sum_horizontal(
+            [pl.col(f"elig_{t.key}").cast(pl.Int32) for t in trials]
+        )
+    )
+    coverage = (
+        frame.group_by("n_eligible_trials")
+        .agg(
+            n=pl.len(),
+            share=pl.len() / frame.height,
+            mortality=pl.col("in_hospital_mortality").mean(),
+            modal_age_band=pl.col("age_band").mode().first(),
+            pct_female=(pl.col("sex_category") == "Female").mean(),
+            median_icu_los=pl.col("icu_los_days").median(),
+        )
+        .sort("n_eligible_trials")
+    )
+    coverage.write_csv(paths.table_home / f"trial_coverage_{anchor}.csv")
+    logger.info("coverage by number of trials a patient qualifies for:")
+    for row in coverage.iter_rows(named=True):
+        logger.info(
+            f"  {row['n_eligible_trials']} trial(s): n={row['n']:>6,} "
+            f"({row['share']:>5.1%})  mortality {row['mortality']:>5.1%}  "
+            f"age {row['modal_age_band']}  women {row['pct_female']:>5.1%}"
+        )
+
+    uncovered = frame.filter(pl.col("n_eligible_trials") == 0)
+    if uncovered.height:
+        rest = frame.filter(pl.col("n_eligible_trials") > 0)
+        logger.info(
+            f"eligible for nothing: {uncovered.height:,} "
+            f"({uncovered.height / frame.height:.1%}), mortality "
+            f"{uncovered['in_hospital_mortality'].mean():.1%} against "
+            f"{rest['in_hospital_mortality'].mean():.1%}"
+        )
+    logger.warning(
+        "pooled role: the published-baseline comparison "
+        "(trial_table1_*, trial_representativeness_*, trial_inside_tested_*) "
+        "was NOT produced -- it needs measured values, which do not leave a "
+        "site. Those tables have to come from a site-side run."
+    )
+    return frame
+
+
+def add_distances_from_eligibility(paths, frame, trials, trial_cfg, args, logger):
+    """
+    fit the trial regions from precomputed eligibility
+
+    Identical to the site-role path from `pca_coords` onward -- the region
+    fitting only ever needed the embedding and the booleans, which is why it
+    survives federation unchanged.
+    """
+    coords = pca_coords(frame, int(trial_cfg.regions.pca_components), args.seed, logger)
+    regions = fit_regions(frame, coords, trials, trial_cfg, logger)
+    frame = add_distances(frame, coords, regions)
+    return rank_and_orphans(frame, regions)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--anchor", choices=ANCHORS, default=None,
                         help="one anchor only")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--model", default=None, help="which checkpoint's embeddings")
+    parser.add_argument(
+        "--role",
+        choices=("site", "pooled"),
+        default=None,
+        help="`pooled` reads received bundles from output/export/ and refuses "
+        "to touch raw CLIF data; `site` reads this machine's own files. "
+        "Defaults to `role` in paths.yaml, then to `site`.",
+    )
     args = parser.parse_args()
 
-    paths = load_paths(model=args.model)
+    paths = load_paths(model=args.model, role=args.role)
     paths.mkdirs()
     logger = get_logger("11_trial_alignment",
                         paths.log_home / "11_trial_alignment.log")

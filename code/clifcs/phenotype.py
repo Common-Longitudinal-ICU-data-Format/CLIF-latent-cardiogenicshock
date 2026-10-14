@@ -303,12 +303,19 @@ def summarize(df: pl.DataFrame, logger) -> pl.DataFrame:
     inverts that ordering is a signal the refit did not reproduce the published
     phenotypes and should be reported as such rather than taken at face value.
     """
+    # One column per site present, rather than the hardcoded `n_ucmc`/`n_nu`
+    # pair this used to build: a federated run has however many sites sent a
+    # bundle, and naming two of them meant a third was silently omitted from
+    # its own breakdown table.
+    sites = sorted(df["site"].unique().drop_nulls().to_list())
     summary = (
         df.group_by("cs_phenotype")
         .agg(
             n=pl.len(),
-            n_ucmc=(pl.col("site") == "UCMC").sum(),
-            n_nu=(pl.col("site") == "NU").sum(),
+            *[
+                (pl.col("site") == site).sum().alias(f"n_{site}")
+                for site in sites
+            ],
             mortality=pl.col("in_hospital_mortality").mean(),
             median_icu_los_days=pl.col("icu_los_days").median(),
         )
@@ -316,9 +323,10 @@ def summarize(df: pl.DataFrame, logger) -> pl.DataFrame:
     )
     logger.info("cardiogenic shock phenotypes (Zweck et al. 2021, refit):")
     for row in summary.iter_rows(named=True):
+        per_site = ", ".join(f"{site} {row[f'n_{site}']}" for site in sites)
         logger.info(
             f"  {row['cs_phenotype']:<22} n={row['n']:<6} "
-            f"(UCMC {row['n_ucmc']}, NU {row['n_nu']})  "
+            f"({per_site})  "
             f"in-hospital mortality {row['mortality']:.1%}  "
             f"median ICU LOS {row['median_icu_los_days']:.1f}d"
         )

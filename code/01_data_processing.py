@@ -49,6 +49,7 @@ from clifcs.onset_winnower import OnsetWinnower
 from clifcs.outcomes import add_outcomes
 from clifcs.shock_type import shock_type_flags
 from clifcs.shock_type import summarize as summarize_shock_type
+from clifcs import sepsis_phenotype
 from clifcs.phenotype import (
     add_egfr,
     apply_phenotype_model,
@@ -85,7 +86,14 @@ REQUIRED_TABLES = (
 # ============================================================ stage: cohort
 
 
-def stage_cohort(paths, cfg, logger, phenotype_model=None) -> pl.DataFrame:
+def stage_cohort(
+    paths,
+    cfg,
+    logger,
+    phenotype_model=None,
+    sepsis_cfg=None,
+    sepsis_models: dict | None = None,
+) -> pl.DataFrame:
     """identify cardiogenic shock at each site and assemble the cohort table"""
     paths.cohort_home.mkdir(parents=True, exist_ok=True)
     ledger = FilterLedger()
@@ -135,6 +143,19 @@ def stage_cohort(paths, cfg, logger, phenotype_model=None) -> pl.DataFrame:
         save_phenotype_model(paths.cohort_home / "phenotype_model.json", **model)
     phenotype_summary = summarize(cohort, logger)
     shock_type_summary = summarize_shock_type(cohort, logger)
+
+    # The two sepsis phenotype systems, applied to the coded-septic subset.
+    # Fitted on the pooled subset for the same reason the Zweck phenotypes are,
+    # and applied from a saved model at a contributing site.
+    cohort, sepsis_tables, sepsis_fitted = sepsis_phenotype.attach(
+        paths, cohort, sepsis_cfg, logger, models=sepsis_models
+    )
+    for name, table in sepsis_tables.items():
+        table.write_csv(paths.cohort_home / f"{name}.csv")
+    for scheme, model in sepsis_fitted.items():
+        sepsis_phenotype.save_model(
+            paths.cohort_home / f"{scheme}_model.json", model, scheme
+        )
 
     paths.cohort_home.mkdir(parents=True, exist_ok=True)
     cohort.write_parquet(paths.cohort_home / "cohort.parquet")
@@ -456,11 +477,35 @@ def main() -> None:
         "instead of refitting; required at a site that cannot pool its labs with "
         "the derivation cohort",
     )
+    # The sepsis phenotype systems transfer the same way, and for the same
+    # reason: a site that refits gets its own four clusters and "beta" stops
+    # meaning the same thing in the pooled breakdown.
+    parser.add_argument(
+        "--seymour-model",
+        default=None,
+        help="apply a Seymour phenotype model fitted elsewhere "
+        "(cohort/seymour_model.json) instead of refitting",
+    )
+    parser.add_argument(
+        "--bhavani-model",
+        default=None,
+        help="apply a Bhavani phenotype model fitted elsewhere "
+        "(cohort/bhavani_model.json) instead of refitting",
+    )
     args = parser.parse_args()
 
     paths = load_paths()
     paths.mkdirs()
     cfg = load_cohort_cfg()
+    sepsis_cfg = OmegaConf.load(CONFIG_HOME / "phenotypes_sepsis.yaml")
+    sepsis_models = {
+        scheme: path
+        for scheme, path in (
+            ("seymour", args.seymour_model),
+            ("bhavani", args.bhavani_model),
+        )
+        if path
+    }
     logger = get_logger("01_data_processing", paths.log_home / "01_data_processing.log")
 
     if args.from_stage:
@@ -478,7 +523,14 @@ def main() -> None:
     cohort = None
 
     if "cohort" in todo:
-        cohort = stage_cohort(paths, cfg, logger, args.phenotype_model)
+        cohort = stage_cohort(
+            paths,
+            cfg,
+            logger,
+            args.phenotype_model,
+            sepsis_cfg=sepsis_cfg,
+            sepsis_models=sepsis_models,
+        )
     if "subset" in todo:
         if cohort is None:
             if not cohort_file.is_file():

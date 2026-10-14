@@ -21,17 +21,34 @@ which filtering to one of them would make unanswerable.
 
 ## Pipeline
 
-| Script | Does |
-|---|---|
-| [code/01_data_processing.py](code/01_data_processing.py) | Cardiogenic shock cohort, filter ledger, outcomes, phenotypes; then CLIF subset → clifpy derived tables → cocoa collate/tokenize/winnow |
-| [code/02_model_embedding.py](code/02_model_embedding.py) | Reports model structure and embedding dimension; runs `cotorra.Extractor`; writes `output/patient_level_data/` |
-| [code/03_embedding_analysis.py](code/03_embedding_analysis.py) | PCA + UMAP + PaCMAP, and the scatterplots |
-| [code/11_trial_alignment.py](code/11_trial_alignment.py) | Where the guideline trials' populations sit, who falls inside them, and who falls inside none |
+| Script | Role | Does |
+|---|---|---|
+| [code/01_data_processing.py](code/01_data_processing.py) | site | Cohort, filter ledger, outcomes, three phenotype systems; then CLIF subset → clifpy derived tables → cocoa collate/tokenize/winnow |
+| [code/02_model_embedding.py](code/02_model_embedding.py) | site | Reports model structure and embedding dimension; runs `cotorra.Extractor`; writes `output/patient_level_data/` |
+| [code/12_export.py](code/12_export.py) | site | Assembles the bundle a site sends: counts, embeddings, ordered token labels. **The only script that writes anything meant to leave an institution.** |
+| [code/03_embedding_analysis.py](code/03_embedding_analysis.py) | pooled | PCA + UMAP + PaCMAP, and the scatterplots |
+| [code/04_site_effect.py](code/04_site_effect.py) | pooled | Why the sites separate, decomposed against token-family counts |
+| [code/11_trial_alignment.py](code/11_trial_alignment.py) | pooled | Where the guideline trials' populations sit, who falls inside them, and who falls inside none |
 
 ```bash
+# at a contributing site
 python code/01_data_processing.py          # all six stages
 python code/02_model_embedding.py
-python code/03_embedding_analysis.py
+python code/12_export.py                   # -> output/export/<SITE>/
+
+# at the coordinating site, over the bundles received
+python code/03_embedding_analysis.py --role pooled
+```
+
+**This pipeline runs federated.** Raw records never move; each site sends a
+bundle of aggregate counts plus latent embeddings and a minimal set of ordered
+token labels, and `paths.site_data` *raises* under the pooled role so the
+coordinating analysis cannot read records even by mistake. The export contract,
+the suppression rules, what the split costs and what is still open are in
+**[docs/FEDERATION.md](docs/FEDERATION.md)**. Print the contract with:
+
+```bash
+python code/clifcs/export/contract.py
 ```
 
 `01` is staged and resumable — `--stage {cohort,subset,derive,collate,tokenize,winnow}`,
@@ -450,6 +467,15 @@ flow figure after whichever projection it drew (`trajectory_flow_pacmap.png`), s
 a field cannot be shown under the wrong axis labels.
 
 ## Phenotypes
+
+Three systems are attached: Zweck's cardiogenic shock phenotypes over the whole
+cohort, and Seymour's and Bhavani's sepsis phenotypes over the coded-septic
+subset. The two sepsis systems, what they reproduce and what they do not, and
+why their denominator is the weakest part of them, are in
+[docs/FEDERATION.md](docs/FEDERATION.md#the-sepsis-phenotypes-and-what-is-wrong-with-them).
+In short: **Seymour's shares are close and its mortality ordering is not;
+Bhavani's group C does not reproduce at all.** Both are reported per site and
+never pooled into one percentage.
 
 Zweck et al., *Phenotyping Cardiogenic Shock*, J Am Heart Assoc 2021;10:e020085
 ([doi:10.1161/JAHA.120.020085](https://doi.org/10.1161/JAHA.120.020085)) —

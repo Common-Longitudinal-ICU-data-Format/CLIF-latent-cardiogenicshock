@@ -83,17 +83,60 @@ ANCHORS: tuple[str, ...] = ("24h", "onset")
 MAX_PLOTTED_SITES = 3
 
 
+#: the two roles a machine runs this pipeline in.
+#:
+#: `site` holds raw CLIF data and may read it. `pooled` holds only the bundles
+#: contributing sites sent, and may not -- the whole point of the federated
+#: split is that the coordinating analysis cannot depend on record-level data,
+#: and the way to keep that true is to make the attempt fail rather than to
+#: document that it should not happen.
+ROLES: tuple[str, ...] = ("site", "pooled")
+
+
+class RoleViolation(Exception):
+    """a pooled-role run tried to read raw patient records"""
+
+
 @dataclasses.dataclass(frozen=True)
 class Paths:
     """resolved input and output locations"""
 
-    site_data: dict[str, pathlib.Path]
+    raw_site_data: dict[str, pathlib.Path]
     model_key: str
     model_home: pathlib.Path
     available_models: tuple[str, ...]
     tokenizer_yaml: pathlib.Path
     output_home: pathlib.Path
     scratch_home: pathlib.Path
+    role: str = "site"
+
+    @property
+    def site_data(self) -> dict[str, pathlib.Path]:
+        """
+        where this machine's raw CLIF tables live -- site role only
+
+        Raises under the pooled role rather than returning an empty mapping.
+        An empty mapping would make a pooled script that still reads raw data
+        silently produce nothing for every site, which looks like "this site
+        contributed no patients" and is the single most plausible way for the
+        federated split to be quietly wrong.
+        """
+        if self.role == "pooled":
+            raise RoleViolation(
+                "this run is in the `pooled` role and must not read raw CLIF "
+                "data. The coordinating site holds only the bundles that "
+                "contributing sites sent; anything derived from records has to "
+                "be computed site-side and exported under the contract in "
+                "clifcs/export/contract.py.\n"
+                "If this is actually a site-role analysis, load paths with "
+                "load_paths(role='site')."
+            )
+        return self.raw_site_data
+
+    @property
+    def export_home(self) -> pathlib.Path:
+        """where this site writes its bundle, or the coordinator reads them"""
+        return self.output_home / "export"
 
     @property
     def sites(self) -> tuple[str, ...]:
@@ -103,8 +146,15 @@ class Paths:
         Not a fixed constant: each institution runs the pipeline over only the
         data it has, and the pooled analysis in 03 works from whatever
         per-site embedding files are present rather than from this list.
+
+        Reads `raw_site_data` directly rather than going through `site_data`,
+        so it does not trip the pooled-role guard: knowing which sites are
+        *configured* is not the same as reading their records, and a pooled run
+        legitimately wants the former. What a pooled run must not do is take
+        this list as the set of contributing sites -- that comes from the
+        bundles actually present, via `clifcs.export.bundles.discover`.
         """
-        return tuple(self.site_data)
+        return tuple(self.raw_site_data)
 
     # ---------------------------------------------------------------- outputs
     @property
@@ -177,13 +227,23 @@ class Paths:
 
 
 def load_paths(
-    config: pathlib.Path | str | None = None, model: str | None = None
+    config: pathlib.Path | str | None = None,
+    model: str | None = None,
+    role: str | None = None,
 ) -> Paths:
     """
     resolve paths.yaml into absolute, existence-checked locations
 
     `model` selects which checkpoint's outputs this run reads and writes;
     it defaults to `default_model` in the config.
+
+    `role` is `site` or `pooled`. Under `pooled`, `paths.site_data` raises --
+    see `Paths.site_data`. It defaults to `role` in paths.yaml, then to `site`,
+    so an existing config keeps working unchanged.
+
+    A pooled-role run still needs paths.yaml for the model and tokenizer (it
+    has to check that the bundles it received were produced under the weights
+    it holds), but its `sites` block may be empty.
     """
     path = pathlib.Path(config or CONFIG_HOME / "paths.yaml")
     if not path.is_file():
@@ -200,8 +260,12 @@ def load_paths(
         if not d.is_dir():
             raise FileNotFoundError(f"{site} data_dir not found: {d}")
         site_data[site] = d
-    if not site_data:
-        raise ValueError(f"no sites configured in {path}")
+    if not site_data and (role or cfg.get("role")) != "pooled":
+        raise ValueError(
+            f"no sites configured in {path}. A coordinating machine that holds "
+            "no raw data should set `role: pooled` there, which makes an empty "
+            "`sites` block legitimate and raw-data access an error."
+        )
 
     available = tuple(cfg.models)
     if not available:
@@ -230,8 +294,13 @@ def load_paths(
             f"token embeddings meaningful, but was not found: {tokenizer_yaml}"
         )
 
+    resolved_role = role or cfg.get("role") or "site"
+    if resolved_role not in ROLES:
+        raise ValueError(f"role must be one of {ROLES}, not {resolved_role!r}")
+
     return Paths(
-        site_data=site_data,
+        raw_site_data=site_data,
+        role=resolved_role,
         model_key=key,
         model_home=model_home,
         available_models=available,

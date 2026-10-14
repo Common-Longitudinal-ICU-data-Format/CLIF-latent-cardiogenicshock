@@ -292,9 +292,17 @@ def plot_target_umaps(paths, anchor: str, out, logger) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--anchor", choices=ANCHORS, default="24h")
+    parser.add_argument(
+        "--role",
+        choices=("site", "pooled"),
+        default=None,
+        help="`pooled` reads received bundles from output/export/ and refuses "
+        "to touch raw CLIF data; `site` reads this machine's own files. "
+        "Defaults to `role` in paths.yaml, then to `site`.",
+    )
     args = parser.parse_args()
 
-    paths = load_paths()
+    paths = load_paths(role=args.role)
     paths.mkdirs()
     load_cohort_cfg()
     logger = get_logger("10_site_features", paths.log_home / "10_site_features.log")
