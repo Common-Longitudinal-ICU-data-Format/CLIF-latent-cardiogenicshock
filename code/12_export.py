@@ -199,6 +199,34 @@ def build_patient_frame(
     if eligibility is not None and eligibility.height:
         frame = frame.join(eligibility, on="hospitalization_id", how="left")
 
+    # the downstream prediction labels 06 needs, if 06 has been run here. Only
+    # the `__label` / `__eligible` pairs travel -- the baseline physiology in
+    # the same file (`lab_*`, `vtl_*`, `nee_at_anchor`) is measured values and
+    # stays put.
+    label_file = paths.cohort_home / f"downstream_labels_anchor-{anchor}.parquet"
+    if label_file.is_file():
+        labels = pl.read_parquet(label_file)
+        wanted = [
+            c for c in labels.columns if c.endswith(contract.LABEL_SUFFIXES)
+        ]
+        if wanted and "hospitalization_id" in labels.columns:
+            frame = frame.join(
+                labels.select("hospitalization_id", "site", *wanted),
+                on=["hospitalization_id", "site"],
+                how="left",
+            )
+            logger.info(
+                f"  downstream labels: {len(wanted) // 2} task(s) "
+                + ", ".join(
+                    sorted(c.removesuffix("__label") for c in wanted if c.endswith("__label"))
+                )
+            )
+    else:
+        logger.info(
+            f"  no {label_file.name}; run 06_downstream_tasks.py site-side "
+            "first if the pooled analysis needs the prediction labels"
+        )
+
     # Drop everything the contract does not name. Done explicitly and then
     # validated, rather than relying on the selection being right: the
     # validation is what catches a column this list forgot.

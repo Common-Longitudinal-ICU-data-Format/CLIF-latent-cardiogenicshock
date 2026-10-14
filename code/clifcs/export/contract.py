@@ -151,6 +151,24 @@ TRIAL_PREFIX = "elig_"
 # 184 lab tokens, not which ones or when.
 FAMILY_PREFIX = "fam_n_"
 
+# ---------------------------------------------------------------------------
+# Downstream prediction labels: `<task>__label` and `<task>__eligible` for each
+# task in `clifcs.labels.TASKS` -- 24-hour mortality, new invasive ventilation,
+# pressor escalation.
+#
+# Permitted on the same argument as `in_hospital_mortality`, which is already
+# here: they are single booleans about an outcome, derived site-side from
+# tables that do not travel. 06 asks whether the embedding carries anything
+# clinically predictive and whether a model built at one hospital transfers to
+# another, which is a question only a pooled run can answer -- so the labels
+# have to reach it or the analysis does not exist federated.
+#
+# `__eligible` travels with `__label` because it is what makes the label
+# interpretable: "did not develop X" and "was already on X at the anchor, so the
+# question does not arise" are different, and pooling them would inflate every
+# denominator.
+LABEL_SUFFIXES = ("__label", "__eligible")
+
 
 def _names(*groups: tuple[Permitted, ...]) -> frozenset[str]:
     return frozenset(p.name for group in groups for p in group)
@@ -210,6 +228,7 @@ def is_permitted(column: str) -> bool:
         or bool(EMBEDDING_PATTERN.match(column))
         or column.startswith(TRIAL_PREFIX)
         or column.startswith(FAMILY_PREFIX)
+        or column.endswith(LABEL_SUFFIXES)
     )
 
 
@@ -295,6 +314,7 @@ def describe() -> str:
         f"    {'emb_NNNN':<32} the latent embedding; NOT de-identified",
         f"    {TRIAL_PREFIX + '<trial>':<32} per-trial eligibility, computed site-side",
         f"    {FAMILY_PREFIX + '<family>':<32} per-family token counts, for the site-effect model",
+        f"    {'<task>__label / __eligible':<32} downstream prediction labels, computed site-side",
         "",
         "everything else is refused at both ends.",
     ]

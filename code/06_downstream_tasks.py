@@ -64,6 +64,15 @@ def embedding_matrix(frame: pl.DataFrame) -> np.ndarray:
 
 
 def load_embeddings(paths, anchor: str) -> pl.DataFrame:
+    if paths.role == "pooled":
+        from clifcs import get_logger
+        from clifcs.export import bundles as bundle_io
+
+        logger = get_logger("06_downstream_tasks")
+        found = bundle_io.discover(paths.export_home, logger)
+        manifests = bundle_io.check(found, paths, logger)
+        return bundle_io.load_patient_level(found, manifests, anchor, logger)
+
     sources = sorted(
         p
         for p in paths.patient_level_home.glob(f"embeddings_anchor-{anchor}_*.parquet")
@@ -187,8 +196,16 @@ def run_task(
     y = eligible[f"{task}__label"].fill_null(False).to_numpy().astype(int)
     sites = np.asarray(eligible["site"].to_list())
     x = embedding_matrix(eligible)
-    baseline = eligible.select(baseline_cols).to_numpy().astype(np.float64)
-    present = [s for s in paths.sites if s in set(sites)]
+    # empty under the pooled role: the clinical baseline is measured physiology,
+    # which does not leave a site, so that arm is skipped rather than fitted on
+    # nothing. The embedding-vs-correction comparison, which is what 06 is for,
+    # is unaffected.
+    baseline = (
+        eligible.select(baseline_cols).to_numpy().astype(np.float64)
+        if baseline_cols
+        else None
+    )
+    present = [s for s in paths.sites if s in set(sites)] or sorted(set(sites))
     reference = present[0]
 
     # Drawn ONCE and reused for every feature set and correction. Re-drawing
@@ -198,15 +215,16 @@ def run_task(
     rows = []
 
     # the clinical baseline, the same ways, so it is comparable
-    for head in CLASSIFIERS:
-        for name, train_mask, test_mask in splits:
-            got = score_split(
-                name, "baseline", head, baseline[train_mask], y[train_mask],
-                baseline[test_mask], y[test_mask], min_positives,
-            )
-            if got:
-                rows.append({**got, "task": task, "anchor": anchor,
-                             "features": "clinical baseline", "correction": "-"})
+    if baseline is not None:
+        for head in CLASSIFIERS:
+            for name, train_mask, test_mask in splits:
+                got = score_split(
+                    name, "baseline", head, baseline[train_mask], y[train_mask],
+                    baseline[test_mask], y[test_mask], min_positives,
+                )
+                if got:
+                    rows.append({**got, "task": task, "anchor": anchor,
+                                 "features": "clinical baseline", "correction": "-"})
 
     for method in METHODS:
         for name, train_mask, test_mask in splits:
@@ -278,6 +296,37 @@ def main() -> None:
         # The cache is keyed on nothing but the anchor, so a change to the
         # enrollment criteria would silently reuse labels for the old cohort.
         # Compare the patient sets and rebuild when they differ.
+        if paths.role == "pooled":
+            # The labels arrive inside the bundles, already joined to the
+            # embeddings -- they are computed from tables the coordinating site
+            # does not have. The baseline-physiology comparison arm is dropped
+            # with them: `lab_*` and `vtl_*` are measured values and stay at the
+            # site, so 06 reports the embedding against site correction here,
+            # not against a physiology baseline.
+            frame = load_embeddings(paths, anchor)
+            present = sorted(
+                c.removesuffix("__label")
+                for c in frame.columns
+                if c.endswith("__label")
+            )
+            if not present:
+                raise KeyError(
+                    "no <task>__label columns in the bundles. They are exported "
+                    "by 12_export.py, which needs 06 to have been run site-side "
+                    "first so that downstream_labels_anchor-*.parquet exists."
+                )
+            logger.info(
+                f"[{anchor}] pooled role: {len(present)} task(s) from the "
+                f"bundles ({', '.join(present)}); the physiology-baseline arm "
+                "is not available, since measured values do not leave a site"
+            )
+            frame = frame.with_columns(
+                sex_male=(pl.col("sex_category") == "Male").cast(pl.Int8)
+            )
+            for task in [t for t in tasks if t in present]:
+                rows.extend(run_task(paths, frame, task, anchor, cfg, [], logger))
+            continue
+
         label_file = paths.cohort_home / f"downstream_labels_anchor-{anchor}.parquet"
         cohort_ids = set(
             pl.read_parquet(

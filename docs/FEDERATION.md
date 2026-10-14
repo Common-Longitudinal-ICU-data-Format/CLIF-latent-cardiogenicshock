@@ -20,7 +20,11 @@ Every script takes `--role`, defaulting to `role:` in `paths.yaml` and then to
 | holds raw CLIF tables | yes | **no** |
 | `paths.site_data` | the data directories | **raises `RoleViolation`** |
 | reads | its own records | `output/export/*/` only |
-| runs | 01, 02, 09, 12 | 03, 04, 05, 06, 07, 08, 10, 11 |
+| runs | 01, 02, 08, 09, 12 | 03, 04, 05, 06, 10, 11 |
+
+Verified under the pooled role: **03, 04, 05, 06, 10, 11**. **08** raises by
+design — the token-space geometry needs the sequences. **07** assembles the
+report from whatever tables the others wrote and is role-agnostic.
 
 `paths.site_data` raising is the enforcement. It is not a convention or a note
 in a README — a pooled-role run that tries to reach records stops. It raises
@@ -224,7 +228,15 @@ published IQR: the bin edges are our cohort's quantiles, not the trial's, so
 computed site-side and exported as aggregates if they are to survive.
 
 **Token-space geometry (08).** Needs the sequences, which do not travel. Runs
-site-side; pool its results, not its inputs.
+site-side; pool its results, not its inputs. 04's *per-token* tornado goes with
+it — the family-level comparison survives on `fam_n_*`, the per-token ranking
+does not, and 04 skips that figure rather than drawing a degraded version that
+looks like the real one.
+
+**06's clinical baseline.** The embedding-vs-site-correction comparison
+survives, including the cross-site transfer that is the point of it. The
+physiology baseline it is scored against does not: `lab_*` and `vtl_*` are
+measured values. 06 reports the embedding arms alone under the pooled role.
 
 **Trajectories (09).** Runs site-side by consortium decision; only the
 `gradient_alignment` and `position_encodes` scalars and the per-site flow
