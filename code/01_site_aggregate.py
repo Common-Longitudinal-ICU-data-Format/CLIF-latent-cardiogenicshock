@@ -96,6 +96,7 @@ STAGES = (
     # bundle is what it exists to produce
     "embed",
     "purity",
+    "trials",
     "export",
 )
 
@@ -609,6 +610,85 @@ def stage_purity(paths, sites, logger, min_cell: int) -> pl.DataFrame:
     return purity
 
 
+def stage_trials(paths, sites, logger, min_cell: int) -> None:
+    """
+    the trial comparison, as aggregates
+
+    Runs site-side because the eligibility predicates and the baseline variables
+    read raw CLIF tables, and produces only shares and medians -- so a site that
+    will never share a patient still contributes the whole trial analysis.
+
+    This is the half of 11 that has to happen here. The other half -- fitting
+    trial regions in embedding space -- needs the pooled embeddings and stays at
+    the coordinating site.
+    """
+    from clifcs import trial_aggregate
+    from clifcs.concordance import add_concordance, attach_procedures, attach_severity
+    from clifcs.trials import (
+        add_eligibility,
+        attach_features,
+        criteria_frame,
+        load_trials,
+        table1_position,
+    )
+
+    trial_cfg = OmegaConf.load(CONFIG_HOME / "trials.yaml")
+    cohort_cfg = load_cohort_cfg()
+    trials = load_trials(trial_cfg)
+    cohort = pl.read_parquet(paths.cohort_home / "cohort.parquet")
+    logger.info(
+        f"{len(trials)} trials: "
+        + ", ".join(
+            f"{n} {a}"
+            for a, n in sorted(
+                pl.DataFrame({"a": [t.applies_to for t in trials]})["a"]
+                .value_counts()
+                .iter_rows()
+            )
+        )
+    )
+
+    for anchor in ANCHORS:
+        per_site = []
+        for site in sites:
+            part = cohort.filter(pl.col("site") == site)
+            if part.height == 0:
+                continue
+            # the anchor only shifts which physiology the criteria read; the
+            # 24h anchor uses admission + 24h, onset uses cs_onset_dttm, and
+            # attach_features keys off cs_onset_dttm either way
+            part = attach_features(paths.site_data[site], part, cohort_cfg, logger)
+            part = attach_procedures(paths.site_data[site], part, logger)
+            per_site.append(part)
+        if not per_site:
+            continue
+
+        frame = pl.concat(per_site, how="diagonal_relaxed")
+        frame = add_eligibility(frame, trials)
+        for trial in trials:
+            frame = table1_position(frame, trial, logger)
+        frame = attach_severity(paths, frame, logger)
+        frame = add_concordance(frame, trials, logger)
+
+        for site in sites:
+            part = frame.filter(pl.col("site") == site)
+            if part.height == 0:
+                continue
+            tables = trial_aggregate.build(
+                paths, part, trials, site, anchor, logger, min_cell
+            )
+            for name, table in tables.items():
+                out = paths.cohort_home / f"{name}_{site}_anchor-{anchor}.csv"
+                table.write_csv(out)
+                logger.info(f"  wrote {out.name}")
+
+    # the published criteria and what can be applied: literature only, no
+    # patient data, identical at every site
+    criteria = criteria_frame(trial_cfg)
+    if criteria.height:
+        criteria.write_csv(paths.cohort_home / "trial_criteria.csv")
+
+
 def stage_export(paths, sites, logger, min_cell: int, purity) -> None:
     """assemble the aggregate bundle each site sends"""
     from clifcs.export import contract, writer
@@ -764,6 +844,8 @@ def main() -> None:
     purity = pl.DataFrame()
     if "purity" in todo or "export" in todo:
         purity = stage_purity(paths, sites, logger, args.min_cell)
+    if "trials" in todo:
+        stage_trials(paths, sites, logger, args.min_cell)
     if "export" in todo:
         stage_export(paths, sites, logger, args.min_cell, purity)
     else:

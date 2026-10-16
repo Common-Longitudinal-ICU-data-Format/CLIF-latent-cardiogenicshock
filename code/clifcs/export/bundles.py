@@ -368,3 +368,42 @@ def token_legend(
                 "in which case the exported ranks are not comparable."
             )
     return reference
+
+
+def load_trial_tables(
+    bundles: dict[str, dict[str, pathlib.Path]], anchor: str, logger
+) -> dict[str, pl.DataFrame]:
+    """
+    the aggregate trial tables, stacked across every bundle that carries them
+
+    These come from tier 1, so a site that shared no patient-level data at all
+    still contributes its whole trial comparison -- eligibility, position
+    against the published interquartile ranges, treatment concordance,
+    mortality and ICU length of stay, each broken down by phenotype.
+
+    Not pooled into single figures here. A share is over that site's own
+    denominator, and the denominators differ: the sepsis phenotypes rest on a
+    diagnosis code used 1.3x more often at NU than at UCMC. Pool by summing
+    `n_eligible` against `n_stratum` if a combined share is wanted, and never by
+    averaging the shares.
+    """
+    out: dict[str, pl.DataFrame] = {}
+    for name in ("trial_outcomes", "trial_iqr_position"):
+        frames = []
+        for site, tiers in sorted(bundles.items()):
+            home = tiers.get("aggregate")
+            if home is None:
+                continue
+            source = home / "trials" / f"{name}_anchor-{anchor}.csv"
+            if not source.is_file():
+                continue
+            frames.append(pl.read_csv(source))
+        if frames:
+            out[name] = pl.concat(frames, how="diagonal_relaxed")
+            logger.info(
+                f"  {name} anchor {anchor}: {out[name].height} rows from "
+                f"{out[name]['site'].n_unique()} site(s)"
+            )
+        else:
+            logger.info(f"  {name} anchor {anchor}: no bundle carries it")
+    return out

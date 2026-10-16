@@ -446,7 +446,7 @@ REQUIRED_COVARIATES = (
 )
 
 
-def load_anchor(paths, anchor: str, logger) -> pl.DataFrame:
+def load_anchor(paths, anchor: str, logger, batch_size=None) -> pl.DataFrame:
     """
     the pooled frame for one anchor, from bundles or from local files
 
@@ -466,11 +466,13 @@ def load_anchor(paths, anchor: str, logger) -> pl.DataFrame:
       cohort table.
     """
     if paths.role == "pooled":
-        return _load_anchor_from_bundles(paths, anchor, logger)
+        return _load_anchor_from_bundles(paths, anchor, logger, batch_size)
     return _load_anchor_local(paths, anchor, logger)
 
 
-def _load_anchor_from_bundles(paths, anchor: str, logger) -> pl.DataFrame:
+def _load_anchor_from_bundles(
+    paths, anchor: str, logger, batch_size=None
+) -> pl.DataFrame:
     """pool the received bundles for one anchor"""
     from clifcs.export import bundles as bundle_io
 
@@ -478,8 +480,8 @@ def _load_anchor_from_bundles(paths, anchor: str, logger) -> pl.DataFrame:
     found = bundle_io.discover(paths.received_home, logger)
     manifests = bundle_io.check(found, paths, logger)
     frame = bundle_io.load_patient_level(
-            found, manifests, anchor, logger, paths=paths
-        )
+        found, manifests, anchor, logger, paths=paths, batch_size=batch_size
+    )
 
     missing = [c for c in REQUIRED_COVARIATES if c not in frame.columns]
     if missing:
@@ -607,7 +609,7 @@ def _load_anchor_local(paths, anchor: str, logger) -> pl.DataFrame:
 
 
 def analyse_anchor(paths, anchor: str, args, logger) -> pl.DataFrame:
-    frame = load_anchor(paths, anchor, logger)
+    frame = load_anchor(paths, anchor, logger, getattr(args, "batch_size", None))
     if frame.height == 0:
         return pl.DataFrame()
 
@@ -884,6 +886,13 @@ def main() -> None:
         type=int,
         default=0,
         help="subsample before projecting (0 = use every patient)",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="batch size for re-embedding received token bundles (default 8; "
+        "raise it if you have more than 8 GB of VRAM, drop to 2-4 on CUDA OOM)",
     )
     parser.add_argument(
         "--role",

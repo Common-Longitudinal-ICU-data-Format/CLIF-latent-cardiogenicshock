@@ -111,7 +111,7 @@ def embedding_matrix(frame: pl.DataFrame) -> np.ndarray:
     return frame.select(columns).to_numpy().astype(np.float64)
 
 
-def load_anchor(paths, anchor: str, logger) -> pl.DataFrame:
+def load_anchor(paths, anchor: str, logger, batch_size=None) -> pl.DataFrame:
     """the per-site embedding files for one anchor, restricted to the cohort"""
     if paths.role == "pooled":
         # the bundles the sites sent, checked against the contract on the way
@@ -121,7 +121,8 @@ def load_anchor(paths, anchor: str, logger) -> pl.DataFrame:
         found = bundle_io.discover(paths.received_home, logger)
         manifests = bundle_io.check(found, paths, logger)
         return bundle_io.load_patient_level(
-            found, manifests, anchor, logger, paths=paths
+            found, manifests, anchor, logger, paths=paths,
+            batch_size=batch_size,
         )
 
     sources = sorted(
@@ -616,7 +617,7 @@ def analyse(paths, anchor: str, cohort_cfg, trial_cfg, args, logger) -> None:
     trials = load_trials(trial_cfg)
     logger.info(f"=== anchor {anchor}: {len(trials)} trials")
 
-    frame = load_anchor(paths, anchor, logger)
+    frame = load_anchor(paths, anchor, logger, getattr(args, 'batch_size', None))
     frame = attach_projection(paths, frame, anchor, logger)
 
     # Under the pooled role the eligibility booleans arrive precomputed in the
@@ -1043,6 +1044,13 @@ def main() -> None:
                         help="one anchor only")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--model", default=None, help="which checkpoint's embeddings")
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="batch size for re-embedding received token bundles (default 8; "
+        "raise it if you have more than 8 GB of VRAM, drop to 2-4 on CUDA OOM)",
+    )
     parser.add_argument(
         "--role",
         choices=("site", "pooled"),

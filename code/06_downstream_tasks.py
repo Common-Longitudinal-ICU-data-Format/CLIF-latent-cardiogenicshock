@@ -63,7 +63,7 @@ def embedding_matrix(frame: pl.DataFrame) -> np.ndarray:
     return frame.select(columns).to_numpy().astype(np.float64)
 
 
-def load_embeddings(paths, anchor: str) -> pl.DataFrame:
+def load_embeddings(paths, anchor: str, batch_size=None) -> pl.DataFrame:
     if paths.role == "pooled":
         from clifcs import get_logger
         from clifcs.export import bundles as bundle_io
@@ -72,7 +72,8 @@ def load_embeddings(paths, anchor: str) -> pl.DataFrame:
         found = bundle_io.discover(paths.received_home, logger)
         manifests = bundle_io.check(found, paths, logger)
         return bundle_io.load_patient_level(
-            found, manifests, anchor, logger, paths=paths
+            found, manifests, anchor, logger, paths=paths,
+            batch_size=batch_size,
         )
 
     sources = sorted(
@@ -276,6 +277,13 @@ def main() -> None:
     parser.add_argument("--model", default=None)
     parser.add_argument("--task", default=None)
     parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="batch size for re-embedding received token bundles (default 8; "
+        "raise it if you have more than 8 GB of VRAM, drop to 2-4 on CUDA OOM)",
+    )
+    parser.add_argument(
         "--role",
         choices=("site", "pooled"),
         default=None,
@@ -305,7 +313,7 @@ def main() -> None:
             # with them: `lab_*` and `vtl_*` are measured values and stay at the
             # site, so 06 reports the embedding against site correction here,
             # not against a physiology baseline.
-            frame = load_embeddings(paths, anchor)
+            frame = load_embeddings(paths, anchor, getattr(args, 'batch_size', None))
             present = sorted(
                 c.removesuffix("__label")
                 for c in frame.columns
@@ -351,7 +359,7 @@ def main() -> None:
             labels.write_parquet(label_file)
             logger.info(f"[{anchor}] wrote {label_file.name}")
 
-        embeddings = load_embeddings(paths, anchor)
+        embeddings = load_embeddings(paths, anchor, getattr(args, 'batch_size', None))
         frame = embeddings.join(
             labels.drop("site"), on="hospitalization_id", how="inner"
         )

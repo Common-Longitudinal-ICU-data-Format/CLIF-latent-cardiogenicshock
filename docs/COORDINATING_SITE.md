@@ -213,16 +213,42 @@ population difference.
 
 ---
 
+## The trial comparison comes from tier 1, not from tokens
+
+Everything the trial analysis reports is a share or a median over a site's own
+patients, so all of it is computed site-side and arrives in
+`upload_to_box_<SITE>/trials/`:
+
+| table | holds |
+|---|---|
+| `trial_outcomes_anchor-*.csv` | per trial and stratum: n eligible, share eligible, mortality, median ICU LOS, share treated in line with the guideline, mortality split by concordance, share inside every published IQR with its null |
+| `trial_iqr_position_anchor-*.csv` | per trial and variable: our median against theirs, and the share below Q1 / inside / above Q3 |
+| `trial_criteria.csv` | each trial's published criteria and whether this pipeline can apply it |
+
+Both are broken down **overall and by Zweck, Seymour and Bhavani phenotype and
+by coded shock type**. All 13 trials are included -- 8 cardiogenic, 3 septic
+(VASST, SEPSISPAM, ADRENAL) and 2 hypovolaemic (CRASH-2, Villanueva) -- because
+the septic-coded patients are 18% of this cohort and reporting only the
+cardiogenic trials would leave them uncovered by construction.
+
+**A site that sends tier 1 only contributes the whole trial analysis.** That is
+worth saying to a site still negotiating its DUA: they are not holding up the
+trial work.
+
+Read `trial_iqr_position` first. The blood-pressure gap replicates
+independently at both current sites -- OptimaCC systolic 77.2% below the
+published first quartile at UCMC and 78.3% at NU, against a 25% null -- and
+`share_concordant` carries its own finding: only 29% of ADRENAL-eligible septic
+shock patients received hydrocortisone, at both sites.
+
+---
+
 ## What a pooled run does not give you
 
-**The published-baseline comparison.** `trial_table1_*`,
-`trial_representativeness_*` and `trial_inside_tested_*` place each patient
-against a trial's published medians **in interquartile ranges**, which needs the
-measured value. A token is a decile bin fitted on the training cohort, so "below
-their Q1" is not recoverable from "in our decile 2". This falls on the strongest
-result in the README -- the blood-pressure gap against OptimaCC, ECLS-SHOCK and
-CULPRIT-SHOCK -- and those tables must be computed site-side and exported as
-aggregates if you want them.
+**Trial regions in embedding space.** Fitting a region from a trial's eligible
+patients needs the pooled embeddings, so that half of 11 stays at the
+coordinating site. The *comparison* half -- eligibility, IQR position,
+concordance, outcomes -- moved to tier 1 and no longer needs you at all.
 
 **06's clinical baseline.** The embedding-vs-site-correction comparison
 survives, including the cross-site transfer that is the point of it. The

@@ -246,15 +246,34 @@ Bundles are checked against each other on ingest:
 
 Three things, named honestly.
 
-**The published-baseline comparison.** This is the real loss, and it falls on
-the strongest result in the README — the blood-pressure gap against OptimaCC,
-ECLS-SHOCK and CULPRIT-SHOCK. `trial_table1_*`,
-`trial_representativeness_*` and `trial_inside_tested_*` measure how far each
-eligible patient sits from a trial's published medians **in interquartile
-ranges**, which needs the measured value. A decile rank cannot be placed in a
-published IQR: the bin edges are our cohort's quantiles, not the trial's, so
-"below their Q1" is not recoverable from "in our decile 2". These tables must be
-computed site-side and exported as aggregates if they are to survive.
+**The published-baseline comparison is NOT lost.** An earlier version of this
+document said it was, and that was wrong. What cannot travel is the measured
+*value*; every quantity the comparison needs is a share or a median over values,
+which is a statistic rather than a value. So it is computed site-side by
+[`clifcs/trial_aggregate.py`](../code/clifcs/trial_aggregate.py) and shipped in
+tier 1:
+
+- meets the inclusion criteria — count and share, per trial;
+- position against each published interquartile range — share below Q1, inside,
+  above Q3, with our median beside theirs;
+- treated in line with the guideline — share, with mortality split by whether
+  the recommended treatment was delivered;
+- mortality and median ICU length of stay among the eligible.
+
+All of it broken down by **Zweck, Seymour and Bhavani phenotype and by coded
+shock type**, because a trial's evidence is about a population and the question
+"is this trial's population like ours" has a different answer inside each
+phenotype.
+
+This means a site that shares no patient-level data at all still contributes the
+entire trial analysis. Verified: with NU sending tier 1 only, the
+blood-pressure gap replicates independently at both sites — OptimaCC systolic
+77.2% below Q1 at UCMC and 78.3% at NU, against the 77.9% the patient-level
+route gave pooled.
+
+What genuinely does not survive is **fitting trial regions in embedding space**,
+which needs the pooled embeddings and so belongs to the coordinating site. That
+is the half of 11 that stays pooled; the comparison half moved to tier 1.
 
 **Token-space geometry (08).** Needs the sequences — which, under tier 2, now
 travel. It runs at the coordinating site over the received bundles like

@@ -86,14 +86,15 @@ def embedding_matrix(frame: pl.DataFrame) -> np.ndarray:
     return frame.select(columns).to_numpy().astype(np.float64)
 
 
-def load_embeddings(paths, anchor: str, logger) -> pl.DataFrame:
+def load_embeddings(paths, anchor: str, logger, batch_size=None) -> pl.DataFrame:
     if paths.role == "pooled":
         from clifcs.export import bundles as bundle_io
 
         found = bundle_io.discover(paths.received_home, logger)
         manifests = bundle_io.check(found, paths, logger)
         return bundle_io.load_patient_level(
-            found, manifests, anchor, logger, paths=paths
+            found, manifests, anchor, logger, paths=paths,
+            batch_size=batch_size,
         )
 
     sources = sorted(
@@ -773,6 +774,13 @@ def main() -> None:
     parser.add_argument("--anchor", choices=ANCHORS, default=None)
     parser.add_argument("--model", default=None)
     parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="batch size for re-embedding received token bundles (default 8; "
+        "raise it if you have more than 8 GB of VRAM, drop to 2-4 on CUDA OOM)",
+    )
+    parser.add_argument(
         "--role",
         choices=("site", "pooled"),
         default=None,
@@ -791,7 +799,7 @@ def main() -> None:
     axis_tables, region_tables, matched_tables = [], [], []
 
     for anchor in anchors:
-        frame = load_embeddings(paths, anchor, logger)
+        frame = load_embeddings(paths, anchor, logger, getattr(args, 'batch_size', None))
         # paths.yaml order, not alphabetical: it is the order the plots read
         # left-to-right, and the reader expects the index site first
         present = set(frame["site"].unique().to_list())

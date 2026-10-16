@@ -41,6 +41,7 @@ from __future__ import annotations
 import hashlib
 import pathlib
 import secrets
+import shutil
 
 import polars as pl
 from omegaconf import OmegaConf
@@ -272,10 +273,27 @@ def trial_eligibility(paths, cohort: pl.DataFrame, site: str, logger) -> pl.Data
     return part.select("hospitalization_id", *columns)
 
 
-def write_counts(paths, bundle: pathlib.Path, min_cell: int, logger) -> None:
+def write_counts(paths, bundle: pathlib.Path, min_cell: int, logger, site=None) -> None:
     """copy the aggregate tables across, suppressed"""
     out = bundle / "counts"
     out.mkdir(parents=True, exist_ok=True)
+
+    # the trial tables, which are per site and per anchor and so are found by
+    # glob rather than named. Already suppressed by clifcs.trial_aggregate;
+    # re-checked here rather than re-suppressed, so a table assembled by some
+    # other route cannot skip it.
+    if site is not None:
+        trial_home = out.parent / "trials"
+        for source in sorted(paths.cohort_home.glob(f"trial_*_{site}_anchor-*.csv")):
+            table = pl.read_csv(source)
+            contract.validate_counts_frame(table, source.name, min_cell)
+            trial_home.mkdir(parents=True, exist_ok=True)
+            table.write_csv(trial_home / source.name.replace(f"_{site}", ""))
+            logger.info(f"  trials/{source.name.replace(f'_{site}', '')} ({table.height} rows)")
+        criteria = paths.cohort_home / "trial_criteria.csv"
+        if criteria.is_file():
+            trial_home.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(criteria, trial_home / "trial_criteria.csv")
 
     for name, count_columns in _COUNT_TABLES.items():
         source = paths.cohort_home / name
@@ -324,7 +342,7 @@ def write_aggregate(
     bundle.mkdir(parents=True, exist_ok=True)
 
     logger.info(" counts/")
-    write_counts(paths, bundle, min_cell, logger)
+    write_counts(paths, bundle, min_cell, logger, site=site)
 
     if purity is not None and purity.height:
         home = bundle / "purity"

@@ -46,6 +46,9 @@ from clifcs.config import CONFIG_HOME
 #: cotorra writes one feature shard per split; these are the names it uses
 SPLITS = ("train", "tuning", "held_out")
 
+#: batch size for re-embedding, overriding extraction.yaml -- see `reembed`
+DEFAULT_BATCH_SIZE = 8
+
 
 def stage_bundle(
     paths, frame: pl.DataFrame, site: str, anchor: str, logger
@@ -155,8 +158,13 @@ def reembed(
     features_home = processed / paths.model_key
     features_home.mkdir(parents=True, exist_ok=True)
     extraction_cfg = OmegaConf.load(CONFIG_HOME / "extraction.yaml")
-    if batch_size is not None:
-        extraction_cfg.extract.batch_size = int(batch_size)
+    # extraction.yaml ships batch_size 32, which is right for the training-time
+    # sweep and badly wrong here: `output_hidden_states` keeps all nine layers,
+    # so 32 sequences padded to max_len holds nine times the activations of a
+    # forward pass and an 8 GB card spends its time swapping. Measured on this
+    # cohort: 1.1 patients/s at 32, 37 patients/s at 8 -- a thirty-fold
+    # difference, and the difference between fifteen minutes and ten hours.
+    extraction_cfg.extract.batch_size = int(batch_size or DEFAULT_BATCH_SIZE)
     cfg_path = features_home / "extraction-resolved.yaml"
     OmegaConf.save(extraction_cfg, cfg_path)
 
