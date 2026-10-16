@@ -78,9 +78,10 @@ python code/03_embedding_analysis.py --role pooled
 **This pipeline runs federated.** Raw records never move; each site sends a
 bundle of aggregate counts plus latent embeddings and a minimal set of ordered
 token labels, and `paths.site_data` *raises* under the pooled role so the
-coordinating analysis cannot read records even by mistake. The export contract,
-the suppression rules, what the split costs and what is still open are in
-**[docs/FEDERATION.md](docs/FEDERATION.md)**. Print the contract with:
+coordinating analysis cannot read records even by mistake. Step-by-step for the coordinating site, including what to tell
+contributing sites, is in **[docs/COORDINATING_SITE.md](docs/COORDINATING_SITE.md)**; the export
+contract, the suppression rules, what the split costs and what is still open
+are in **[docs/FEDERATION.md](docs/FEDERATION.md)**. Print the contract with:
 
 ```bash
 python code/clifcs/export/contract.py
