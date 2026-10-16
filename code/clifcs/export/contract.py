@@ -38,7 +38,7 @@ import polars as pl
 #: bumped whenever the permitted column set changes in a way that makes an
 #: older bundle non-conformant. The coordinating site compares this against
 #: each bundle's manifest and refuses a mismatch rather than guessing.
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "2.0"
 
 #: the embedding itself: `emb_0000 .. emb_{dim-1}`.
 #:
@@ -170,6 +170,42 @@ FAMILY_PREFIX = "fam_n_"
 LABEL_SUFFIXES = ("__label", "__eligible")
 
 
+
+# ---------------------------------------------------------------------------
+# TIER 2: the token sequences themselves.
+#
+# `tokens_past` is the ordered list of token ids the model read before the
+# anchor, and `s_elapsed_past` the seconds elapsed at each one. Together they
+# are the model's entire input for that patient.
+#
+# This is the most disclosive thing the pipeline produces -- more so than the
+# embedding derived from it, because the embedding is a lossy projection and
+# this is not. A token stream is a re-serialisation of the record: which labs
+# were drawn, in what order, how often, against what clock. It is not a
+# de-identified summary of a patient and must not be described as one.
+#
+# It travels because the consortium decided it should, and the decision buys
+# something real: with the sequences and the frozen model, a coordinating site
+# can reproduce the embeddings exactly, re-anchor at a different cut point, or
+# probe a different layer, none of which is possible from a fixed embedding. It
+# is the difference between receiving an answer and receiving the input.
+#
+# What is still excluded, and is what "not the raw date/value data" means:
+#
+#   * `times` -- the wall-clock timestamp of every event. Present in the same
+#     source file and never exported. `s_elapsed_past` replaces it: seconds
+#     since the start of the record, which is relative and is the same class of
+#     quantity as `hours_admission_to_cs_onset`, already permitted.
+#   * the measured values. A token is a decile bin fitted at training time, so
+#     `LAB-RES//creatinine_Q7` says "seventh decile", never "2.3 mg/dL".
+#   * `subject_id`, age in years, race and ethnicity, all of which sit in the
+#     same source file.
+#
+# Permitted ONLY in a token bundle. `validate_patient_frame` still refuses
+# them, so they cannot reach a tier-1 upload by accident.
+TOKEN_SEQUENCE_COLUMNS: frozenset[str] = frozenset({"tokens_past", "s_elapsed_past"})
+
+
 def _names(*groups: tuple[Permitted, ...]) -> frozenset[str]:
     return frozenset(p.name for group in groups for p in group)
 
@@ -210,8 +246,6 @@ FORBIDDEN_COLUMNS: frozenset[str] = frozenset(
         "race_category",
         "ethnicity_category",
         "peak_troponin_ng_l",
-        "tokens_past",
-        "s_elapsed_past",
     }
 )
 
@@ -261,6 +295,37 @@ def validate_patient_frame(frame: pl.DataFrame, origin: str) -> None:
     if missing:
         raise ContractViolation(f"{origin}: missing required column(s) {missing}")
 
+    if frame.height == 0:
+        raise ContractViolation(f"{origin}: no rows")
+
+
+
+def validate_token_frame(frame: pl.DataFrame, origin: str) -> None:
+    """
+    refuse a token bundle that carries anything outside the contract
+
+    The same allowlist as a patient frame, plus the two sequence columns. The
+    separation matters: a tier-1 upload is checked with
+    `validate_patient_frame`, which does not permit them, so the sequences
+    cannot reach the summary bundle through a shared code path.
+    """
+    allowed = lambda c: is_permitted(c) or c in TOKEN_SEQUENCE_COLUMNS
+    offending = sorted(c for c in frame.columns if not allowed(c))
+    if offending:
+        raise ContractViolation(
+            f"{origin}: {len(offending)} column(s) not permitted to leave a "
+            f"site under schema {SCHEMA_VERSION}: {', '.join(offending)}.\n"
+            "Note that `times`, the wall-clock timestamp of each event, sits in "
+            "the same source file as the sequences and is deliberately not on "
+            "the allowlist -- `s_elapsed_past` carries relative time instead."
+        )
+    missing = [c for c in REQUIRED_COLUMNS if c not in frame.columns]
+    if missing:
+        raise ContractViolation(f"{origin}: missing required column(s) {missing}")
+    if not TOKEN_SEQUENCE_COLUMNS & set(frame.columns):
+        raise ContractViolation(
+            f"{origin}: a token bundle with no token sequence in it"
+        )
     if frame.height == 0:
         raise ContractViolation(f"{origin}: no rows")
 

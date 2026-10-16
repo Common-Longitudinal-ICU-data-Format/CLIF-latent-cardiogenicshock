@@ -448,3 +448,120 @@ def write_patient(
     manifest.write(amended, bundle)
     logger.info(f" manifest.json amended; {site} patient bundle complete")
     return bundle
+
+
+# ========================================================= tier 2: token data
+
+
+#: labels that travel beside the sequences so the coordinating site can colour
+#: and stratify what it re-embeds. Same allowlist as everywhere else -- these
+#: are not new permissions, they are the subset that makes sense next to a
+#: sequence.
+_TOKEN_BUNDLE_LABELS = (
+    # cocoa's partition, carried so the coordinating site can reproduce the
+    # same train/tuning/held_out split rather than inventing a new one
+    "split",
+    "cs_phenotype",
+    "seymour_phenotype",
+    "bhavani_phenotype",
+    "shock_type",
+    "sepsis_cohort",
+    "cardiac_origin",
+    "in_hospital_mortality",
+    "icu_los_days",
+    "sex_category",
+    "hours_admission_to_cs_onset",
+)
+
+
+def write_tokens(
+    paths,
+    cohort: pl.DataFrame,
+    site: str,
+    anchors: tuple[str, ...],
+    salt: str,
+    logger,
+) -> pathlib.Path:
+    """
+    tier 2: the ordered token sequence per patient
+
+    What this is, stated plainly: the model's entire input for each patient, as
+    the sequence of token ids it read before the anchor plus the elapsed seconds
+    at each one. Not the measured values -- a token is a decile bin fitted at
+    training time -- and not the wall-clock times, which sit in the same source
+    file and are dropped.
+
+    What it buys the coordinating site is the reason to prefer it over shipping
+    embeddings: with the sequences and the frozen model it can reproduce the
+    embeddings exactly, re-anchor at a different cut point, or read a different
+    layer. A fixed embedding answers one question; the sequence answers the ones
+    nobody has asked yet.
+
+    What it costs is that this is the most disclosive artefact the pipeline
+    produces. An embedding is a lossy projection of the record; a token stream
+    is a re-serialisation of it. It must not be described as de-identified, and
+    it moves under a patient-level data use agreement or not at all.
+    """
+    from clifcs.tokens import load_pre_anchor_tokens
+
+    home = paths.token_home(site)
+    home.mkdir(parents=True, exist_ok=True)
+
+    labels = cohort.filter(pl.col("site") == site).select(
+        "hospitalization_id",
+        *[c for c in _TOKEN_BUNDLE_LABELS if c in cohort.columns],
+    )
+
+    row_counts: dict[str, int] = {}
+    for anchor in anchors:
+        tokens = load_pre_anchor_tokens(paths, site, anchor)
+        frame = (
+            tokens.join(labels, on="hospitalization_id", how="left")
+            .with_columns(
+                row_keys(tokens, salt),
+                anchor=pl.lit(anchor),
+            )
+            .drop("hospitalization_id")
+        )
+        # Dropped explicitly and then validated, rather than trusting the
+        # selection: the validation is what catches a column this forgot, and
+        # the source file carries `times`, `race_category`, `ethnicity_category`
+        # and `age_at_admission` right alongside the sequences.
+        frame = frame.select([c for c in frame.columns if contract.is_permitted(c)
+                              or c in contract.TOKEN_SEQUENCE_COLUMNS])
+        contract.validate_token_frame(frame, f"{site}/{anchor} token bundle")
+
+        out = home / f"tokens_anchor-{anchor}.parquet"
+        frame.write_parquet(out)
+        row_counts[anchor] = frame.height
+        lengths = frame["tokens_past"].list.len()
+        logger.info(
+            f"  {out.name}: {frame.height} patients, "
+            f"{int(lengths.sum()):,} tokens "
+            f"(median {int(lengths.median())} per patient, "
+            f"max {int(lengths.max())})"
+        )
+
+    # the vocabulary the ids index into. Model metadata, no patient data, and
+    # the thing without which a bare list of integers is uninterpretable.
+    levels(str(paths.tokenizer_yaml)).write_csv(home / "token_levels.csv")
+
+    manifest.write(
+        manifest.build(
+            site=site,
+            salt=salt,
+            model_key=paths.model_key,
+            model_home=paths.model_home,
+            tokenizer_yaml=paths.tokenizer_yaml,
+            anchors=anchors,
+            row_counts=row_counts,
+            min_cell=0,
+            embedding_dim=0,
+            shares_patient_level=True,
+            notes="tier 2: token sequences, not embeddings. Re-embed with the "
+            "frozen model at the coordinating site.",
+        ),
+        home,
+    )
+    logger.info(f" manifest.json written; {site} token bundle complete")
+    return home

@@ -131,19 +131,44 @@ def cohort_token_counts(paths, logger) -> pl.DataFrame:
     """how often each token occurs in this cohort's pre-anchor streams"""
     names, _ = vocabulary(str(paths.tokenizer_yaml))
     frames = []
-    for site in paths.sites:
-        try:
-            frames.append(load_pre_anchor_tokens(paths, site, "24h"))
-        except FileNotFoundError:
-            logger.warning(f"no winnowed tokens for {site}; skipping")
+
+    if paths.role == "pooled":
+        # The sequences arrive in tier 2, so the token-space geometry is
+        # answerable at the coordinating site -- which it was not when only
+        # embeddings travelled. Read from the received bundles rather than from
+        # a scratch directory that does not exist here.
+        from clifcs.export import bundles as bundle_io
+
+        found = bundle_io.discover(paths.received_home, logger)
+        for site, tiers in sorted(found.items()):
+            home = tiers.get("token")
+            if home is None:
+                logger.warning(
+                    f"{site} sent tier 1 only, so its tokens cannot be counted"
+                )
+                continue
+            source = home / "tokens_anchor-24h.parquet"
+            if not source.is_file():
+                logger.warning(f"{site} has no 24h token file; skipping")
+                continue
+            frames.append(
+                pl.read_parquet(source, columns=["tokens_past", "site"])
+            )
+    else:
+        for site in paths.sites:
+            try:
+                frames.append(load_pre_anchor_tokens(paths, site, "24h"))
+            except FileNotFoundError:
+                logger.warning(f"no winnowed tokens for {site}; skipping")
+
     if not frames:
         raise FileNotFoundError("no tokenized data; run 01 first")
-    tokens = pl.concat(frames)
+    tokens = pl.concat(frames, how="diagonal_relaxed")
 
     # the winnowed stream covers everyone embedded, which is a superset of the
     # cohort once an enrollment criterion is tightened; count only the cohort
     cohort_file = paths.cohort_home / "cohort.parquet"
-    if cohort_file.is_file():
+    if cohort_file.is_file() and "hospitalization_id" in tokens.columns:
         keep = pl.read_parquet(cohort_file).select("hospitalization_id", "site")
         before = tokens.height
         tokens = tokens.join(keep, on=["hospitalization_id", "site"], how="inner")

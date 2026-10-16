@@ -118,9 +118,11 @@ def load_anchor(paths, anchor: str, logger) -> pl.DataFrame:
         # in -- see clifcs.export.bundles
         from clifcs.export import bundles as bundle_io
 
-        found = bundle_io.discover(paths.export_home, logger)
+        found = bundle_io.discover(paths.received_home, logger)
         manifests = bundle_io.check(found, paths, logger)
-        return bundle_io.load_patient_level(found, manifests, anchor, logger)
+        return bundle_io.load_patient_level(
+            found, manifests, anchor, logger, paths=paths
+        )
 
     sources = sorted(
         paths.patient_level_home.glob(f"embeddings_anchor-{anchor}_*.parquet")

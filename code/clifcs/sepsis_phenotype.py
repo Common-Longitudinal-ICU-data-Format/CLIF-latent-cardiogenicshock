@@ -947,6 +947,22 @@ def save_model(path, model: dict, scheme: str, extra: dict | None = None) -> Non
         "scale": [float(x) for x in model["scale"]],
         "centroids": [[float(x) for x in row] for row in model["centroids"]],
         "labels": list(model["labels"]),
+        # The transform, which has to travel with the moments and did not.
+        #
+        # This enumerated payload silently dropped `log_transform` and `z_clip`
+        # because they were not named here, while `assign_seymour` put them in
+        # the model dict specifically so they would travel. A receiving site
+        # then found no transform, applied none, and compared raw AST -- which
+        # runs from 1 to the thousands -- against centroids fitted on log1p(AST)
+        # and standardised by log-space moments. Every patient lands in
+        # whichever cluster is nearest the origin, and the site gets four
+        # phenotype labels that look plausible and mean nothing.
+        #
+        # Written unconditionally, including as an empty list, so that
+        # `apply_model` can tell "no transform was used" apart from "this file
+        # predates the fix" -- see the check there.
+        "log_transform": list(model.get("log_transform", [])),
+        "z_clip": model.get("z_clip"),
         **(extra or {}),
     }
     pathlib.Path(path).write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -983,7 +999,19 @@ def apply_model(
     values = features.select(names).to_numpy().astype(float)
     # the source cohort's transform, moments and clip -- all three, or the
     # patient is placed in a different space from the centroids
-    log_columns = [i for i, n in enumerate(names) if n in set(model.get("log_transform", []))]
+    # Absent, not empty: a file written before the transform was carried
+    # through. Refused rather than defaulted, because the default -- apply no
+    # transform -- is exactly the wrong answer when the centroids were fitted
+    # on log-transformed values, and it is wrong silently.
+    if "log_transform" not in model:
+        raise ValueError(
+            f"{path} does not record which variables were log-transformed. It "
+            "was written by a version of save_model that dropped that field, "
+            "so there is no way to place a patient in the same space as its "
+            "centroids. Regenerate it by re-running the cohort stage at the "
+            "derivation site."
+        )
+    log_columns = [i for i, n in enumerate(names) if n in set(model["log_transform"])]
     if log_columns:
         values[:, log_columns] = np.log1p(np.clip(values[:, log_columns], 0.0, None))
     centre = np.asarray(model["centre"])

@@ -474,10 +474,12 @@ def _load_anchor_from_bundles(paths, anchor: str, logger) -> pl.DataFrame:
     """pool the received bundles for one anchor"""
     from clifcs.export import bundles as bundle_io
 
-    logger.info(f"[{anchor}] reading bundles from {paths.export_home}")
-    found = bundle_io.discover(paths.export_home, logger)
+    logger.info(f"[{anchor}] reading bundles from {paths.received_home}")
+    found = bundle_io.discover(paths.received_home, logger)
     manifests = bundle_io.check(found, paths, logger)
-    frame = bundle_io.load_patient_level(found, manifests, anchor, logger)
+    frame = bundle_io.load_patient_level(
+            found, manifests, anchor, logger, paths=paths
+        )
 
     missing = [c for c in REQUIRED_COVARIATES if c not in frame.columns]
     if missing:

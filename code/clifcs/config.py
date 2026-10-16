@@ -134,9 +134,16 @@ class Paths:
         return self.raw_site_data
 
     @property
-    def export_home(self) -> pathlib.Path:
-        """where this site writes its bundle, or the coordinator reads them"""
-        return self.output_home / "export"
+    def received_home(self) -> pathlib.Path:
+        """
+        the coordinating site's inbox
+
+        Received bundles are dropped in verbatim, keeping the directory names
+        the sending site wrote -- `upload_to_box_<SITE>/` and, where one was
+        sent, `token_level_data_<SITE>/`. Keeping the names means the tier of
+        each is legible without opening anything.
+        """
+        return self.output_home / "received"
 
     @property
     def sites(self) -> tuple[str, ...]:
@@ -162,9 +169,48 @@ class Paths:
         """cohort tables and the filter-count ledger"""
         return self.output_home / "cohort"
 
+    # ------------------------------------------------- the three output tiers
+    #
+    # Named so that what may leave the institution is obvious from the
+    # directory, not from reading the code:
+    #
+    #   patient_level_data_<SITE>   LOCAL ONLY. Embeddings and covariates.
+    #                               Never shared.
+    #   upload_to_box_<SITE>        TIER 1. Summary tables only -- the classic
+    #                               CLIF federated contribution.
+    #   token_level_data_<SITE>     TIER 2. Token sequences per patient, where
+    #                               the consortium permits it.
+    #
+    # Each is per site rather than one pooled directory, because a site sends
+    # its own and nothing else, and because the person doing the sending should
+    # be able to see at a glance which directory is which.
+
+    def patient_level_home_for(self, site: str) -> pathlib.Path:
+        """
+        one row per patient: embedding plus covariates -- LOCAL ONLY
+
+        Model-scoped inside the site directory, since the same cohort can be
+        embedded by several checkpoints without their outputs colliding.
+        """
+        return self.output_home / f"patient_level_data_{site}" / self.model_key
+
+    def upload_home(self, site: str) -> pathlib.Path:
+        """tier 1: the summary bundle a site uploads"""
+        return self.output_home / f"upload_to_box_{site}"
+
+    def token_home(self, site: str) -> pathlib.Path:
+        """tier 2: the token-sequence bundle, where an agreement permits it"""
+        return self.output_home / f"token_level_data_{site}"
+
     @property
     def patient_level_home(self) -> pathlib.Path:
-        """one row per patient: embedding location plus covariates"""
+        """
+        the legacy single-directory location
+
+        Kept because the pooled scripts read whatever the coordinating site
+        assembled locally, which is not per-contributor. Site-side code should
+        use `patient_level_home_for(site)`.
+        """
         return self.output_home / "patient_level_data" / self.model_key
 
     @property

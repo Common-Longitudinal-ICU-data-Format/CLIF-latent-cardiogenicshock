@@ -6,6 +6,24 @@
 #
 #   cp code/config/paths.example.yaml code/config/paths.yaml
 
+# Which side of the federation this machine is.
+#
+#   site    holds raw CLIF data and may read it. Runs 01 and 02.
+#   pooled  holds only the bundles contributing sites sent, and may NOT read
+#           raw data -- `paths.site_data` raises. Runs 03 onward.
+#
+# A coordinating institution that ALSO holds its own data is a `site` for the
+# purpose of producing its own bundle, then re-runs the pooled scripts with
+# `--role pooled`. Every script takes `--role` to override this per run, which
+# is how one machine does both.
+#
+# Under `role: pooled` an empty `sites:` block below is legitimate: a pure
+# coordinating machine holds no CLIF data at all. It still needs the model and
+# tokenizer, because it has to verify that the bundles it received were
+# produced under the weights it is about to interpret them against.
+role: site
+
+
 # Every site this machine holds CLIF-2.1 data for. The key is the label that
 # appears in plots and in the `site` column; add or remove entries freely.
 # Scatterplots cap at three sites (the colour palette's all-pairs gate).

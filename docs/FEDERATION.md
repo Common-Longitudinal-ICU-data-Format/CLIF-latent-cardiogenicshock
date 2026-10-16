@@ -19,12 +19,13 @@ Every script takes `--role`, defaulting to `role:` in `paths.yaml` and then to
 |---|---|---|
 | holds raw CLIF tables | yes | **no** |
 | `paths.site_data` | the data directories | **raises `RoleViolation`** |
-| reads | its own records | `output/export/*/` only |
-| runs | 01, 02, 08, 09 | 03, 04, 05, 06, 10, 11 |
+| reads | its own records | `output/received/*/` only |
+| runs | 01, 02 | 03, 04, 05, 06, 08, 09, 10, 11 |
 
-Verified under the pooled role: **03, 04, 05, 06, 10, 11**. **08** raises by
-design — the token-space geometry needs the sequences. **07** assembles the
-report from whatever tables the others wrote and is role-agnostic.
+Verified under the pooled role: **03, 04, 05, 06, 10, 11**. **07** assembles the
+report from whatever tables the others wrote and is role-agnostic. **08** and
+**09** need the sequences, which tier 2 supplies, so they run at the
+coordinating site too.
 
 `paths.site_data` raising is the enforcement. It is not a convention or a note
 in a README — a pooled-role run that tries to reach records stops. It raises
@@ -63,118 +64,82 @@ nothing said it could not. A denylist cannot see a column nobody thought of.
 ### What travels
 
 ```
-export/<SITE>/
-  manifest.json          written by tier 1, amended by tier 2
-  token_levels.csv       the rank -> value-range legend (no patient data)
-  counts/                tier 1: aggregate tables, small-cell suppressed
-  purity/                tier 1: per-phenotype coherence in GEM space
-  patient/               tier 2: embeddings + ordered token labels  <- needs a DUA
+output/
+  patient_level_data_<SITE>/   LOCAL ONLY -- embeddings. Never shared.
+  upload_to_box_<SITE>/        TIER 1 -- summary tables only.
+    manifest.json
+    counts/                    attrition, phenotype breakdowns, availability
+    purity/                    per-phenotype coherence in GEM space
+    token_levels.csv           the rank -> value-range legend
+  token_level_data_<SITE>/     TIER 2 -- token sequences. Needs a DUA.
+    manifest.json
+    tokens_anchor-{24h,onset}.parquet
+    token_levels.csv
 ```
+
+The directory names carry the policy. Someone about to upload a folder can see
+which one it is without reading any code, which is the point.
 
 ## The two site tiers
 
-The boundary is two scripts, not a flag on one.
-
 **Tier 1 — [`01_site_aggregate.py`](../code/01_site_aggregate.py).** Every site
-runs it. Cohort → tokenize → embed → purity → aggregate bundle, as resumable
-stages. Everything it exports is a count or an average over at least
-`--min-cell` patients.
+runs it. Cohort → tokenize → embed → purity → export, as resumable stages.
+Everything it writes to `upload_to_box_<SITE>/` is a count or an average over at
+least `--min-cell` patients. This is the classic CLIF federated contribution.
 
 It still needs the GPU, because the interesting part of tier 1 is the
 phenotype-coherence measure and that needs the embeddings. They are computed
-locally and stay locally.
+into `patient_level_data_<SITE>/` and **stay there**.
 
-**Tier 2 — [`02_site_embeddings.py`](../code/02_site_embeddings.py).** Only a
-site whose DUA permits patient-level transfer runs it. It requires tier 1 to
-have run and refuses to proceed if the tier-1 bundle was written under a
-different model or a different pseudonymisation salt — otherwise its `row_key`s
-and tier 1's counts describe the same patients under different identifiers, and
-a coordinating site would have no way to notice.
+**Tier 2 — [`02_site_tokens.py`](../code/02_site_tokens.py).** Only a site whose
+agreement permits patient-level transfer runs it. It writes
+`token_level_data_<SITE>/`: one row per patient per anchor, holding the ordered
+sequence of token ids the model read and the elapsed seconds at each one.
 
-Two scripts rather than `--counts-only` because a flag invites somebody to pass
-it without the question having been asked. A second script has to be invoked
-deliberately.
+Two scripts rather than one with a flag, because a flag invites somebody to pass
+it without the question having been asked.
 
-## Phenotype coherence, measured without sharing anything
+## What tier 2 actually contains
 
-`purity/phenotype_purity.csv` answers the question worth settling before anyone
-argues about whether embeddings may leave: **do the phenotypes correspond to
-anything the model sees?**
+The model's entire input for each patient. Not the record:
 
-For each phenotype, the share of a patient's 30 nearest neighbours in that
-site's 50-d PCA space carrying the same phenotype, against chance. Per phenotype,
-not one number per scheme — a pooled figure hides the thing worth knowing, that
-one phenotype is a real region and another is scattered through the space.
+- **No measured values.** A token is a decile bin fitted at training time, so
+  the stream says `LAB-RES//creatinine_Q7` and never `2.3 mg/dL`.
+- **No wall-clock times.** `times`, the timestamp of every event, sits in the
+  same source file and is not exported. `s_elapsed_past` carries seconds since
+  the start of the record instead — relative, and the same class of quantity as
+  `hours_admission_to_cs_onset`.
+- **No record numbers, exact age, race or ethnicity**, all of which also sit in
+  that file.
 
-Each scheme is measured **inside the population it labels**, refitting the PCA
-and the neighbour graph on that subset. This matters and was got wrong first
-time: the sepsis schemes label only the coded-septic subset, so measuring a
-Seymour-alpha patient's neighbourhood among all 9,135 patients counts four
-fifths of its neighbours as non-matching while computing chance over the
-labelled patients only. That reported every sepsis phenotype at a lift of
-0.3–0.7, which reads as anti-clustering and was two denominators. Zweck labels
-everyone, so it was unaffected — which is what made the bug look like a finding
-about the sepsis schemes specifically.
+What it *is*, stated plainly: a re-serialisation of the record. Which labs were
+drawn, in what order, how often, against what clock, is all still there. **It is
+the most disclosive artefact this pipeline produces — more so than the embedding
+derived from it**, because an embedding is a lossy projection and a sequence is
+not. It must not be described as de-identified, and it moves under a
+patient-level DUA or not at all.
 
-Consequence worth stating: the 50-d space therefore differs between schemes, so
-a Zweck lift is not measured in the same coordinates as a Seymour lift. Each is
-a statement about whether that scheme carves the embedding of its own
-population.
+## Why sequences rather than embeddings
 
-Across sites, only `lift` is comparable — it is already normalised by local
-phenotype prevalence, and the PCA is per site. Raw purity is not.
+Because the coordinating site can reproduce the embeddings from the sequences
+exactly, and cannot go the other way.
 
-**`counts/`** is aggregate and suppressed. Attrition ledger, the three phenotype
-breakdowns, shock type, token-family totals, per-variable availability.
+The model is frozen, in eval mode, under `torch.inference_mode()` — a
+deterministic function of token ids and elapsed times. Re-embedding a received
+bundle was checked against the embeddings the site computed directly, over 512
+patients: **maximum absolute difference 0.0**, bit for bit.
 
-**`patient/`** is one row per patient per anchor:
+So shipping sequences costs nothing and buys re-anchoring at a different cut
+point, reading a different layer, different pooling, and re-running everything
+after a model update without asking anyone to re-export. A fixed 1024-d vector
+answers one question; the sequence answers the ones nobody has asked yet.
 
-| | |
-|---|---|
-| `emb_0000..emb_1023` | the latent embedding |
-| `tok_*` | last pre-anchor decile **rank** per allowlisted variable |
-| `fam_n_*` | per-family token counts (~23 integers) |
-| `elig_*` | per-trial eligibility, computed site-side |
-| labels | the three phenotype systems, shock type, sepsis flag |
-| outcomes | mortality, ICU LOS, `age_band`, sex |
-| `row_key` | salted SHA-256 of the local record number |
+It is also smaller. UCMC's two token files are 25 MB against 45 MB of
+embeddings, because 783 median token ids compress better than 1,024 float32s.
 
-### What does not travel, and cannot
-
-Record numbers, every timestamp, exact age, race, ethnicity, peak troponin, raw
-measured values, and **token sequences**.
-
-That last one matters more than it looks. A full `tokens_past` sequence is a
-reconstruction of the record — it is the *most* disclosive object in this
-pipeline, more so than the embedding derived from it. So "minimal tokenized
-elements" is defined narrowly: the last bin per variable, and family counts.
-`clifcs.tokens.load_pre_anchor_tokens` raises under the pooled role.
-
-### Why ranks and not values
-
-The tokenizer bins every numeric into deciles and bakes the bin into the token
-name — `VTL//map_Q3`. The model never saw 71.4 mmHg; it saw `map_Q3`. So a rank
-is not a coarsening of what the embedding was built from, it **is** what the
-embedding was built from, and a panel coloured by rank shows the model's own
-resolution rather than an approximation of it.
-
-It also solves cross-site comparability for free. The bin edges were fitted once
-at training time and ship inside `tokenizer.yaml`, which every site must already
-hold for its embeddings to mean anything. Rank 3 is the same range of millimetres
-of mercury everywhere, with nobody exchanging a quantile.
-
-And because the edges are model metadata rather than patient data, the
-coordinating site renders the legend — "Q3 = 71–75 mmHg" — from the tokenizer
-alone. That is the labelling the consortium asked for, obtained without any site
-sending a single value.
-
-Two caveats. Ranks are **not always contiguous**: `spo2` has no Q3 or Q8 and
-`gcs_total` has only Q0, Q1, Q2 and Q9, because most charted GCS totals are 15.
-Build ramps from `token_levels.csv`, not from `range(10)`. And rank is
-**ordinal, not linear** — Q0→Q1 is a different number of mmHg from Q8→Q9, so
-ranks may be ordered and binned but never averaged.
-
----
+Re-embedding happens automatically on the first pooled run and is cached to
+`patient_level_data/reembedded_anchor-<anchor>_<SITE>.parquet`; it is a GPU job,
+so the coordinating site needs one.
 
 ## Small-cell suppression
 
@@ -210,10 +175,11 @@ python code/01_site_aggregate.py --batch-size 8 \
     --bhavani-model   <...>/bhavani_model.json
 
 # tier 2 -- ONLY with a patient-level DUA in place
-python code/02_site_embeddings.py
+python code/02_site_tokens.py
 ```
 
-Then send `output/export/<SITE>/`. Tier 1 alone is a complete, usable
+Then send `output/upload_to_box_<SITE>/`, and `output/token_level_data_<SITE>/`
+if tier 2 was run. Tier 1 alone is a complete, usable
 contribution: counts, the three phenotype breakdowns, and phenotype
 coherence in GEM space.
 
@@ -246,13 +212,21 @@ pseudonyms) so a change is at least detectable.
 
 ```bash
 # paths.yaml: role: pooled, an empty `sites:` block, model + tokenizer set
-cp -r <received>/UCMC output/export/
-python code/03_embedding_analysis.py --role pooled
-python code/11_trial_alignment.py --role pooled
+mkdir -p output/received
+cp -r <received>/upload_to_box_UCMC    output/received/
+cp -r <received>/token_level_data_UCMC output/received/   # if they sent one
+
+python code/03_embedding_analysis.py --role pooled   # re-embeds, then analyses
+python code/11_trial_alignment.py   --role pooled
 ```
 
-The coordinating machine still needs the model and tokenizer, because it has to
-check that the bundles were produced under the weights it is about to interpret
+The first pooled run **re-embeds the received sequences**, which needs a GPU and
+takes roughly fifteen minutes per anchor for 34,000 patients; the result is
+cached, so later runs are immediate.
+
+The coordinating machine needs the model and tokenizer for two reasons now: to
+re-embed at all, and to check that the bundles were produced under the weights
+it is about to interpret
 them against.
 
 Bundles are checked against each other on ingest:
@@ -282,8 +256,9 @@ published IQR: the bin edges are our cohort's quantiles, not the trial's, so
 "below their Q1" is not recoverable from "in our decile 2". These tables must be
 computed site-side and exported as aggregates if they are to survive.
 
-**Token-space geometry (08).** Needs the sequences, which do not travel. Runs
-site-side; pool its results, not its inputs. 04's *per-token* tornado goes with
+**Token-space geometry (08).** Needs the sequences — which, under tier 2, now
+travel. It runs at the coordinating site over the received bundles like
+everything else. 04's *per-token* tornado goes with
 it — the family-level comparison survives on `fam_n_*`, the per-token ranking
 does not, and 04 skips that figure rather than drawing a degraded version that
 looks like the real one.

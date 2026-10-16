@@ -42,24 +42,51 @@ import polars as pl
 from clifcs.export import contract, manifest
 
 
-def discover(export_home: pathlib.Path, logger) -> dict[str, pathlib.Path]:
-    """
-    the bundles present, keyed by the site name in their manifest
+#: the directory-name prefixes the two tiers are shipped under
+TIER_PREFIXES = {"upload_to_box_": "aggregate", "token_level_data_": "token"}
 
-    Keyed by the manifest rather than the directory name: a directory can be
-    renamed in transit, and the site that produced the data is a property of the
-    data rather than of where it was filed.
+
+def discover(received_home: pathlib.Path, logger) -> dict[str, dict[str, pathlib.Path]]:
     """
-    export_home = pathlib.Path(export_home)
-    if not export_home.is_dir():
+    the bundles present, grouped by site and then by tier
+
+    A coordinating site drops what it received in verbatim, so the directories
+    arrive named the way the sending site wrote them:
+
+        received/
+          upload_to_box_UCMC/        tier 1, summary only
+          token_level_data_UCMC/     tier 2, token sequences
+          upload_to_box_RUSH/        tier 1 only -- RUSH sent no tokens
+
+    Returns `{site: {"aggregate": path, "token": path}}`, with either tier
+    possibly absent. A site that sent only tier 1 is a first-class contributor
+    here, not a degraded one: it appears in every count table and in the
+    phenotype-coherence comparison, and in no projection.
+
+    The site name comes from each bundle's manifest rather than from the
+    directory, because a directory can be renamed in transit and the site that
+    produced the data is a property of the data.
+    """
+    received_home = pathlib.Path(received_home)
+    if not received_home.is_dir():
         raise FileNotFoundError(
-            f"{export_home} does not exist. A coordinating site reads bundles "
-            "from there; copy each contributing site's export/<SITE>/ directory "
-            "into it."
+            f"{received_home} does not exist. A coordinating site reads bundles "
+            "from there; copy each contributing site's upload_to_box_<SITE>/ "
+            "and, where it sent one, token_level_data_<SITE>/ into it."
         )
 
-    found: dict[str, pathlib.Path] = {}
-    for candidate in sorted(p for p in export_home.iterdir() if p.is_dir()):
+    found: dict[str, dict[str, pathlib.Path]] = {}
+    for candidate in sorted(p for p in received_home.iterdir() if p.is_dir()):
+        tier = next(
+            (t for prefix, t in TIER_PREFIXES.items() if candidate.name.startswith(prefix)),
+            None,
+        )
+        if tier is None:
+            logger.info(
+                f"  {candidate.name}/ is not a recognised bundle directory "
+                f"(expected one of {', '.join(TIER_PREFIXES)}<SITE>); skipping"
+            )
+            continue
         if not (candidate / manifest.MANIFEST_NAME).is_file():
             logger.warning(
                 f"  {candidate.name}/ has no {manifest.MANIFEST_NAME} and is "
@@ -68,26 +95,46 @@ def discover(export_home: pathlib.Path, logger) -> dict[str, pathlib.Path]:
             )
             continue
         site = manifest.read(candidate).get("site") or candidate.name
-        if site in found:
+        if tier in found.get(site, {}):
             raise ValueError(
-                f"two bundles both claim to be site {site!r}: "
-                f"{found[site].name} and {candidate.name}. Pooling both would "
-                "double-count every patient; keep the newer one."
+                f"two {tier} bundles both claim to be site {site!r}: "
+                f"{found[site][tier].name} and {candidate.name}. Pooling both "
+                "would double-count every patient; keep the newer one."
             )
-        found[site] = candidate
+        found.setdefault(site, {})[tier] = candidate
 
     if not found:
-        raise FileNotFoundError(f"no bundles with a manifest under {export_home}")
+        raise FileNotFoundError(f"no bundles with a manifest under {received_home}")
+
+    for site, tiers in sorted(found.items()):
+        logger.info(f"  {site}: {', '.join(sorted(tiers))}")
     return found
 
 
-def check(bundles: dict[str, pathlib.Path], paths, logger) -> dict[str, dict]:
+def manifests_of(bundles: dict[str, dict[str, pathlib.Path]]) -> dict[str, dict]:
+    """
+    one manifest per site, preferring the token bundle's where both exist
+
+    They agree on model, tokenizer and salt by construction -- `check` asserts
+    it -- so either will do; the token one is preferred because it carries the
+    row counts that the patient-level read-back is validated against.
+    """
+    out = {}
+    for site, tiers in bundles.items():
+        home = tiers.get("token") or tiers.get("aggregate")
+        out[site] = manifest.read(home)
+    return out
+
+
+def check(
+    bundles: dict[str, dict[str, pathlib.Path]], paths, logger
+) -> dict[str, dict]:
     """
     validate the bundles against each other and against the local model
 
-    Returns the manifests, keyed by site.
+    Returns one manifest per site.
     """
-    manifests = {site: manifest.read(home) for site, home in bundles.items()}
+    manifests = manifests_of(bundles)
     manifest.check_agreement(manifests, logger)
 
     # The coordinating site also holds the weights, and should confirm the
@@ -109,42 +156,64 @@ def check(bundles: dict[str, pathlib.Path], paths, logger) -> dict[str, dict]:
             "point."
         )
 
-    counts_only = [s for s, m in manifests.items() if not m.get("shares_patient_level")]
-    if counts_only:
+    aggregate_only = sorted(s for s, tiers in bundles.items() if "token" not in tiers)
+    if aggregate_only:
         logger.info(
-            f"{', '.join(counts_only)} sent counts only (no patient-level "
-            "transfer permitted), so they contribute to every count table and "
-            "to no projection"
+            f"{', '.join(aggregate_only)} sent tier 1 only (no token transfer "
+            "permitted), so they contribute to every count table and to the "
+            "phenotype-coherence comparison, and to no projection"
         )
     return manifests
 
 
 def load_patient_level(
-    bundles: dict[str, pathlib.Path], manifests: dict[str, dict], anchor: str, logger
+    bundles: dict[str, dict[str, pathlib.Path]],
+    manifests: dict[str, dict],
+    anchor: str,
+    logger,
+    paths=None,
+    batch_size=None,
 ) -> pl.DataFrame:
     """
-    the pooled patient-level frame for one anchor
+    the pooled patient-level frame for one anchor, re-embedded from tokens
 
-    Concatenated `how="diagonal_relaxed"` so a site that exported a label
-    another did not sits alongside it as null rather than failing the
-    concatenation -- but every column still has to be on the allowlist, which
-    is what stops that leniency from becoming a hole.
+    Tier 2 ships the model's input, not its output, so this runs the frozen
+    model over each received token bundle and returns embeddings. The result is
+    cached under the coordinating site's own `patient_level_data/`, keyed by
+    site and anchor, because re-embedding 34,000 sequences is a GPU job and
+    every pooled script would otherwise redo it.
+
+    The cache is invalidated on row count rather than mtime: a re-sent bundle
+    with the same number of patients and different contents is the one case
+    this misses, and the manifest's `created_utc` is what to check by hand if
+    that is suspected.
+
+    Concatenated `how="diagonal_relaxed"` so a site that sent a label another
+    did not sits alongside it as null rather than failing the concatenation --
+    but every column still has to be on the allowlist, which is what stops that
+    leniency from becoming a hole.
     """
-    frames = []
-    for site, home in sorted(bundles.items()):
-        if not manifests[site].get("shares_patient_level"):
-            continue
-        source = home / "patient" / f"embeddings_anchor-{anchor}.parquet"
-        if not source.is_file():
-            logger.warning(
-                f"  {site}: no patient file for anchor {anchor}, skipping"
-            )
-            continue
-        frame = pl.read_parquet(source)
-        contract.validate_patient_frame(frame, f"{site} bundle, anchor {anchor}")
+    from clifcs import reembed as reembed_module
 
-        # the manifest says how many rows were sent; a shorter file means a
-        # truncated copy, which is otherwise invisible
+    if paths is None:
+        raise ValueError(
+            "load_patient_level needs `paths` to re-embed received token "
+            "bundles; pass the Paths object from the calling script"
+        )
+
+    frames = []
+    for site, tiers in sorted(bundles.items()):
+        home = tiers.get("token")
+        if home is None:
+            continue
+        source = home / f"tokens_anchor-{anchor}.parquet"
+        if not source.is_file():
+            logger.warning(f"  {site}: no token file for anchor {anchor}, skipping")
+            continue
+
+        frame = pl.read_parquet(source)
+        contract.validate_token_frame(frame, f"{site} token bundle, anchor {anchor}")
+
         expected = (manifests[site].get("row_counts") or {}).get(anchor)
         if expected is not None and frame.height != int(expected):
             raise ValueError(
@@ -157,14 +226,36 @@ def load_patient_level(
                 f"{site} bundle carries site column value(s) "
                 f"{frame['site'].unique().to_list()}"
             )
-        frames.append(frame)
-        logger.info(f"  {site}: {frame.height} patients at anchor {anchor}")
+
+        cache = (
+            paths.patient_level_home
+            / f"reembedded_anchor-{anchor}_{site}.parquet"
+        )
+        if cache.is_file() and pl.read_parquet_schema(cache) and (
+            pl.scan_parquet(cache).select(pl.len()).collect().item() == frame.height
+        ):
+            logger.info(f"  {site}: reusing {cache.name} ({frame.height} patients)")
+            embeddings = pl.read_parquet(cache)
+        else:
+            embeddings = reembed_module.reembed(
+                paths, frame, site, anchor, logger, batch_size
+            )
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            embeddings.write_parquet(cache)
+            logger.info(f"  {site}: re-embedded -> {cache.name}")
+
+        # the labels travelled beside the sequences; the embeddings are what
+        # was just derived from them
+        labels = frame.drop("tokens_past", "s_elapsed_past")
+        frames.append(labels.join(embeddings, on="row_key", how="inner"))
+        logger.info(f"  {site}: {frames[-1].height} patients at anchor {anchor}")
 
     if not frames:
         raise FileNotFoundError(
-            f"no bundle carries patient-level data for anchor {anchor}. Every "
-            "contributing site sent counts only, so the projection analyses "
-            "cannot run -- the count tables and phenotype breakdowns still can."
+            f"no bundle carries token data for anchor {anchor}. Every "
+            "contributing site sent tier 1 only, so the projection analyses "
+            "cannot run -- the count tables, the phenotype breakdowns and the "
+            "phenotype-coherence comparison still can."
         )
 
     pooled = pl.concat(frames, how="diagonal_relaxed")
@@ -185,7 +276,7 @@ def load_patient_level(
 
 
 def load_counts(
-    bundles: dict[str, pathlib.Path], name: str, logger
+    bundles: dict[str, dict[str, pathlib.Path]], name: str, logger
 ) -> pl.DataFrame | None:
     """
     one aggregate table, stacked across every bundle that carries it
@@ -195,7 +286,10 @@ def load_counts(
     fact about that site, not a reason to fail.
     """
     frames = []
-    for site, home in sorted(bundles.items()):
+    for site, tiers in sorted(bundles.items()):
+        home = tiers.get("aggregate")
+        if home is None:
+            continue
         source = home / "counts" / name
         if not source.is_file():
             continue
@@ -211,7 +305,7 @@ def load_counts(
 
 
 def load_purity(
-    bundles: dict[str, pathlib.Path], logger
+    bundles: dict[str, dict[str, pathlib.Path]], logger
 ) -> pl.DataFrame | None:
     """
     the per-phenotype coherence tables, stacked across bundles
@@ -227,7 +321,10 @@ def load_purity(
     per-site statement. See `clifcs.purity` for why.
     """
     frames = []
-    for site, home in sorted(bundles.items()):
+    for site, tiers in sorted(bundles.items()):
+        home = tiers.get("aggregate")
+        if home is None:
+            continue
         source = home / "purity" / "phenotype_purity.csv"
         if not source.is_file():
             logger.info(f"  {site}: no purity table")
@@ -243,7 +340,9 @@ def load_purity(
     return pooled
 
 
-def token_legend(bundles: dict[str, pathlib.Path]) -> pl.DataFrame | None:
+def token_legend(
+    bundles: dict[str, dict[str, pathlib.Path]]
+) -> pl.DataFrame | None:
     """
     the rank -> value-range legend
 
@@ -251,11 +350,12 @@ def token_legend(bundles: dict[str, pathlib.Path]) -> pl.DataFrame | None:
     tokenizer and contains no patient data, so the first one found is taken and
     the rest are checked against it.
     """
-    legends = {
-        site: pl.read_csv(home / "token_levels.csv")
-        for site, home in sorted(bundles.items())
-        if (home / "token_levels.csv").is_file()
-    }
+    legends = {}
+    for site, tiers in sorted(bundles.items()):
+        for home in (tiers.get("aggregate"), tiers.get("token")):
+            if home is not None and (home / "token_levels.csv").is_file():
+                legends[site] = pl.read_csv(home / "token_levels.csv")
+                break
     if not legends:
         return None
     reference_site, reference = next(iter(legends.items()))

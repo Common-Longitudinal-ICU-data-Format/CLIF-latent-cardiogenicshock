@@ -69,9 +69,11 @@ def load_embeddings(paths, anchor: str) -> pl.DataFrame:
         from clifcs.export import bundles as bundle_io
 
         logger = get_logger("06_downstream_tasks")
-        found = bundle_io.discover(paths.export_home, logger)
+        found = bundle_io.discover(paths.received_home, logger)
         manifests = bundle_io.check(found, paths, logger)
-        return bundle_io.load_patient_level(found, manifests, anchor, logger)
+        return bundle_io.load_patient_level(
+            found, manifests, anchor, logger, paths=paths
+        )
 
     sources = sorted(
         p

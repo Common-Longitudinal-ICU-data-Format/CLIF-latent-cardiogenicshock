@@ -37,3 +37,11 @@ Thumbs.db
 # Anchored to the repository root: a bare `export/` would also match
 # code/clifcs/export/, which is the contract itself and belongs in git.
 /output/export/
+
+# The three output tiers, named so that what may leave is obvious from the
+# directory. None belongs in git: tier 1 because it is unreviewed until someone
+# has checked the suppression, the other two because they are patient-level.
+/output/patient_level_data_*/
+/output/upload_to_box_*/
+/output/token_level_data_*/
+/output/received/

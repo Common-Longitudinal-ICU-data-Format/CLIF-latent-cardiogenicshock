@@ -26,26 +26,52 @@ The pipeline is in three tiers, by what has to cross a site boundary.
 | Script | Tier | Does |
 |---|---|---|
 | [code/01_site_aggregate.py](code/01_site_aggregate.py) | **site, always** | Cohort → tokenize → embed → phenotype purity → **aggregate bundle**. Patient flow, cohort sizes, the three phenotype breakdowns, and how coherent each phenotype is in this site's embedding space. Nothing patient-level leaves. |
-| [code/02_site_embeddings.py](code/02_site_embeddings.py) | **site, DUA-gated** | Adds the patient-level data: embeddings, ordered token bins, trial eligibility, prediction labels. **Not de-identified.** A site may decline to run it. |
+| [code/02_site_tokens.py](code/02_site_tokens.py) | **site, DUA-gated** | The ordered **token sequence** per patient — the model's input, not its output. No measured values, no timestamps. **Not de-identified.** A site may decline to run it. |
 | [code/03_embedding_analysis.py](code/03_embedding_analysis.py) | pooled | PCA + UMAP + PaCMAP, and the scatterplots |
 | [code/04_site_effect.py](code/04_site_effect.py) | pooled | Why the sites separate, decomposed against token-family counts |
 | [code/05](code/05_site_correction.py)–[code/11](code/11_trial_alignment.py) | pooled | Site correction, downstream prediction, the report, token space, trajectories, trial alignment |
 
+Three output directories, named so that what may leave is obvious without
+reading any code:
+
+```
+output/
+  patient_level_data_<SITE>/   LOCAL ONLY -- embeddings. Never shared.
+  upload_to_box_<SITE>/        TIER 1 -- summary tables only.
+  token_level_data_<SITE>/     TIER 2 -- token sequences. Needs a DUA.
+```
+
 The split between 01 and 02 is the consortium's decision point, which is why it
 is two scripts and not a flag. **01 is what every site runs**, and it answers
-the question worth asking before anyone argues about sharing embeddings: *do the
-phenotypes correspond to anything the model sees?* It measures that locally and
-returns scalars. **02 is what needs an agreement**, and a site that does not
-have one simply never runs it.
+the question worth asking before anyone argues about sharing anything
+patient-level: *do the phenotypes correspond to anything the model sees?* It
+measures that locally and returns scalars. **02 is what needs an agreement**,
+and a site that does not have one simply never runs it.
+
+**Tier 2 ships the model's input, not its output.** The coordinating site
+re-embeds from the sequences with the frozen model, which reproduces the site's
+own vectors exactly — checked over 512 patients at a maximum absolute difference
+of **0.0**, bit for bit. That is why the embeddings stay local: they are
+derivable from what is sent, and the sequence additionally permits re-anchoring,
+reading a different layer, and re-running after a model update without asking
+anyone to re-export. It is also smaller: 25 MB of tokens against 45 MB of
+embeddings for UCMC.
+
+A token is a decile bin fitted at training time, so the stream says
+`LAB-RES//creatinine_Q7` and never `2.3 mg/dL`, and the wall-clock timestamps
+sit in the same source file and are dropped. It is still **not de-identified** —
+a sequence is a re-serialisation of the record, and is the most disclosive
+artefact here. See [docs/FEDERATION.md](docs/FEDERATION.md).
 
 ```bash
 # at a contributing site -- tier 1, which everyone runs
 python code/01_site_aggregate.py           # cohort .. embed .. purity .. export
 
 # tier 2, ONLY if your DUA permits patient-level transfer
-python code/02_site_embeddings.py
+python code/02_site_tokens.py
 
-# at the coordinating site, over the bundles received
+# at the coordinating site: drop the received bundles into output/received/,
+# then re-embed and analyse in one step
 python code/03_embedding_analysis.py --role pooled
 ```
 
@@ -70,7 +96,7 @@ The measure tier 1 exists to report, and the one that needs no patient-level
 transfer: for each phenotype, the share of a patient's 30 nearest neighbours (in
 that site's own 50-d PCA space) carrying the same phenotype, against the share
 chance would give. Computed per site, reported **per phenotype**, and sent as
-scalars — `output/export/<SITE>/purity/phenotype_purity.csv`.
+scalars — `output/upload_to_box_<SITE>/purity/phenotype_purity.csv`.
 
 Zweck's phenotypes are genuinely regions of the space, and the ordering
 replicates independently at both sites:

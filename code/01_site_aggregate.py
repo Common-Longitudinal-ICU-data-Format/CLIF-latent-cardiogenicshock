@@ -522,13 +522,12 @@ def stage_embed(paths, sites, logger, force: bool, batch_size=None) -> dict:
         ]
     )
 
-    paths.patient_level_home.mkdir(parents=True, exist_ok=True)
     for anchor in ANCHORS:
         for site in sites:
-            out = (
-                paths.patient_level_home
-                / f"embeddings_anchor-{anchor}_{site}.parquet"
-            )
+            # patient_level_data_<SITE>/ is LOCAL ONLY -- these never leave
+            local = paths.patient_level_home_for(site)
+            local.mkdir(parents=True, exist_ok=True)
+            out = local / f"embeddings_anchor-{anchor}.parquet"
             if out.is_file() and not force:
                 logger.info(f"[{anchor}/{site}] {out.name} exists; skipping")
                 continue
@@ -584,8 +583,8 @@ def stage_purity(paths, sites, logger, min_cell: int) -> pl.DataFrame:
     for anchor in ANCHORS:
         for site in sites:
             source = (
-                paths.patient_level_home
-                / f"embeddings_anchor-{anchor}_{site}.parquet"
+                paths.patient_level_home_for(site)
+                / f"embeddings_anchor-{anchor}.parquet"
             )
             if not source.is_file():
                 logger.warning(
@@ -625,7 +624,7 @@ def stage_export(paths, sites, logger, min_cell: int, purity) -> None:
     )
 
     for site in sites:
-        bundle = paths.export_home / site
+        bundle = paths.upload_home(site)
         if bundle.exists():
             shutil.rmtree(bundle)
         logger.info(f"=== {site} -> {bundle}")
@@ -641,9 +640,10 @@ def stage_export(paths, sites, logger, min_cell: int, purity) -> None:
         )
 
     logger.info(
-        "01 done. output/export/<SITE>/ holds counts and purity only -- "
-        "aggregate, suppressed, and safe to send. Run 02_site_embeddings.py "
-        "only if your DUA permits patient-level transfer."
+        "01 done. output/upload_to_box_<SITE>/ holds summary tables only -- "
+        "aggregate, suppressed, and safe to upload. The embeddings stay in "
+        "output/patient_level_data_<SITE>/ and are never shared. Run "
+        "02_site_tokens.py only if your consortium permits token transfer."
     )
 
 

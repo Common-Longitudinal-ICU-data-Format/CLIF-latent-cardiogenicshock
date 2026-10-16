@@ -62,7 +62,9 @@ def load_pre_anchor_tokens(paths, site: str, anchor: str) -> pl.DataFrame:
         f = paths.anchored(site, anchor) / f"{split}_for_inference.parquet"
         if f.is_file():
             frames.append(
-                pl.read_parquet(f, columns=["subject_id", "tokens_past", "s_elapsed_past"])
+                pl.read_parquet(
+                    f, columns=["subject_id", "tokens_past", "s_elapsed_past"]
+                ).with_columns(split=pl.lit(split))
             )
     if not frames:
         raise FileNotFoundError(
