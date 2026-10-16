@@ -1,56 +1,50 @@
 #!/usr/bin/env python3
 
 """
-12 -- assemble the bundle a site sends to the coordinating site
+writing the two tiers of a site bundle
 
-This is the **only** script that writes anything intended to leave an
-institution, and the boundary is deliberately narrow: it reads the local cohort
-table, the local embeddings and the local token streams, and writes a directory
-whose every column has been checked against `clifcs.export.contract`.
+Split in two because the consortium treats them differently, and the split is
+the contract rather than a flag on one command:
 
-What goes out
--------------
+**Tier 1, the aggregate bundle** (`write_aggregate`) -- patient flow, cohort
+sizes, the phenotype breakdowns, and how coherent each phenotype is in this
+site's embedding space. All of it is counts and averages over at least
+`min_cell` patients. Every site sends this.
+
+**Tier 2, the patient bundle** (`write_patient`) -- one row per patient: the
+1024-d embedding, the ordered token bins, the trial eligibility booleans and
+the prediction labels. This is **patient-level data and is not
+de-identified**; an embedding is a learned function of the patient's whole
+recorded history. It moves under the same IRB approval and DUA as patient-level
+clinical data, or it does not move. A site whose agreement does not permit it
+simply never runs tier 2, and the pooled side degrades rather than failing.
+
+Both write into one bundle directory so a coordinating site sees a single
+place per contributor:
+
     export/<SITE>/
-      manifest.json         schema version, code/model/tokenizer hashes
-      counts/               aggregate tables, small-cell suppressed
-      patient/              embeddings and the minimal ordered token labels
-      token_levels.csv      the legend, derived from the tokenizer alone
+      manifest.json          written by tier 1, amended by tier 2
+      token_levels.csv       the legend, derived from the tokenizer alone
+      counts/                tier 1: aggregate tables, suppressed
+      purity/                tier 1: per-phenotype coherence in GEM space
+      patient/               tier 2: embeddings and ordered token labels
 
-`counts/` is aggregate and travels under the consortium's ordinary terms.
-`patient/` is **patient-level data and is not de-identified** -- a 1024-d
-embedding is a learned function of the patient's whole recorded history. It
-moves under the same IRB approval and DUA as patient-level clinical data, or it
-does not move; `--counts-only` produces a bundle without it for a site whose
-agreement does not permit the transfer.
-
-What does not go out, and cannot
---------------------------------
-Raw records, timestamps, record numbers, ages in years, race and ethnicity, the
-token *sequences*, and anything else not named in the contract. The check is an
-allowlist and it raises rather than dropping, so a column added to the cohort
-frame upstream stops this script instead of travelling silently.
-
-Usage
-    python code/12_export.py
-    python code/12_export.py --counts-only        # no patient-level transfer
-    python code/12_export.py --site UCMC --min-cell 20
+What does not go out, and cannot: raw records, timestamps, record numbers, ages
+in years, race and ethnicity, the token *sequences*, and anything else not named
+in `clifcs.export.contract`. The check is an allowlist and it raises rather than
+dropping, so a column added to the cohort frame upstream stops the export
+instead of travelling silently.
 """
 
 from __future__ import annotations
 
-import argparse
 import hashlib
 import pathlib
 import secrets
-import shutil
-import sys
-
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 import polars as pl
 from omegaconf import OmegaConf
 
-from clifcs import ANCHORS, get_logger, load_paths
 from clifcs.config import CONFIG_HOME
 from clifcs.export import contract, manifest, suppress
 from clifcs.tokenlabels import coverage, last_pre_anchor_ranks, levels
@@ -154,7 +148,8 @@ def build_patient_frame(
     source = paths.patient_level_home / f"embeddings_anchor-{anchor}_{site}.parquet"
     if not source.is_file():
         raise FileNotFoundError(
-            f"{source} not found; run 02_model_embedding.py for {site}/{anchor} first"
+            f"{source} not found; run 01_site_aggregate.py --stage embed for "
+            f"{site}/{anchor} first"
         )
     embeddings = pl.read_parquet(source)
 
@@ -306,144 +301,150 @@ def write_counts(paths, bundle: pathlib.Path, min_cell: int, logger) -> None:
         table.write_csv(out / name)
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--anchor", choices=ANCHORS, default=None, help="one anchor only")
-    parser.add_argument("--site", default=None, help="one site only")
-    parser.add_argument(
-        "--counts-only",
-        action="store_true",
-        help="omit patient/ entirely -- for a site whose DUA does not permit "
-        "patient-level transfer. The pooled side degrades rather than failing.",
-    )
-    parser.add_argument(
-        "--min-cell",
-        type=int,
-        default=suppress.DEFAULT_MIN_CELL,
-        help=f"minimum publishable cell size (default {suppress.DEFAULT_MIN_CELL})",
-    )
-    parser.add_argument(
-        "--out",
-        default=None,
-        help="where to write the bundle (default output/export/<SITE>)",
-    )
-    parser.add_argument(
-        "--no-eligibility",
-        action="store_true",
-        help="skip the trial eligibility columns. They need the raw CLIF "
-        "tables, so this is the flag to reach for when those are slow or when "
-        "11 is not part of the analysis.",
-    )
-    parser.add_argument("--model", default=None, help="which model's embeddings")
-    args = parser.parse_args()
+# ============================================================ tier 1: aggregate
 
-    paths = load_paths(model=args.model)
-    logger = get_logger("12_export", paths.log_home / "12_export.log")
-    logger.info(contract.describe())
 
-    if args.site and args.site not in paths.sites:
-        parser.error(f"--site {args.site} is not configured; have {paths.sites}")
-    sites = (args.site,) if args.site else paths.sites
-    anchors = (args.anchor,) if args.anchor else ANCHORS
+def write_aggregate(
+    paths,
+    site: str,
+    bundle: pathlib.Path,
+    purity: pl.DataFrame | None,
+    salt: str,
+    min_cell: int,
+    embedding_dim: int,
+    logger,
+) -> pathlib.Path:
+    """
+    the bundle every site sends: counts, phenotype breakdowns, purity
 
-    cohort_file = paths.cohort_home / "cohort.parquet"
-    if not cohort_file.is_file():
-        parser.error(f"{cohort_file} not found; run 01_data_processing.py first")
-    cohort = pl.read_parquet(cohort_file)
-    if "sepsis_cohort" not in cohort.columns:
+    Writes the manifest with `shares_patient_level: false`. Tier 2 amends it if
+    and when it runs, so the presence of patient data is recorded in one place
+    rather than inferred from a directory listing.
+    """
+    bundle.mkdir(parents=True, exist_ok=True)
+
+    logger.info(" counts/")
+    write_counts(paths, bundle, min_cell, logger)
+
+    if purity is not None and purity.height:
+        home = bundle / "purity"
+        home.mkdir(parents=True, exist_ok=True)
+        contract.validate_counts_frame(purity, "phenotype purity", min_cell)
+        purity.write_csv(home / "phenotype_purity.csv")
+        logger.info(
+            f" purity/phenotype_purity.csv: {purity.height} rows "
+            f"({purity['scheme'].n_unique()} schemes)"
+        )
+    else:
         logger.warning(
-            "the cohort table predates the sepsis phenotypes; re-run "
-            "01_data_processing.py --stage cohort to populate them"
+            " purity/ omitted: no embeddings available, so phenotype coherence "
+            "in GEM space could not be measured. Run the embed stage first."
         )
-        cohort = cohort.with_columns(sepsis_cohort=pl.lit(None, dtype=pl.Boolean))
 
-    salt = load_salt(paths.id_salt_file, logger)
-    embedding_dim = sum(
-        1 for c in pl.read_parquet_schema(
-            paths.patient_level_home
-            / f"embeddings_anchor-{anchors[0]}_{sites[0]}.parquet"
+    # the legend, from the tokenizer alone -- no patient data, and identical at
+    # every site, so it travels for the reader's convenience
+    levels(str(paths.tokenizer_yaml)).write_csv(bundle / "token_levels.csv")
+
+    manifest.write(
+        manifest.build(
+            site=site,
+            salt=salt,
+            model_key=paths.model_key,
+            model_home=paths.model_home,
+            tokenizer_yaml=paths.tokenizer_yaml,
+            anchors=tuple(),
+            row_counts={},
+            min_cell=min_cell,
+            embedding_dim=embedding_dim,
+            shares_patient_level=False,
+        ),
+        bundle,
+    )
+    logger.info(f" manifest.json written; {site} aggregate bundle complete")
+    return bundle
+
+
+# ============================================================== tier 2: patient
+
+
+def write_patient(
+    paths,
+    cohort: pl.DataFrame,
+    site: str,
+    bundle: pathlib.Path,
+    anchors: tuple[str, ...],
+    salt: str,
+    min_cell: int,
+    embedding_dim: int,
+    logger,
+    *,
+    with_eligibility: bool = True,
+) -> pathlib.Path:
+    """
+    the DUA-gated bundle: embeddings and the minimal ordered token labels
+
+    Requires tier 1 to have run, and checks that it ran under the same model and
+    the same salt. Not a formality: a tier-2 export whose `row_key`s were
+    generated from a different salt cannot be joined to the tier-1 counts, and a
+    coordinating site would have no way to notice.
+    """
+    existing = bundle / manifest.MANIFEST_NAME
+    if not existing.is_file():
+        raise FileNotFoundError(
+            f"{existing} not found. Tier 1 (the aggregate bundle) has to be "
+            "written first -- it is what every site sends, and tier 2 only adds "
+            "patient-level data to it. Run 01_site_aggregate.py."
         )
-        if contract.EMBEDDING_PATTERN.match(c)
-    ) if not args.counts_only else 0
-
-    for site in sites:
-        bundle = pathlib.Path(
-            args.out or (paths.output_home / "export" / site)
+    prior = manifest.read(bundle)
+    if prior.get("salt_fingerprint") != manifest.salt_fingerprint(salt):
+        raise ValueError(
+            f"the tier-1 bundle in {bundle} was written with a different "
+            "pseudonymisation salt, so its counts and these row_keys describe "
+            "the same patients under different identifiers. Re-run tier 1."
         )
-        if bundle.exists():
-            shutil.rmtree(bundle)
-        bundle.mkdir(parents=True)
-        logger.info(f"=== {site} -> {bundle}")
-
-        # ------------------------------------------------------------ counts
-        logger.info(" counts/")
-        write_counts(paths, bundle, args.min_cell, logger)
-
-        # ----------------------------------------------------------- patient
-        row_counts: dict[str, int] = {}
-        if args.counts_only:
-            logger.warning(
-                " patient/ omitted (--counts-only): this bundle carries no "
-                "embeddings, so this site contributes to every count table and "
-                "to no projection"
-            )
-        else:
-            patient_home = bundle / "patient"
-            patient_home.mkdir()
-
-            # computed once per site, not once per anchor: eligibility is a
-            # property of the patient, which is the same argument 11 makes for
-            # not recomputing it per anchor
-            eligibility = None
-            if not args.no_eligibility:
-                eligibility = trial_eligibility(paths, cohort, site, logger)
-
-            coverages = []
-            for anchor in anchors:
-                frame, token_coverage = build_patient_frame(
-                    paths, cohort, site, anchor, salt, logger, eligibility
-                )
-                target = patient_home / f"embeddings_anchor-{anchor}.parquet"
-                frame.write_parquet(target)
-                row_counts[anchor] = frame.height
-                coverages.append(token_coverage)
-                logger.info(
-                    f"  {target.name}: {frame.height} rows x {len(frame.columns)} "
-                    f"columns ({embedding_dim}-d embedding + "
-                    f"{len(frame.columns) - embedding_dim} labels)"
-                )
-            # per-variable charting coverage, which is what catches a site
-            # missing a variable entirely -- the figure would otherwise look
-            # fine, coloured by nulls
-            pl.concat(coverages).write_csv(bundle / "counts" / "token_coverage.csv")
-
-        # the legend, derived from the tokenizer alone -- no patient data, and
-        # identical at every site, so it travels for the reader's convenience
-        levels(str(paths.tokenizer_yaml)).write_csv(bundle / "token_levels.csv")
-
-        manifest.write(
-            manifest.build(
-                site=site,
-                salt=salt,
-                model_key=paths.model_key,
-                model_home=paths.model_home,
-                tokenizer_yaml=paths.tokenizer_yaml,
-                anchors=anchors,
-                row_counts=row_counts,
-                min_cell=args.min_cell,
-                embedding_dim=embedding_dim,
-                shares_patient_level=not args.counts_only,
-            ),
-            bundle,
+    if prior.get("model", {}).get("key") != paths.model_key:
+        raise ValueError(
+            f"the tier-1 bundle was written for model "
+            f"{prior.get('model', {}).get('key')!r}, not {paths.model_key!r}"
         )
-        logger.info(f" manifest.json written; {site} bundle complete")
 
-    logger.info(
-        "12 done. The patient/ directory is NOT de-identified -- move it under "
-        "the same IRB approval and DUA you would use for patient-level clinical "
-        "data. counts/ is aggregate and suppressed."
+    patient_home = bundle / "patient"
+    patient_home.mkdir(parents=True, exist_ok=True)
+
+    # computed once per site, not once per anchor: eligibility is a property of
+    # the patient, which is the same argument 11 makes for not recomputing it
+    eligibility = (
+        trial_eligibility(paths, cohort, site, logger) if with_eligibility else None
     )
 
+    row_counts: dict[str, int] = {}
+    coverages = []
+    for anchor in anchors:
+        frame, token_coverage = build_patient_frame(
+            paths, cohort, site, anchor, salt, logger, eligibility
+        )
+        target = patient_home / f"embeddings_anchor-{anchor}.parquet"
+        frame.write_parquet(target)
+        row_counts[anchor] = frame.height
+        coverages.append(token_coverage)
+        logger.info(
+            f"  {target.name}: {frame.height} rows x {len(frame.columns)} "
+            f"columns ({embedding_dim}-d embedding + "
+            f"{len(frame.columns) - embedding_dim} labels)"
+        )
 
-if __name__ == "__main__":
-    main()
+    # per-variable charting coverage, which is what catches a site missing a
+    # variable entirely -- the figure would otherwise look fine, coloured by
+    # nulls. Lands in counts/ because it is aggregate.
+    if coverages:
+        (bundle / "counts").mkdir(parents=True, exist_ok=True)
+        pl.concat(coverages).write_csv(bundle / "counts" / "token_coverage.csv")
+
+    amended = dict(prior)
+    amended["shares_patient_level"] = True
+    amended["anchors"] = list(anchors)
+    amended["row_counts"] = row_counts
+    amended["model"]["embedding_dim"] = embedding_dim
+    manifest.write(amended, bundle)
+    logger.info(f" manifest.json amended; {site} patient bundle complete")
+    return bundle

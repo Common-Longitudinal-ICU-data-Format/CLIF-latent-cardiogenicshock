@@ -628,7 +628,7 @@ def analyse(paths, anchor: str, cohort_cfg, trial_cfg, args, logger) -> None:
         if not present:
             raise KeyError(
                 "no elig_* columns in the pooled frame. Trial eligibility is "
-                "computed site-side by 12_export.py; re-export the bundles "
+                "computed site-side by 02_site_embeddings.py; re-export the bundles "
                 "without --no-eligibility."
             )
         missing = [f"elig_{t.key}" for t in trials if f"elig_{t.key}" not in present]

@@ -20,7 +20,7 @@ Every script takes `--role`, defaulting to `role:` in `paths.yaml` and then to
 | holds raw CLIF tables | yes | **no** |
 | `paths.site_data` | the data directories | **raises `RoleViolation`** |
 | reads | its own records | `output/export/*/` only |
-| runs | 01, 02, 08, 09, 12 | 03, 04, 05, 06, 10, 11 |
+| runs | 01, 02, 08, 09 | 03, 04, 05, 06, 10, 11 |
 
 Verified under the pooled role: **03, 04, 05, 06, 10, 11**. **08** raises by
 design — the token-space geometry needs the sequences. **07** assembles the
@@ -64,11 +64,65 @@ nothing said it could not. A denylist cannot see a column nobody thought of.
 
 ```
 export/<SITE>/
-  manifest.json          schema version, code/model/tokenizer hashes, salt fingerprint
+  manifest.json          written by tier 1, amended by tier 2
   token_levels.csv       the rank -> value-range legend (no patient data)
-  counts/                aggregate tables, small-cell suppressed
-  patient/               embeddings + ordered token labels   <- needs a DUA
+  counts/                tier 1: aggregate tables, small-cell suppressed
+  purity/                tier 1: per-phenotype coherence in GEM space
+  patient/               tier 2: embeddings + ordered token labels  <- needs a DUA
 ```
+
+## The two site tiers
+
+The boundary is two scripts, not a flag on one.
+
+**Tier 1 — [`01_site_aggregate.py`](../code/01_site_aggregate.py).** Every site
+runs it. Cohort → tokenize → embed → purity → aggregate bundle, as resumable
+stages. Everything it exports is a count or an average over at least
+`--min-cell` patients.
+
+It still needs the GPU, because the interesting part of tier 1 is the
+phenotype-coherence measure and that needs the embeddings. They are computed
+locally and stay locally.
+
+**Tier 2 — [`02_site_embeddings.py`](../code/02_site_embeddings.py).** Only a
+site whose DUA permits patient-level transfer runs it. It requires tier 1 to
+have run and refuses to proceed if the tier-1 bundle was written under a
+different model or a different pseudonymisation salt — otherwise its `row_key`s
+and tier 1's counts describe the same patients under different identifiers, and
+a coordinating site would have no way to notice.
+
+Two scripts rather than `--counts-only` because a flag invites somebody to pass
+it without the question having been asked. A second script has to be invoked
+deliberately.
+
+## Phenotype coherence, measured without sharing anything
+
+`purity/phenotype_purity.csv` answers the question worth settling before anyone
+argues about whether embeddings may leave: **do the phenotypes correspond to
+anything the model sees?**
+
+For each phenotype, the share of a patient's 30 nearest neighbours in that
+site's 50-d PCA space carrying the same phenotype, against chance. Per phenotype,
+not one number per scheme — a pooled figure hides the thing worth knowing, that
+one phenotype is a real region and another is scattered through the space.
+
+Each scheme is measured **inside the population it labels**, refitting the PCA
+and the neighbour graph on that subset. This matters and was got wrong first
+time: the sepsis schemes label only the coded-septic subset, so measuring a
+Seymour-alpha patient's neighbourhood among all 9,135 patients counts four
+fifths of its neighbours as non-matching while computing chance over the
+labelled patients only. That reported every sepsis phenotype at a lift of
+0.3–0.7, which reads as anti-clustering and was two denominators. Zweck labels
+everyone, so it was unaffected — which is what made the bug look like a finding
+about the sepsis schemes specifically.
+
+Consequence worth stating: the 50-d space therefore differs between schemes, so
+a Zweck lift is not measured in the same coordinates as a Seymour lift. Each is
+a statement about whether that scheme carves the embedding of its own
+population.
+
+Across sites, only `lift` is comparable — it is already normalised by local
+phenotype prevalence, and the PCA is per site. Raw purity is not.
 
 **`counts/`** is aggregate and suppressed. Attrition ledger, the three phenotype
 breakdowns, shock type, token-family totals, per-variable availability.
@@ -149,14 +203,19 @@ with "between one and ten were" would hide it.
 # once
 cp code/config/paths.example.yaml code/config/paths.yaml   # set role: site
 
-python code/01_data_processing.py --phenotype-model <...>/phenotype_model.json \
-    --seymour-model <...>/seymour_model.json \
-    --bhavani-model <...>/bhavani_model.json
-python code/02_model_embedding.py --batch-size 8
-python code/12_export.py
+# tier 1 -- every site runs this
+python code/01_site_aggregate.py --batch-size 8 \
+    --phenotype-model <...>/phenotype_model.json \
+    --seymour-model   <...>/seymour_model.json \
+    --bhavani-model   <...>/bhavani_model.json
+
+# tier 2 -- ONLY with a patient-level DUA in place
+python code/02_site_embeddings.py
 ```
 
-Then send `output/export/<SITE>/`.
+Then send `output/export/<SITE>/`. Tier 1 alone is a complete, usable
+contribution: counts, the three phenotype breakdowns, and phenotype
+coherence in GEM space.
 
 **The three `--*-model` flags are required at a contributing site.** Without
 them the site refits its own clusters and "phenotype II", "beta" and "group A"
@@ -166,14 +225,10 @@ derivation cohort's moments and the centroids — all four, because a site that
 standardised against its own moments would re-centre the space and move patients
 between phenotypes without anything clinical changing.
 
-If your DUA does not permit patient-level transfer:
-
-```bash
-python code/12_export.py --counts-only
-```
-
-The bundle then carries `counts/` only. The pooled side degrades rather than
-failing: that site contributes to every count table and to no projection.
+If your DUA does not permit patient-level transfer, do not run tier 2. The
+bundle then carries `counts/` and `purity/` only, and the pooled side degrades
+rather than failing: that site contributes to every count table, to the
+phenotype-coherence comparison, and to no projection.
 
 ### Back up `.id_salt`
 

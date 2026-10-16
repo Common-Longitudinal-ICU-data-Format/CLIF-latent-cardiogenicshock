@@ -150,7 +150,8 @@ def stage_tokens_pooled(
     if not present_cols:
         raise KeyError(
             "the pooled frame carries no fam_n_* columns, so the token-family "
-            "comparison cannot run. Re-export the bundles with 12_export.py."
+            "comparison cannot run. Re-export the bundles with "
+            "02_site_embeddings.py."
         )
 
     per_site = (
@@ -349,7 +350,7 @@ def _token_statistics(
         raise KeyError(
             f"the pooled frame is missing {len(missing)} token-family count "
             f"column(s), e.g. {missing[:3]}. They are produced by "
-            "12_export.py; re-export the bundles with the current site "
+            "02_site_embeddings.py; re-export the bundles with the current site "
             "pipeline."
         )
     counts = frame.select(wanted).fill_null(0).to_numpy().astype(float)

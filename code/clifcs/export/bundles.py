@@ -4,7 +4,8 @@
 reading what the sites sent
 
 The coordinating site's view of the world is a directory of bundles, one per
-contributing site, each produced by `12_export.py`. This module discovers them,
+contributing site, written by `01_site_aggregate.py` and, where an agreement
+permits it, extended by `02_site_embeddings.py`. This module discovers them,
 checks them against the contract and against each other, and assembles the
 pooled frame the numbered analyses read.
 
@@ -207,6 +208,39 @@ def load_counts(
         logger.info(f"  {name}: no bundle carries it")
         return None
     return pl.concat(frames, how="diagonal_relaxed")
+
+
+def load_purity(
+    bundles: dict[str, pathlib.Path], logger
+) -> pl.DataFrame | None:
+    """
+    the per-phenotype coherence tables, stacked across bundles
+
+    These come from tier 1, so every bundle has them -- including one from a
+    site that sent no patient-level data at all. That is the point of measuring
+    purity site-side: a site that cannot share embeddings can still say whether
+    the phenotypes mean anything in its own embedding space.
+
+    Not pooled into a single number. Each site fitted its PCA on its own
+    patients, so the spaces differ; `lift` is the comparable column because it
+    is already normalised by local phenotype prevalence, and even that is a
+    per-site statement. See `clifcs.purity` for why.
+    """
+    frames = []
+    for site, home in sorted(bundles.items()):
+        source = home / "purity" / "phenotype_purity.csv"
+        if not source.is_file():
+            logger.info(f"  {site}: no purity table")
+            continue
+        frames.append(pl.read_csv(source))
+    if not frames:
+        return None
+    pooled = pl.concat(frames, how="diagonal_relaxed")
+    logger.info(
+        f"phenotype purity from {pooled['site'].n_unique()} site(s), "
+        f"{pooled['scheme'].n_unique()} scheme(s)"
+    )
+    return pooled
 
 
 def token_legend(bundles: dict[str, pathlib.Path]) -> pl.DataFrame | None:

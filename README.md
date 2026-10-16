@@ -21,20 +21,29 @@ which filtering to one of them would make unanswerable.
 
 ## Pipeline
 
-| Script | Role | Does |
+The pipeline is in three tiers, by what has to cross a site boundary.
+
+| Script | Tier | Does |
 |---|---|---|
-| [code/01_data_processing.py](code/01_data_processing.py) | site | Cohort, filter ledger, outcomes, three phenotype systems; then CLIF subset → clifpy derived tables → cocoa collate/tokenize/winnow |
-| [code/02_model_embedding.py](code/02_model_embedding.py) | site | Reports model structure and embedding dimension; runs `cotorra.Extractor`; writes `output/patient_level_data/` |
-| [code/12_export.py](code/12_export.py) | site | Assembles the bundle a site sends: counts, embeddings, ordered token labels. **The only script that writes anything meant to leave an institution.** |
+| [code/01_site_aggregate.py](code/01_site_aggregate.py) | **site, always** | Cohort → tokenize → embed → phenotype purity → **aggregate bundle**. Patient flow, cohort sizes, the three phenotype breakdowns, and how coherent each phenotype is in this site's embedding space. Nothing patient-level leaves. |
+| [code/02_site_embeddings.py](code/02_site_embeddings.py) | **site, DUA-gated** | Adds the patient-level data: embeddings, ordered token bins, trial eligibility, prediction labels. **Not de-identified.** A site may decline to run it. |
 | [code/03_embedding_analysis.py](code/03_embedding_analysis.py) | pooled | PCA + UMAP + PaCMAP, and the scatterplots |
 | [code/04_site_effect.py](code/04_site_effect.py) | pooled | Why the sites separate, decomposed against token-family counts |
-| [code/11_trial_alignment.py](code/11_trial_alignment.py) | pooled | Where the guideline trials' populations sit, who falls inside them, and who falls inside none |
+| [code/05](code/05_site_correction.py)–[code/11](code/11_trial_alignment.py) | pooled | Site correction, downstream prediction, the report, token space, trajectories, trial alignment |
+
+The split between 01 and 02 is the consortium's decision point, which is why it
+is two scripts and not a flag. **01 is what every site runs**, and it answers
+the question worth asking before anyone argues about sharing embeddings: *do the
+phenotypes correspond to anything the model sees?* It measures that locally and
+returns scalars. **02 is what needs an agreement**, and a site that does not
+have one simply never runs it.
 
 ```bash
-# at a contributing site
-python code/01_data_processing.py          # all six stages
-python code/02_model_embedding.py
-python code/12_export.py                   # -> output/export/<SITE>/
+# at a contributing site -- tier 1, which everyone runs
+python code/01_site_aggregate.py           # cohort .. embed .. purity .. export
+
+# tier 2, ONLY if your DUA permits patient-level transfer
+python code/02_site_embeddings.py
 
 # at the coordinating site, over the bundles received
 python code/03_embedding_analysis.py --role pooled
@@ -54,6 +63,37 @@ python code/clifcs/export/contract.py
 `01` is staged and resumable — `--stage {cohort,subset,derive,collate,tokenize,winnow}`,
 or `--from-stage <name>`; add `--force` to redo work whose outputs already exist.
 The two slow stages are `derive` (clifpy) and `collate` (cocoa).
+
+## Phenotype coherence in the embedding space
+
+The measure tier 1 exists to report, and the one that needs no patient-level
+transfer: for each phenotype, the share of a patient's 30 nearest neighbours (in
+that site's own 50-d PCA space) carrying the same phenotype, against the share
+chance would give. Computed per site, reported **per phenotype**, and sent as
+scalars — `output/export/<SITE>/purity/phenotype_purity.csv`.
+
+Zweck's phenotypes are genuinely regions of the space, and the ordering
+replicates independently at both sites:
+
+| Zweck phenotype | UCMC lift | NU lift |
+|---|---|---|
+| III cardiometabolic | **2.41x** | **3.34x** |
+| II cardiorenal | 1.78x | 2.07x |
+| I non-congested | 1.13x | 1.09x |
+
+I non-congested is 71% of the cohort, so it has little room above chance by
+construction; III is a tenth of it and still holds three to five times the
+expected share of like neighbours.
+
+The sepsis phenotypes are weaker and sit in a narrow band (Seymour 1.14–1.36,
+Bhavani 1.24–1.47 at UCMC). **Seymour γ is the lowest of its four**, which is
+what the missing CRP and ESR predict — they are two of the three markers Table 2
+separates γ by. The coded mechanism beats both schemes: cardiogenic shock runs
+2.23x at UCMC and 2.86x at NU.
+
+Each site fits its own PCA, so the 50 dimensions differ between sites and only
+`lift` is comparable — it is already normalised by local phenotype prevalence.
+Raw purity is not. See [code/clifcs/purity.py](code/clifcs/purity.py).
 
 ## Cohort definition
 

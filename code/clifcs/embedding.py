@@ -1,33 +1,24 @@
 #!/usr/bin/env python3
 
 """
-02 -- embed the cohort with the frozen foundation model
+running the frozen foundation model over a site's tokenized timelines
 
-Reports the model's structure and embedding dimension, then runs
-`cotorra.Extractor` over each site x anchor and writes one row per patient to
-output/patient_level_data/.
+Was `02_model_embedding.py`; folded into the site aggregate script because the
+phenotype-purity measure it reports needs the embeddings, so a site that can
+only send aggregates still has to compute them. The embeddings themselves stay
+on the machine unless `02_site_embeddings.py` is run as well.
 
 The model is used strictly as a frozen encoder: weights are loaded in eval mode
 under torch.inference_mode() and never updated. The representation is the final
 hidden state at the last token before the anchor -- i.e. the model's state after
 reading everything known about that patient up to that point.
-
-Usage
-    python code/02_model_embedding.py
-    python code/02_model_embedding.py --anchor 24h --batch-size 4
 """
 
 from __future__ import annotations
 
-import argparse
-import hashlib
 import json
 import pathlib
-import secrets
-import sys
 import time
-
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 import numpy as np
 import polars as pl
@@ -35,7 +26,6 @@ import torch
 from omegaconf import OmegaConf
 from transformers import AutoConfig, AutoModelForCausalLM
 
-from clifcs import ANCHORS, get_logger, load_paths
 from clifcs.config import CONFIG_HOME
 
 SPLITS = ("train", "tuning", "held_out")
@@ -299,198 +289,3 @@ def to_embedding_frame(frame: pl.DataFrame, dim: int) -> pl.DataFrame:
         )
     embedding = pl.from_numpy(matrix, schema=[f"emb_{i:04d}" for i in range(dim)])
     return frame.drop("features").hstack(embedding)
-
-
-# ============================================================ sharing export
-
-
-#: columns stripped from a share-safe export, and why
-_DIRECT_IDENTIFIERS = ("patient_id", "hospitalization_id")
-_DATE_COLUMNS = ("cs_onset_dttm",)
-
-
-def write_share_safe(
-    frame: pl.DataFrame, source: pathlib.Path, salt_file: pathlib.Path, logger
-) -> pathlib.Path:
-    """
-    write a copy with direct identifiers and raw dates removed
-
-    This reduces what travels; it does not make the file anonymous, and it is
-    not a substitute for a DUA or IRB approval:
-
-      * local record numbers are replaced by a salted hash, so they cannot be
-        reversed without the salt -- which stays on the sending machine;
-      * `cs_onset_dttm` is dropped, because a timestamp finer than a year is a
-        HIPAA identifier. The relative `hours_admission_to_cs_onset` is kept,
-        which is what the analysis actually uses;
-      * ages over 89 are capped, per Safe Harbor.
-
-    The 1024-d embedding itself is NOT a de-identified summary. It is a
-    learned function of the patient's whole recorded history, and no one has
-    shown such representations are robust to re-identification attack. Treat
-    the export as limited-data-set-grade at best, and move it under the same
-    agreement you would use for patient-level clinical data.
-    """
-    salt_file.parent.mkdir(parents=True, exist_ok=True)
-    if not salt_file.is_file():
-        salt_file.write_text(secrets.token_hex(32), encoding="utf-8")
-        logger.info(
-            f"created {salt_file.name}; it stays on this machine and is what "
-            "lets you re-link a shared pseudonym back to a local record"
-        )
-    salt = salt_file.read_text(encoding="utf-8").strip()
-
-    def pseudonymize(column: str) -> pl.Series:
-        # SHA-256, not polars' built-in .hash(): that is xxhash, which is a
-        # fast non-cryptographic hash and carries no preimage guarantee. The
-        # claim being made here is that a recipient cannot recover the record
-        # number, so the hash has to be one that actually supports it.
-        return pl.Series(
-            f"{column}_pseudonym",
-            [
-                hashlib.sha256(f"{salt}:{column}:{value}".encode()).hexdigest()[:32]
-                for value in frame[column].cast(pl.String).to_list()
-            ],
-        )
-
-    present_ids = [c for c in _DIRECT_IDENTIFIERS if c in frame.columns]
-    safe = (
-        frame.with_columns([pseudonymize(c) for c in present_ids])
-        .drop(*present_ids, *(c for c in _DATE_COLUMNS if c in frame.columns))
-        .with_columns(
-            age_at_admission=pl.when(pl.col("age_at_admission") > 89)
-            .then(90)
-            .otherwise(pl.col("age_at_admission"))
-        )
-    )
-    out = source.with_name(source.stem + "_share-safe.parquet")
-    safe.write_parquet(out)
-    logger.info(
-        f"  share-safe copy -> {out.name} "
-        f"(dropped {', '.join(present_ids)}, {', '.join(_DATE_COLUMNS)}; ages capped at 90)"
-    )
-    return out
-
-
-# =================================================================== driver
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--anchor", choices=ANCHORS, default=None, help="one anchor only")
-    parser.add_argument("--site", default=None, help="one site only")
-    parser.add_argument(
-        "--model",
-        default=None,
-        help="which checkpoint from paths.yaml to embed with "
-        "(default: default_model). Outputs are written under that name.",
-    )
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=8,
-        help="sequences per forward pass; lower this if the GPU runs out of "
-        "memory (output_hidden_states keeps every layer)",
-    )
-    parser.add_argument(
-        "--share-safe-only",
-        action="store_true",
-        help="regenerate the share-safe copies from the per-site files already "
-        "on disk, without re-running the model",
-    )
-    parser.add_argument(
-        "--share-safe",
-        action="store_true",
-        help="also write a *_share-safe.parquet per site with direct identifiers "
-        "and raw timestamps removed, for transfer to a collaborating site",
-    )
-    args = parser.parse_args()
-
-    paths = load_paths(model=args.model)
-    paths.mkdirs()
-    logger = get_logger("02_model_embedding", paths.log_home / "02_model_embedding.log")
-
-    if args.share_safe_only:
-        regenerated = []
-        for source in sorted(paths.patient_level_home.glob("embeddings_anchor-*.parquet")):
-            if "_share-safe" in source.name:
-                continue
-            regenerated.append(
-                write_share_safe(pl.read_parquet(source), source, paths.id_salt_file, logger)
-            )
-        logger.info(
-            "02 done; regenerated " + ", ".join(p.name for p in regenerated)
-        )
-        return
-
-    if not torch.cuda.is_available():
-        logger.warning("CUDA not available; extraction will run on CPU and be slow")
-
-    logger.info(f"model: {paths.model_key}  (available: {', '.join(paths.available_models)})")
-    info = describe_model(paths, logger)
-    paths.table_home.mkdir(parents=True, exist_ok=True)
-    (paths.table_home / "model_summary.json").write_text(
-        json.dumps(info, indent=2), encoding="utf-8"
-    )
-
-    if args.site and args.site not in paths.sites:
-        parser.error(f"--site {args.site} is not configured; have {paths.sites}")
-
-    cohort = pl.read_parquet(paths.cohort_home / "cohort.parquet")
-    anchors = (args.anchor,) if args.anchor else ANCHORS
-    sites = (args.site,) if args.site else paths.sites
-
-    # one row per patient: the embedding plus everything needed to colour it
-    covariates = cohort.select(
-        "hospitalization_id",
-        "patient_id",
-        "site",
-        "cs_onset_dttm",
-        "cs_phenotype",
-        "icu_los_days",
-        "in_hospital_mortality",
-        "cardiac_origin",
-        "shock_type",
-        "age_at_admission",
-        "sex_category",
-        "hours_admission_to_cs_onset",
-    )
-
-    written = []
-    for anchor in anchors:
-        for site in sites:
-            frame = to_embedding_frame(
-                extract_site_anchor(paths, site, anchor, args.batch_size, logger),
-                info["embedding_dim"],
-            )
-            frame = frame.join(
-                covariates,
-                on=["hospitalization_id", "site"],
-                how="inner",
-                validate="1:1",
-            )
-
-            # One file per site per anchor, rather than one pooled file. This is
-            # what lets a collaborating site contribute: it runs 01 and 02 on
-            # its own data and sends back its two files, which 03 picks up by
-            # glob without anything having to be merged by hand.
-            out = (
-                paths.patient_level_home
-                / f"embeddings_anchor-{anchor}_{site}.parquet"
-            )
-            frame.write_parquet(out)
-            written.append(out)
-            logger.info(
-                f"[{anchor}/{site}] wrote {frame.height} patient embeddings "
-                f"({info['embedding_dim']}-d) -> {out.name}"
-            )
-
-            if args.share_safe:
-                safe = write_share_safe(frame, out, paths.id_salt_file, logger)
-                written.append(safe)
-
-    logger.info("02 done; wrote " + ", ".join(p.name for p in written))
-
-
-if __name__ == "__main__":
-    main()

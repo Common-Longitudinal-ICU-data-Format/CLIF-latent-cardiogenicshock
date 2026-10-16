@@ -3,31 +3,54 @@
 Written for: the analyst running this pipeline at a contributing site, and the
 coordinating analyst pooling the results.
 
-Raw CLIF data never leaves the site. The site runs steps 01 and 02 against its
-own data and its own copy of the frozen model, and sends back **two parquet
-files per anchor** — one row per patient, holding the 1024-d embedding plus the
-handful of covariates the plots need. Step 03 pools whatever files are present.
+Raw CLIF data never leaves the site. The site runs `01_site_aggregate.py`
+against its own data and its own copy of the frozen model, and sends back a
+**bundle** of aggregate tables. If its agreement permits patient-level
+transfer, it also runs `02_site_embeddings.py`, which adds the embeddings to
+that bundle. The coordinating site pools whichever bundles arrive.
+
 
 ---
 
-## Before anything else: this transfer needs cover
+## Before anything else: which tier are you sending?
 
-The files a site sends back are **patient-level data**, not aggregate
-statistics. `--share-safe` removes direct identifiers and raw timestamps and
-caps age at 90, but:
+The pipeline splits what a site sends in two, and the split is the whole point.
+
+**Tier 1 (`01_site_aggregate.py`) is aggregate.** Patient flow, cohort sizes,
+the three phenotype breakdowns, and how coherent each phenotype is in this
+site's embedding space. Every number is a count or an average over at least
+`--min-cell` patients, so it travels under a consortium's ordinary terms. Every
+site runs it.
+
+**Tier 2 (`02_site_embeddings.py`) is patient-level, and is not
+de-identified.** Record numbers are replaced by a salted hash, timestamps are
+dropped and age is reduced to five-year bands, which narrows what travels — it
+does not make the file anonymous:
 
 > A 1024-d embedding is a learned function of the patient's entire recorded
 > history. No one has shown that such representations resist re-identification
 > attack, and they should not be treated as de-identified.
 
-Treat the export as a **limited data set at best**, and move it under the same
-IRB approval and data use agreement you would use to share patient-level
-clinical data. Confirm this is in place before anyone runs step 02. If your DUA
-does not permit patient-level transfer, the alternative is to ship the *model*
-to each site and pool only aggregate statistics — a different design from this
-one, and a larger change.
+Treat the tier-2 export as a **limited data set at best**, and move it under the
+same IRB approval and data use agreement you would use to share patient-level
+clinical data. Confirm that is in place before running it.
+
+If your DUA does not permit patient-level transfer, **run tier 1 and stop**.
+That is a complete contribution, not a degraded one: the consortium gets your
+attrition, your phenotype distributions, and your answer to whether the
+phenotypes correspond to anything the model sees. The pooled analysis takes
+tier-1-only sites in its count tables and its phenotype-coherence comparison,
+and leaves them out of the projections.
+
+The full contract — every column permitted to cross a site boundary, with the
+argument for each — is in [FEDERATION.md](FEDERATION.md), or print it:
+
+```bash
+python code/clifcs/export/contract.py
+```
 
 ---
+
 
 ## What the site needs
 
@@ -89,13 +112,13 @@ python -c "from sys import path; path.insert(0,'code'); from clifcs import load_
 ### 3. Cohort — and check the numbers before going further
 
 ```bash
-python code/01_data_processing.py --stage cohort \
-    --phenotype-model /path/to/phenotype_model.json
+python code/01_site_aggregate.py --stage cohort     --phenotype-model /path/to/phenotype_model.json     --seymour-model   /path/to/seymour_model.json     --bhavani-model   /path/to/bhavani_model.json
 ```
 
-`--phenotype-model` is **required at a contributing site**. Without it the site
-refits k-means on its own patients and "phenotype II" stops meaning the same
-thing at each site, which makes the pooled phenotype plot uninterpretable.
+The three `--*-model` flags are **required at a contributing site**. Without
+them the site refits its own clusters and "phenotype II", "beta" and "group A"
+stop meaning the same thing at each site, which makes every pooled breakdown
+uninterpretable.
 
 Read `output/cohort/filter_ledger.csv` before running anything expensive. The
 two things that go wrong:
@@ -108,50 +131,65 @@ two things that go wrong:
   a record of MCS. Check each criterion's sub-count in the ledger for anything
   implausibly large or zero.
 
-### 4. Everything else
+### 4. Tier 1 — the rest of what every site sends
 
 ```bash
-python code/01_data_processing.py --from-stage subset   # ~20 min / 25k patients
-python code/02_model_embedding.py --batch-size 8 --share-safe
+python code/01_site_aggregate.py --from-stage subset --batch-size 8
 ```
 
 `--batch-size 8` fits an 8 GB card; raise it if you have more. Drop it to 2–4 if
 you hit CUDA OOM — `output_hidden_states` keeps every layer.
 
-### 5. Send back
+This runs through to `output/export/<SITE>/`, holding counts, the three
+phenotype breakdowns, and phenotype coherence in the embedding space. All of it
+is aggregate and small-cell suppressed. **Send this directory.**
 
-```
-output/patient_level_data/embeddings_anchor-24h_<SITE>_share-safe.parquet
-output/patient_level_data/embeddings_anchor-onset_<SITE>_share-safe.parquet
-```
-
-Roughly 70 MB per 10,000 patients. Also send `output/cohort/filter_ledger.csv`
-(counts only, no patient data) so the pooled paper can report attrition.
-
-Keep `output/patient_level_data/.id_salt` — it is what lets you map a shared
-pseudonym back to a local record number, and it must not be sent. (Pseudonyms
-are SHA-256 over salt + record number, truncated to 128 bits.)
-
-To re-export after a policy change, without re-running the model:
+### 5. Tier 2 — only with a patient-level agreement
 
 ```bash
-python code/02_model_embedding.py --share-safe-only
+python code/02_site_embeddings.py
 ```
+
+Adds `output/export/<SITE>/patient/`: one row per patient per anchor, holding
+the 1024-d embedding, the ordered token bins, trial eligibility and the
+prediction labels. Roughly 70 MB per 10,000 patients.
+
+**Do not run this without the IRB approval and DUA in place.** Tier 1 is a
+complete contribution on its own, and the pooled analysis degrades rather than
+failing: a tier-1-only site appears in every count table and in the
+phenotype-coherence comparison, and in no projection.
+
+### 6. Keep the salt
+
+`output/patient_level_data/.id_salt` maps a shared pseudonym back to a local
+record number. It must not be sent, and it must be **backed up** — if it is
+lost, every future export carries new pseudonyms that cannot be matched to the
+ones already sent. (Pseudonyms are SHA-256 over salt + record number, truncated
+to 128 bits.)
 
 ---
 
+
 ## Coordinating site steps
 
-Drop the received files into `output/patient_level_data/` and rerun step 03:
+Drop each received bundle into `output/export/<SITE>/` and run the pooled
+scripts with `--role pooled`:
 
 ```bash
-python code/03_embedding_analysis.py
+python code/03_embedding_analysis.py --role pooled
+python code/11_trial_alignment.py   --role pooled
 ```
 
-That is the whole merge. Step 03 globs `embeddings_anchor-<anchor>_*.parquet`,
-so a new site is picked up with no code change and no merge step. It takes the
-union of columns, so a redacted file sits alongside a local unredacted one; it
-insists only on `site, cs_phenotype, icu_los_days, in_hospital_mortality`.
+That is the whole merge. Bundles are discovered by their manifests, so a new
+site is picked up with no code change — and the manifests are checked against
+each other on the way in: a mismatch in model weights or tokenizer is fatal,
+since embeddings from different weights are not in the same space, and a
+mismatch in the repository commit warns, since the cohort definition may differ.
+
+Under `--role pooled`, `paths.site_data` raises. The coordinating machine
+cannot read raw records even by mistake, which is the mechanism that makes any
+of this more than a promise.
+
 
 Two things to know:
 

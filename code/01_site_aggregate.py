@@ -1,29 +1,54 @@
 #!/usr/bin/env python3
 
 """
-01 -- data processing: cardiogenic shock cohort -> model-ready token streams
+01 -- site tier 1: everything a site can send without argument
 
-Runs six stages per site (UCMC, NU). Each writes its outputs and can be rerun
-on its own with --stage, which matters because `derive` and `collate` are the
-slow ones.
+The first of two scripts that run inside a contributing institution, and the
+one every site runs. It builds the cohort, embeds it with the frozen model, and
+writes the **aggregate** bundle: patient flow, cohort sizes, the phenotype
+breakdowns, and how coherent each phenotype is in this site's own embedding
+space.
 
-  cohort    identify shock, print the filter ledger, attach outcomes,
-            coded shock type and Zweck phenotypes   -> output/cohort/
+Nothing it exports is patient-level. Every number is a count or an average over
+at least `--min-cell` patients, so it travels under a consortium's ordinary
+terms rather than needing a patient-level data use agreement.
+
+**It still needs the GPU.** The phenotype-purity measure is the interesting part
+of tier 1 -- it answers whether the phenotypes correspond to anything the model
+sees -- and that requires the embeddings. They are computed here and stay here;
+`02_site_embeddings.py` is what exports them, and only a site whose DUA permits
+patient-level transfer runs it.
+
+Stages, each rerunnable on its own with --stage, which matters because `derive`,
+`collate` and `embed` are the slow ones:
+
+  cohort    identify shock, print the filter ledger, attach outcomes, coded
+            shock type, and the Zweck, Seymour and Bhavani phenotypes
   subset    cut each site's CLIF tables down to the cohort   -> scratch/data-raw/
   derive    clifpy: respiratory-support waterfall, dose conversion, SOFA
   collate   cocoa collate                                   -> scratch/processed/
   tokenize  cocoa tokenize, under the model's frozen tokenizer
   winnow    cut each timeline at both anchors (24h, onset)
+  embed     run the frozen model                     -> output/patient_level_data/
+  purity    per-phenotype neighbour purity in GEM space      -> output/tables/
+  export    assemble the aggregate bundle                    -> output/export/
 
 Usage
-    python code/01_data_processing.py                      # all stages
-    python code/01_data_processing.py --stage cohort       # just the cohort
-    python code/01_data_processing.py --site NU --force    # redo one site
+    python code/01_site_aggregate.py                          # all stages
+    python code/01_site_aggregate.py --stage cohort           # just the cohort
+    python code/01_site_aggregate.py --from-stage embed       # resume at the GPU
+    python code/01_site_aggregate.py --site NU --force        # redo one site
+
+At a contributing site the three phenotype models are required, so that a label
+means the same thing everywhere:
+
+    python code/01_site_aggregate.py         --phenotype-model <...>/phenotype_model.json         --seymour-model   <...>/seymour_model.json         --bhavani-model   <...>/bhavani_model.json
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import pathlib
 import shutil
 import sys
@@ -59,7 +84,20 @@ from clifcs.phenotype import (
     summarize,
 )
 
-STAGES = ("cohort", "subset", "derive", "collate", "tokenize", "winnow")
+STAGES = (
+    "cohort",
+    "subset",
+    "derive",
+    "collate",
+    "tokenize",
+    "winnow",
+    # folded in from the old 02_model_embedding.py and 12_export.py: tier 1
+    # needs the embeddings to measure phenotype coherence, and the aggregate
+    # bundle is what it exists to produce
+    "embed",
+    "purity",
+    "export",
+)
 
 #: tables cocoa's collation.yaml reads, plus what clifpy needs to derive them
 REQUIRED_TABLES = (
@@ -450,6 +488,165 @@ def stage_winnow(paths, sites, logger, force: bool) -> None:
             )
 
 
+# ============================================== stage: embed, purity, export
+
+
+def stage_embed(paths, sites, logger, force: bool, batch_size=None) -> dict:
+    """
+    run the frozen model over each site x anchor
+
+    Was `02_model_embedding.py`. The embeddings are written locally and stay
+    local; tier 1 needs them only to measure phenotype coherence.
+    """
+    from clifcs import embedding
+
+    info = embedding.describe_model(paths, logger)
+    paths.table_home.mkdir(parents=True, exist_ok=True)
+    (paths.table_home / "model_summary.json").write_text(
+        json.dumps(info, indent=2), encoding="utf-8"
+    )
+
+    cohort = pl.read_parquet(paths.cohort_home / "cohort.parquet")
+    # one row per patient: the embedding plus everything needed to colour it
+    covariates = cohort.select(
+        [
+            c
+            for c in (
+                "hospitalization_id", "patient_id", "site", "cs_onset_dttm",
+                "cs_phenotype", "seymour_phenotype", "bhavani_phenotype",
+                "sepsis_cohort", "icu_los_days", "in_hospital_mortality",
+                "cardiac_origin", "shock_type", "age_at_admission",
+                "sex_category", "hours_admission_to_cs_onset",
+            )
+            if c in cohort.columns
+        ]
+    )
+
+    paths.patient_level_home.mkdir(parents=True, exist_ok=True)
+    for anchor in ANCHORS:
+        for site in sites:
+            out = (
+                paths.patient_level_home
+                / f"embeddings_anchor-{anchor}_{site}.parquet"
+            )
+            if out.is_file() and not force:
+                logger.info(f"[{anchor}/{site}] {out.name} exists; skipping")
+                continue
+            frame = embedding.to_embedding_frame(
+                embedding.extract_site_anchor(
+                    paths, site, anchor, batch_size, logger
+                ),
+                info["embedding_dim"],
+            )
+            frame = frame.join(
+                covariates,
+                on=["hospitalization_id", "site"],
+                how="inner",
+                validate="1:1",
+            )
+            frame.write_parquet(out)
+            logger.info(
+                f"[{anchor}/{site}] wrote {frame.height} patient embeddings "
+                f"({info['embedding_dim']}-d) -> {out.name}"
+            )
+    return info
+
+
+def stage_purity(paths, sites, logger, min_cell: int) -> pl.DataFrame:
+    """
+    how coherent each phenotype is in this site's embedding space
+
+    The substantive thing tier 1 reports beyond counts, and the reason tier 1
+    needs the GPU: it answers whether the phenotypes correspond to anything the
+    model sees, per phenotype, from this site's own patients -- and it returns
+    scalars, so no embedding has to move to answer it.
+    """
+    from clifcs.purity import phenotype_purity
+
+    # The labels are joined from the cohort table rather than read off the
+    # embedding file. An embedding file carries whichever covariates were
+    # current when it was written, so a scheme added later would be silently
+    # absent from the purity table -- which is exactly what happened when the
+    # two sepsis phenotypes landed: the measure reported three schemes instead
+    # of five and looked complete.
+    cohort = pl.read_parquet(paths.cohort_home / "cohort.parquet")
+    label_columns = [
+        c
+        for c in (
+            "cs_phenotype", "seymour_phenotype", "bhavani_phenotype",
+            "shock_type", "in_hospital_mortality",
+        )
+        if c in cohort.columns
+    ]
+    labels = cohort.select("hospitalization_id", "site", *label_columns)
+
+    frames = []
+    for anchor in ANCHORS:
+        for site in sites:
+            source = (
+                paths.patient_level_home
+                / f"embeddings_anchor-{anchor}_{site}.parquet"
+            )
+            if not source.is_file():
+                logger.warning(
+                    f"[{site}/{anchor}] no embeddings; run --stage embed first"
+                )
+                continue
+            frame = pl.read_parquet(source).drop(label_columns, strict=False).join(
+                labels, on=["hospitalization_id", "site"], how="left"
+            )
+            table = phenotype_purity(
+                frame, anchor, site, logger, min_cell=min_cell
+            )
+            if table.height:
+                frames.append(table)
+
+    if not frames:
+        return pl.DataFrame()
+    purity = pl.concat(frames, how="diagonal_relaxed")
+    paths.table_home.mkdir(parents=True, exist_ok=True)
+    purity.write_csv(paths.table_home / "phenotype_purity.csv")
+    logger.info(f"wrote {paths.table_home / 'phenotype_purity.csv'}")
+    return purity
+
+
+def stage_export(paths, sites, logger, min_cell: int, purity) -> None:
+    """assemble the aggregate bundle each site sends"""
+    from clifcs.export import contract, writer
+
+    logger.info(contract.describe())
+    salt = writer.load_salt(paths.id_salt_file, logger)
+
+    summary = paths.table_home / "model_summary.json"
+    embedding_dim = (
+        json.loads(summary.read_text(encoding="utf-8")).get("embedding_dim", 0)
+        if summary.is_file()
+        else 0
+    )
+
+    for site in sites:
+        bundle = paths.export_home / site
+        if bundle.exists():
+            shutil.rmtree(bundle)
+        logger.info(f"=== {site} -> {bundle}")
+        writer.write_aggregate(
+            paths,
+            site,
+            bundle,
+            purity.filter(pl.col("site") == site) if purity.height else purity,
+            salt,
+            min_cell,
+            embedding_dim,
+            logger,
+        )
+
+    logger.info(
+        "01 done. output/export/<SITE>/ holds counts and purity only -- "
+        "aggregate, suppressed, and safe to send. Run 02_site_embeddings.py "
+        "only if your DUA permits patient-level transfer."
+    )
+
+
 # =================================================================== driver
 
 
@@ -492,6 +689,20 @@ def main() -> None:
         help="apply a Bhavani phenotype model fitted elsewhere "
         "(cohort/bhavani_model.json) instead of refitting",
     )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="embedding batch size; 8 fits an 8 GB card, drop to 2-4 on CUDA "
+        "OOM (output_hidden_states keeps every layer)",
+    )
+    parser.add_argument(
+        "--min-cell",
+        type=int,
+        default=11,
+        help="minimum publishable cell size for the exported tables "
+        "(default 11, the CMS threshold)",
+    )
     args = parser.parse_args()
 
     paths = load_paths()
@@ -506,7 +717,7 @@ def main() -> None:
         )
         if path
     }
-    logger = get_logger("01_data_processing", paths.log_home / "01_data_processing.log")
+    logger = get_logger("01_site_aggregate", paths.log_home / "01_site_aggregate.log")
 
     if args.from_stage:
         todo = STAGES[STAGES.index(args.from_stage) :]
@@ -545,8 +756,18 @@ def main() -> None:
         stage_tokenize(paths, sites, logger, args.force)
     if "winnow" in todo:
         stage_winnow(paths, sites, logger, args.force)
+    if "embed" in todo:
+        stage_embed(paths, sites, logger, args.force, args.batch_size)
 
-    logger.info("01 done")
+    # purity feeds the export, so it is recomputed when either stage runs rather
+    # than read back from disk -- a stale table would be exported silently
+    purity = pl.DataFrame()
+    if "purity" in todo or "export" in todo:
+        purity = stage_purity(paths, sites, logger, args.min_cell)
+    if "export" in todo:
+        stage_export(paths, sites, logger, args.min_cell, purity)
+    else:
+        logger.info("01 done")
 
 
 if __name__ == "__main__":

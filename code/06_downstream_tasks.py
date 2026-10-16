@@ -312,7 +312,7 @@ def main() -> None:
             if not present:
                 raise KeyError(
                     "no <task>__label columns in the bundles. They are exported "
-                    "by 12_export.py, which needs 06 to have been run site-side "
+                    "by 02_site_embeddings.py, which needs 06 to have been run site-side "
                     "first so that downstream_labels_anchor-*.parquet exists."
                 )
             logger.info(

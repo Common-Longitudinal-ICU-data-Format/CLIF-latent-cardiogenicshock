@@ -115,8 +115,9 @@ def extract_grid(paths, args, logger) -> None:
     """winnow and embed every patient at every grid point"""
     from clifcs.tokens import SPLITS as TOKEN_SPLITS  # noqa: F401
 
-    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-    embedding_module = __import__("02_model_embedding")
+    # was a dynamic __import__ of "02_model_embedding", whose leading digit
+    # made it unimportable by name; it is a module now
+    from clifcs import embedding as embedding_module
 
     cohort = pl.read_parquet(paths.cohort_home / "cohort.parquet")
     onset_file = paths.cohort_home / "cs_onset.parquet"
