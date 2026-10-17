@@ -495,6 +495,18 @@ trials:
         retrievable without journal access -- the figures that surfaced were
         flagged as possibly conflated with another trial -- so no `table1`
         block is given rather than an unverified one.
+    # The placeholder block that replaces "no block at all". The reasoning
+    # in the source_note above stands -- the values that surfaced were not
+    # trustworthy -- and the difference is only that the gap is now itemised
+    # and shows up in the verification checklist instead of being invisible.
+    table1:
+      age_at_admission: {median: null, iqr: null, verify: !!bool true}
+      male: {pct: null, verify: !!bool true}
+      sofa_total: {median: null, iqr: null, verify: !!bool true}
+      lactate: {median: null, iqr: null, verify: !!bool true}
+      map_at_onset: {median: null, iqr: null, verify: !!bool true}
+      creatinine: {median: null, iqr: null, verify: !!bool true}
+      imv_before_onset: {pct: null, verify: !!bool true}
 
   vasst:
     label: VASST
@@ -516,6 +528,17 @@ trials:
       source_note: >-
         778 patients. No overall mortality difference; a prespecified
         less-severe stratum favoured vasopressin. Table 1 not transcribed.
+    # VASST reported a SOFA-defined severity stratification, which is the
+    # axis its one positive subgroup sat on, so sofa_total matters more here
+    # than the usual baseline row.
+    table1:
+      age_at_admission: {median: null, iqr: null, verify: !!bool true}
+      male: {pct: null, verify: !!bool true}
+      sofa_total: {median: null, iqr: null, verify: !!bool true}
+      lactate: {median: null, iqr: null, verify: !!bool true}
+      map_at_onset: {median: null, iqr: null, verify: !!bool true}
+      on_norepinephrine: {pct: null, verify: !!bool true}
+      imv_before_onset: {pct: null, verify: !!bool true}
 
   adrenal:
     label: ADRENAL
@@ -538,6 +561,228 @@ trials:
         3,800 patients, the largest trial in this file. No 90-day mortality
         difference; faster shock resolution with hydrocortisone. Table 1 not
         transcribed.
+    # Fill this one alongside APROCCHSS. The two tested nearly the same
+    # intervention and disagreed, and the usual explanation is that their
+    # populations differed in severity -- which is exactly what comparing
+    # both baseline tables against our eligible patients would show.
+    table1:
+      age_at_admission: {median: null, iqr: null, verify: !!bool true}
+      male: {pct: null, verify: !!bool true}
+      sofa_total: {median: null, iqr: null, verify: !!bool true}
+      lactate: {median: null, iqr: null, verify: !!bool true}
+      map_at_onset: {median: null, iqr: null, verify: !!bool true}
+      creatinine: {median: null, iqr: null, verify: !!bool true}
+      imv_before_onset: {pct: null, verify: !!bool true}
+      on_norepinephrine: {pct: null, verify: !!bool true}
+
+  # The five trials below were added to cover the Surviving Sepsis
+  # recommendations the cardiogenic-shock set did not reach: a second mean
+  # arterial pressure target trial, the two fluid-strategy trials, the
+  # crystalloid-type trial, and the second steroid trial.
+  #
+  # EVERY NUMBER IN THEIR `published` AND `table1` BLOCKS IS A PLACEHOLDER.
+  # They were written from the papers' identity, not their contents, and carry
+  # `verify: true` on each entry. Nothing downstream reads a flagged entry --
+  # clifcs.trials.load_trials drops them -- so an unfilled placeholder makes a
+  # trial contribute eligibility and no population comparison, which is the
+  # same state SEPSISPAM was already in. `table1_to_verify` emits the checklist
+  # of what is outstanding.
+  #
+  # To fill one in: replace the nulls with the paper's values and delete the
+  # `verify: true`. Leaving the flag on a filled value is itself warned about
+  # at load time, so neither half of the edit can be forgotten silently.
+
+  smart:
+    label: SMART
+    year: !!int 2018
+    applies_to: septic
+    intervention: balanced crystalloid rather than saline
+    guideline: >-
+      Balanced crystalloids rather than 0.9% saline for resuscitation in sepsis
+      and septic shock (Surviving Sepsis Campaign 2021, weak recommendation,
+      low evidence)
+    citation: Semler MW et al. N Engl J Med 2018 (volume and pages to verify)
+    citation_verified: !!bool false
+    published:
+      n: null
+      age_median: null
+      pct_female: null
+      lactate_median: null
+      sbp_median: null
+      lvef_median: null
+      mortality_control: null
+      source_note: >-
+        PLACEHOLDER. SMART randomised ICU patients at a single centre by unit
+        crossover to balanced crystalloid or saline, with a major adverse
+        kidney event composite as the primary outcome. Counts, baseline values
+        and the control-arm outcome are not transcribed.
+    # THE INTERVENTION IS NOT ASCERTAINABLE HERE, and unlike the duration and
+    # dose approximations elsewhere in this file that is absolute rather than
+    # partial. Neither site's extract carries a balanced crystalloid at all:
+    # the continuous medication categories include `sodium chloride` and
+    # `dextrose` and no lactated Ringer's or Plasma-Lyte, and there is no
+    # intake/output table to carry volumes. So SMART is in the same position as
+    # CRASH-2 -- eligibility and the population comparison are available, the
+    # "was it followed" arm is not -- except that here the population is ours.
+    table1:
+      age_at_admission: {median: null, iqr: null, verify: !!bool true}
+      male: {pct: null, verify: !!bool true}
+      sofa_total: {median: null, iqr: null, verify: !!bool true}
+      creatinine: {median: null, iqr: null, verify: !!bool true}
+      map_at_onset: {median: null, iqr: null, verify: !!bool true}
+      imv_before_onset: {pct: null, verify: !!bool true}
+
+  aprocchss:
+    label: APROCCHSS
+    year: !!int 2018
+    applies_to: septic
+    intervention: hydrocortisone plus fludrocortisone
+    guideline: >-
+      Hydrocortisone for septic shock with an ongoing vasopressor requirement
+      (Surviving Sepsis Campaign 2021, weak recommendation). Paired with
+      ADRENAL, which tested hydrocortisone alone and was neutral where this
+      trial was positive.
+    citation: Annane D et al. N Engl J Med 2018 (volume and pages to verify)
+    citation_verified: !!bool false
+    published:
+      n: null
+      age_median: null
+      pct_female: null
+      lactate_median: null
+      sbp_median: null
+      lvef_median: null
+      mortality_control: null
+      source_note: >-
+        PLACEHOLDER. APROCCHSS enrolled septic shock on vasopressors in French
+        ICUs and reported a 90-day mortality benefit. Its population was
+        sicker than ADRENAL's, which is the usual explanation offered for the
+        two trials disagreeing -- so the baseline table matters more here than
+        for most of this file, and should be filled before the pair is read
+        against each other.
+    # The one trial in this file whose intervention is MORE ascertainable than
+    # its partner's: both `hydrocortisone` and `fludrocortisone` are
+    # medication categories at both sites, so the two-drug regimen this trial
+    # tested can be distinguished from ADRENAL's hydrocortisone alone. See
+    # `on_fludrocortisone` in clifcs.trials.attach_features.
+    table1:
+      age_at_admission: {median: null, iqr: null, verify: !!bool true}
+      male: {pct: null, verify: !!bool true}
+      sofa_total: {median: null, iqr: null, verify: !!bool true}
+      lactate: {median: null, iqr: null, verify: !!bool true}
+      map_at_onset: {median: null, iqr: null, verify: !!bool true}
+      creatinine: {median: null, iqr: null, verify: !!bool true}
+      imv_before_onset: {pct: null, verify: !!bool true}
+      on_norepinephrine: {pct: null, verify: !!bool true}
+
+  sixtyfive:
+    label: 65 trial
+    year: !!int 2020
+    applies_to: septic
+    intervention: permissive hypotension, a mean arterial pressure target of 60-65 mmHg
+    guideline: >-
+      Initial MAP target of 65 mmHg in septic shock on vasopressors (Surviving
+      Sepsis Campaign 2021, strong recommendation, moderate evidence). The
+      companion to SEPSISPAM, in patients 65 and over.
+    citation: Lamontagne F et al. JAMA 2020 (volume and pages to verify)
+    citation_verified: !!bool false
+    published:
+      n: null
+      age_median: null
+      pct_female: null
+      lactate_median: null
+      sbp_median: null
+      lvef_median: null
+      mortality_control: null
+      source_note: >-
+        PLACEHOLDER. A pragmatic multicentre trial of permissive hypotension in
+        vasodilatory shock in patients aged 65 or over. Of the sepsis trials
+        here it is the one whose enrolment is most nearly reproducible from
+        this cohort -- age and vasopressor use are both directly available --
+        so its population comparison should be among the most trustworthy once
+        filled.
+    table1:
+      age_at_admission: {median: null, iqr: null, verify: !!bool true}
+      male: {pct: null, verify: !!bool true}
+      sofa_total: {median: null, iqr: null, verify: !!bool true}
+      lactate: {median: null, iqr: null, verify: !!bool true}
+      map_at_onset: {median: null, iqr: null, verify: !!bool true}
+      imv_before_onset: {pct: null, verify: !!bool true}
+
+  classic:
+    label: CLASSIC
+    year: !!int 2022
+    applies_to: septic
+    intervention: restrictive intravenous fluid therapy
+    guideline: >-
+      Fluid strategy after initial resuscitation in septic shock (Surviving
+      Sepsis Campaign 2021 recommends against large-volume fluid beyond the
+      initial resuscitation; this trial and CLOVERS are the evidence that
+      followed)
+    citation: Meyhoff TS et al. N Engl J Med 2022 (volume and pages to verify)
+    citation_verified: !!bool false
+    published:
+      n: null
+      age_median: null
+      pct_female: null
+      lactate_median: null
+      sbp_median: null
+      lvef_median: null
+      mortality_control: null
+      source_note: >-
+        PLACEHOLDER. Restrictive versus standard intravenous fluid in adult ICU
+        patients with septic shock who had already received at least a litre;
+        neutral for 90-day mortality.
+    # THE INTERVENTION IS NOT ASCERTAINABLE HERE. The trial's arms are defined
+    # by fluid volume and there is no intake/output table at either site, which
+    # is the same limit that stops SEPSISPAM's fluid-resuscitation prerequisite
+    # from being applied. Eligibility is therefore a superset on the "already
+    # resuscitated" criterion and concordance is unavailable.
+    table1:
+      age_at_admission: {median: null, iqr: null, verify: !!bool true}
+      male: {pct: null, verify: !!bool true}
+      sofa_total: {median: null, iqr: null, verify: !!bool true}
+      lactate: {median: null, iqr: null, verify: !!bool true}
+      map_at_onset: {median: null, iqr: null, verify: !!bool true}
+      creatinine: {median: null, iqr: null, verify: !!bool true}
+      imv_before_onset: {pct: null, verify: !!bool true}
+
+  clovers:
+    label: CLOVERS
+    year: !!int 2023
+    applies_to: septic
+    intervention: vasopressor-first rather than fluid-liberal resuscitation
+    guideline: >-
+      Fluid versus early vasopressor strategy in sepsis-induced hypotension
+      (the trial that, with CLASSIC, tested what the Surviving Sepsis Campaign
+      2021 fluid recommendation left open)
+    citation: NHLBI PETAL Network. N Engl J Med 2023 (volume and pages to verify)
+    citation_verified: !!bool false
+    published:
+      n: null
+      age_median: null
+      pct_female: null
+      lactate_median: null
+      sbp_median: null
+      lvef_median: null
+      mortality_control: null
+      source_note: >-
+        PLACEHOLDER. Restrictive fluid with early vasopressor versus liberal
+        fluid in sepsis-induced hypotension refractory to initial fluid;
+        stopped for futility.
+    # THE INTERVENTION IS NOT ASCERTAINABLE HERE, for the same reason as
+    # CLASSIC: the arms are a fluid volume against a vasopressor start time,
+    # and only the second half of that is visible. `vasoactive_onset_dttm` is
+    # on the cohort, so a *partial* concordance measure -- how early the
+    # vasopressor started -- is possible in a way it is not for CLASSIC, but it
+    # is half the contrast and is not implemented as concordance.
+    table1:
+      age_at_admission: {median: null, iqr: null, verify: !!bool true}
+      male: {pct: null, verify: !!bool true}
+      sofa_total: {median: null, iqr: null, verify: !!bool true}
+      lactate: {median: null, iqr: null, verify: !!bool true}
+      map_at_onset: {median: null, iqr: null, verify: !!bool true}
+      sbp_at_onset: {median: null, iqr: null, verify: !!bool true}
+      imv_before_onset: {pct: null, verify: !!bool true}
 
   # ================================================= HYPOVOLAEMIC SHOCK
   #
@@ -571,6 +816,18 @@ trials:
         and lower 45-day mortality with the restrictive strategy. Table 1 not
         transcribed; the trial reports Rockall score, MELD and Child-Pugh, none
         of which this pipeline computes.
+    # A deliberately short block. The trial's own baseline table is built on
+    # Rockall, MELD and Child-Pugh, none of which this pipeline computes, and
+    # its haemoglobin rows have no counterpart either -- haemoglobin is not a
+    # cohort column. What is left is demographics and the shared physiology,
+    # so this trial will always have a small `n_compared` and should be read
+    # as the weakest population comparison in the file.
+    table1:
+      age_at_admission: {median: null, iqr: null, verify: !!bool true}
+      male: {pct: null, verify: !!bool true}
+      sbp_at_onset: {median: null, iqr: null, verify: !!bool true}
+      heart_rate_at_onset: {median: null, iqr: null, verify: !!bool true}
+      creatinine: {median: null, iqr: null, verify: !!bool true}
 
   crash_2:
     label: CRASH-2
@@ -853,3 +1110,74 @@ criteria:
       criterion: 'shock duration > 24 h, severe right ventricular failure'
       applied: 'partly'
       note: 'duration could be applied; RV failure needs an echo'
+
+  # ------------------------------------------------- the five added trials
+  #
+  # Unlike the baseline tables above, these criteria are NOT placeholders. A
+  # trial's enrolment criteria are part of how it is identified rather than a
+  # number read off a table, and each row below says plainly what this
+  # pipeline can and cannot apply. Where a criterion turns on fluid volume the
+  # answer is always 'no', and always for the same reason: neither site's
+  # CLIF-2.1 extract has an intake/output table.
+
+  smart:
+    - kind: inclusion
+      criterion: 'adult ICU patients receiving crystalloid'
+      applied: 'partly'
+      note: 'narrowed to coded septic shock on a vasopressor, so this is a sicker slice than the trial enrolled -- SMART was an all-comers ICU trial'
+    - kind: inclusion
+      criterion: 'balanced crystalloid rather than saline'
+      applied: 'no'
+      note: 'no balanced crystalloid exists as a med_category at either site, and no intake/output table carries volumes, so neither the arm nor concordance is ascertainable'
+  aprocchss:
+    - kind: inclusion
+      criterion: 'septic shock with vasopressor-dependent hypotension for at least 6 h'
+      applied: 'partly'
+      note: 'coded septic shock plus a vasopressor; the 6 h duration is not applied, as for ADRENAL'
+    - kind: inclusion
+      criterion: 'SOFA score indicating at least two organ failures'
+      applied: 'no'
+      note: 'SOFA is joined for the severity adjustment but is not used to gate eligibility, so this is a superset'
+    - kind: exclusion
+      criterion: 'septic shock for more than 24 h, already on a corticosteroid'
+      applied: 'no'
+      note: 'shock duration is available but the indication for a prior steroid is not recorded'
+    - kind: inclusion
+      criterion: 'hydrocortisone plus fludrocortisone'
+      applied: 'yes'
+      note: 'both are med_categories at both sites, so this regimen is distinguishable from ADRENAL hydrocortisone alone -- the only trial pair here where concordance separates them'
+  sixtyfive:
+    - kind: inclusion
+      criterion: 'aged 65 or over with vasodilatory shock on vasopressors'
+      applied: 'partly'
+      note: 'age and vasopressor applied directly; vasodilatory shock is read as the coded septic type, so non-septic vasodilatory shock is missed'
+    - kind: exclusion
+      criterion: 'vasopressors for more than 6 h before enrolment'
+      applied: 'no'
+      note: 'vasoactive_onset_dttm gives a start time, but the trial times from the clinician decision rather than from the first dose'
+    - kind: inclusion
+      criterion: 'permissive hypotension, MAP target 60-65 mmHg'
+      applied: 'partly'
+      note: 'achieved MAP is in the vitals and could be compared against the target, but a target is a clinician intention and an achieved pressure is not the same thing'
+  classic:
+    - kind: inclusion
+      criterion: 'septic shock having already received at least 1 L of intravenous fluid'
+      applied: 'partly'
+      note: 'coded septic shock plus a vasopressor; the volume prerequisite is not computable, so the eligible set is a superset'
+    - kind: inclusion
+      criterion: 'restrictive versus standard intravenous fluid'
+      applied: 'no'
+      note: 'the arms are defined entirely by fluid volume, which no table at either site carries'
+  clovers:
+    - kind: inclusion
+      criterion: 'sepsis-induced hypotension refractory to 1-3 L of initial fluid'
+      applied: 'partly'
+      note: 'coded septic shock plus a vasopressor or sustained hypotension; the fluid-refractory prerequisite is not computable'
+    - kind: exclusion
+      criterion: 'more than 4 h since meeting the hypotension criterion, more than 24 h since presentation'
+      applied: 'no'
+      note: 'not timed against the trial clock'
+    - kind: inclusion
+      criterion: 'restrictive fluid with early vasopressor versus liberal fluid'
+      applied: 'no'
+      note: 'half the contrast is visible -- vasoactive_onset_dttm times the vasopressor start -- and half is not, so no concordance flag is defined rather than one built on the measurable half alone'

@@ -259,6 +259,50 @@ def concordance_expressions() -> dict[str, tuple[pl.Expr | None, str]]:
             pl.col("on_hydrocortisone"),
             "hydrocortisone given within the shock window",
         ),
+        # APROCCHSS tested hydrocortisone PLUS fludrocortisone and was
+        # positive where ADRENAL, hydrocortisone alone, was not. Both drugs
+        # are medication categories at both sites, so this is the only pair in
+        # the file whose interventions can be told apart -- and the only
+        # reason to carry both trials rather than one.
+        "aprocchss": (
+            pl.col("on_hydrocortisone") & pl.col("on_fludrocortisone"),
+            "hydrocortisone AND fludrocortisone given within the shock window "
+            "(the two-drug regimen, not ADRENAL's hydrocortisone alone)",
+        ),
+        # AN INTERPRETED THRESHOLD, and the only one in this dict. SEPSISPAM's
+        # test above asks whether the recommended target was reached; the 65
+        # trial tested the opposite failure, driving pressure higher than the
+        # target in older patients, so concordance here is "not pushed above
+        # it". 70 is a judgement -- the trial's permissive arm targeted 60-65
+        # and the usual-care arm ran higher, with no single published cut
+        # between them -- and an achieved pressure is in any case not the
+        # clinician intention the trial randomised. Read this one row more
+        # sceptically than the rest.
+        "sixtyfive": (
+            pl.col("map_achieved") <= 70.0,
+            "median MAP over the 24 h after onset at or below 70 mmHg, i.e. "
+            "not driven above the recommended target (interpreted threshold)",
+        ),
+        # The three fluid trials. All unascertainable, all for one reason:
+        # neither site's CLIF-2.1 extract has an intake/output table, and no
+        # balanced crystalloid appears as a medication category.
+        "smart": (
+            None,
+            "balanced crystalloid versus saline is not ascertainable: no "
+            "balanced crystalloid med_category at either site",
+        ),
+        "classic": (
+            None,
+            "restrictive versus standard fluid volume is not ascertainable: "
+            "no intake/output table at either site",
+        ),
+        "clovers": (
+            None,
+            "fluid-liberal versus vasopressor-first is half ascertainable -- "
+            "vasoactive_onset_dttm times the vasopressor start, nothing times "
+            "the fluid -- so no flag is defined rather than one built on half "
+            "the contrast",
+        ),
         # Both hypovolaemic trials turn on something this extract does not
         # record. Reported as unascertainable rather than guessed: neither site
         # has a transfusion or blood product table, and tranexamic acid is not

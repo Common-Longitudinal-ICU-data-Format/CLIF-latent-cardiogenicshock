@@ -78,6 +78,7 @@ from clifcs.trials import (
     compare_to_published,
     fit_regions,
     load_trials,
+    table1_to_verify,
     inside_all_null,
     assign_guideline,
     rank_and_orphans,
@@ -614,7 +615,7 @@ def plot_trajectory_distance(paths, frame, trials, regions, cfg, out_path,
 
 
 def analyse(paths, anchor: str, cohort_cfg, trial_cfg, args, logger) -> None:
-    trials = load_trials(trial_cfg)
+    trials = load_trials(trial_cfg, logger)
     logger.info(f"=== anchor {anchor}: {len(trials)} trials")
 
     frame = load_anchor(paths, anchor, logger, getattr(args, 'batch_size', None))
@@ -693,12 +694,18 @@ def analyse(paths, anchor: str, cohort_cfg, trial_cfg, args, logger) -> None:
     frame = add_distances(frame, coords, regions)
     frame = rank_and_orphans(frame, regions)
 
+    # Severity is joined here rather than after the loop below because
+    # sofa_total is one of the variables a trial's baseline table can name,
+    # and table1_position reads the column straight off the frame -- with the
+    # old ordering every SOFA comparison would silently find no column and
+    # drop out of n_compared.
+    frame = attach_severity(paths, frame, logger)
+
     # how far each eligible patient sits outside the population the paper
     # actually reported, in interquartile ranges
     logger.info("position of eligible patients within the published baselines:")
     for trial in trials:
         frame = table1_position(frame, trial, logger)
-    frame = attach_severity(paths, frame, logger)
     frame = add_concordance(frame, trials, logger)
     comparisons = [table1_comparison(frame, trial, logger) for trial in trials]
     comparisons = [c for c in comparisons if c.height]
@@ -751,6 +758,23 @@ def analyse(paths, anchor: str, cohort_cfg, trial_cfg, args, logger) -> None:
     criteria = criteria_frame(trial_cfg)
     if criteria.height:
         criteria.write_csv(paths.table_home / "trial_criteria.csv")
+
+    # What is still waiting to be read off a paper. Anchor-free like the
+    # criteria table, and written every run so that the count of outstanding
+    # placeholders is visible in the output directory rather than only in
+    # trials.yaml.
+    pending = table1_to_verify(trial_cfg)
+    if pending.height:
+        pending.write_csv(paths.table_home / "trial_table1_to_verify.csv")
+        by_trial = pending.group_by("trial").agg(n=pl.len()).sort("n", descending=True)
+        logger.warning(
+            f"{pending.height} published baseline values are still "
+            f"placeholders across {by_trial.height} trials; those trials "
+            "contribute eligibility but no population comparison. See "
+            "trial_table1_to_verify.csv"
+        )
+        for row in by_trial.iter_rows(named=True):
+            logger.warning(f"      {row['trial']:<22} {row['n']:>3} to verify")
 
     if table1.height:
         table1.write_csv(paths.table_home / f"trial_table1_{anchor}.csv")

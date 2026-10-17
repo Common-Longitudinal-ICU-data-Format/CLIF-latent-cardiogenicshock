@@ -418,16 +418,23 @@ def attach_features(data_dir, cohort: pl.DataFrame, cfg, logger) -> pl.DataFrame
         .group_by("hospitalization_id")
         .agg(
             on_hydrocortisone=(pl.col("med_category") == "hydrocortisone").any(),
+            # APROCCHSS tested hydrocortisone PLUS fludrocortisone and was
+            # positive where ADRENAL, testing hydrocortisone alone, was not.
+            # Both drugs are med_categories at both sites, so this is the one
+            # place in the file where two trials' interventions can actually
+            # be told apart.
+            on_fludrocortisone=(pl.col("med_category") == "fludrocortisone").any(),
             on_any_steroid=pl.lit(True),
         )
         .collect()
     )
     cohort = cohort.join(steroids, on="hospitalization_id", how="left", validate="1:1")
-    for name in ("on_hydrocortisone", "on_any_steroid"):
+    for name in ("on_hydrocortisone", "on_fludrocortisone", "on_any_steroid"):
         if name not in cohort.columns:
             cohort = cohort.with_columns(pl.lit(False).alias(name))
     cohort = cohort.with_columns(
         on_hydrocortisone=pl.col("on_hydrocortisone").fill_null(False),
+        on_fludrocortisone=pl.col("on_fludrocortisone").fill_null(False),
         on_any_steroid=pl.col("on_any_steroid").fill_null(False),
     )
 
@@ -668,6 +675,59 @@ def _elig_adrenal() -> pl.Expr:
     )
 
 
+# The five trials added for the Surviving Sepsis recommendations the
+# cardiogenic set did not reach. Four of their five predicates reduce to
+# "coded septic shock on a vasopressor", which is the same collapse the
+# cardiogenic trials show and has the same cause: what separates these trials
+# is a fluid volume, a crystalloid brand or a vasopressor duration, and none
+# of those three is in a CLIF-2.1 extract. The trials stay listed separately
+# because their *populations* differ even where our reconstruction of their
+# criteria cannot, and the population comparison is the point.
+
+
+def _elig_smart() -> pl.Expr:
+    # SMART enrolled all adult ICU patients receiving crystalloid, which would
+    # be very nearly this whole cohort. It is narrowed here to the population
+    # the Surviving Sepsis recommendation addresses, so the eligible set is a
+    # sicker slice than the trial's own -- a mismatch the baseline comparison
+    # should surface rather than one hidden in the predicate.
+    return pl.col("shock_septic") & pl.col("met_vasoactive_support")
+
+
+def _elig_aprocchss() -> pl.Expr:
+    # Septic shock on a vasopressor. Unlike ADRENAL this trial did not require
+    # mechanical ventilation, so the predicate is deliberately broader than
+    # _elig_adrenal; the two-organ-failure requirement is not applied.
+    return pl.col("shock_septic") & pl.col("met_vasoactive_support")
+
+
+def _elig_sixtyfive() -> pl.Expr:
+    # The most faithfully reproducible of the five: age and vasopressor use
+    # are both directly available, and only "vasodilatory shock" has to be
+    # approximated, by the coded septic type -- so vasodilatory shock that was
+    # not coded septic is missed.
+    return (
+        pl.col("shock_septic")
+        & pl.col("met_vasoactive_support")
+        & (pl.col("age_at_admission") >= 65)
+    )
+
+
+def _elig_classic() -> pl.Expr:
+    # Septic shock already given at least a litre. The volume prerequisite is
+    # not computable, so this is a superset on exactly the criterion that
+    # defined the trial's starting point.
+    return pl.col("shock_septic") & pl.col("met_vasoactive_support")
+
+
+def _elig_clovers() -> pl.Expr:
+    # Sepsis-induced hypotension refractory to initial fluid. Hypotension is
+    # admitted as well as vasopressor use, because CLOVERS enrolled before the
+    # vasopressor decision rather than after it -- the one place among these
+    # five where that distinction changes who qualifies.
+    return pl.col("shock_septic") & _pressor_or_hypotension()
+
+
 def _elig_villanueva() -> pl.Expr:
     # hypovolaemic shock with coded upper gastrointestinal bleeding. The
     # transfusion threshold that defines the trial's arms is invisible here.
@@ -709,7 +769,93 @@ class Trial:
 TRIALS: tuple[Trial, ...] = ()
 
 
-def load_trials(cfg) -> tuple[Trial, ...]:
+def _usable_table1(spec, key: str, logger=None) -> dict:
+    """
+    the baseline table entries that carry a real published value
+
+    trials.yaml holds placeholder entries -- `{median: null, iqr: null,
+    verify: true}` -- for every trial whose paper has not been transcribed
+    yet. They exist so the gap is itemised and appears in the verification
+    checklist rather than being invisible, and they must never reach
+    `table1_position`, where a null median would either crash or, worse, be
+    silently skipped and inflate `n_compared`.
+
+    Two ways an entry is dropped, and they guard opposite mistakes:
+
+      `verify: true` still set    the value was not reviewed against the paper
+      median/pct is null          the value was never filled in
+
+    An entry that is filled but still flagged is the dangerous case -- someone
+    transcribed the numbers and forgot to clear the flag, and the trial would
+    go on contributing nothing with no sign of it. That one is warned about by
+    name rather than dropped quietly.
+    """
+    published = getattr(spec, "table1", None)
+    if not published:
+        return {}
+    out = {}
+    for name in published:
+        entry = dict(published[name])
+        has_value = entry.get("median") is not None or entry.get("pct") is not None
+        flagged = bool(entry.get("verify", False))
+        if flagged and has_value and logger is not None:
+            logger.warning(
+                f"  {key}.table1.{name} has a value but is still marked "
+                "`verify: true`, so it is being ignored. Delete the flag in "
+                "trials.yaml to let it count."
+            )
+        if flagged or not has_value:
+            continue
+        entry.pop("verify", None)
+        out[name] = entry
+    return out
+
+
+def table1_to_verify(cfg) -> pl.DataFrame:
+    """
+    every baseline value still waiting to be read off a paper
+
+    The checklist for filling in trials.yaml by hand. One row per trial and
+    variable, carrying the citation to look it up in, the cohort column it
+    will be compared against, and whether that column exists at all -- because
+    a placeholder for a variable this pipeline cannot compute is wasted
+    transcription effort and should be deleted rather than filled.
+
+    `status` is `placeholder` for an unfilled entry and `flagged_but_filled`
+    for the inconsistent case `_usable_table1` warns about.
+    """
+    rows = []
+    for key in cfg.trials:
+        spec = cfg.trials[key]
+        published = spec.get("table1")
+        if not published:
+            continue
+        for name in published:
+            entry = dict(published[name])
+            has_value = (
+                entry.get("median") is not None or entry.get("pct") is not None
+            )
+            flagged = bool(entry.get("verify", False))
+            if not flagged:
+                continue
+            rows.append(
+                {
+                    "trial": str(spec.label),
+                    "trial_key": key,
+                    "citation": str(spec.citation),
+                    "citation_verified": bool(spec.get("citation_verified", True)),
+                    "variable": name,
+                    "label": TABLE1_LABELS.get(name, name),
+                    "cohort_column_known": name in TABLE1_LABELS,
+                    "confidence": VARIABLE_CONFIDENCE.get(name, "unknown"),
+                    "needs": "pct" if "pct" in entry else "median + iqr",
+                    "status": "flagged_but_filled" if has_value else "placeholder",
+                }
+            )
+    return pl.DataFrame(rows)
+
+
+def load_trials(cfg, logger=None) -> tuple[Trial, ...]:
     """join the literature values in trials.yaml to the rules defined above"""
     rules = {
         "shock": (_elig_shock, ("shock due to LV failure (no echo)",)),
@@ -741,6 +887,39 @@ def load_trials(cfg) -> tuple[Trial, ...]:
             _elig_adrenal,
             ("vasopressor for >= 4 h (not timed)",),
         ),
+        "smart": (
+            _elig_smart,
+            (
+                "all-comers ICU population (narrowed to septic shock here)",
+                "balanced crystalloid vs saline (no balanced crystalloid "
+                "med_category at either site)",
+            ),
+        ),
+        "aprocchss": (
+            _elig_aprocchss,
+            (
+                "vasopressor-dependent for >= 6 h (not timed)",
+                "at least two organ failures by SOFA (not used to gate)",
+            ),
+        ),
+        "sixtyfive": (
+            _elig_sixtyfive,
+            (
+                "vasodilatory shock (approximated by the coded septic type)",
+                "< 6 h of vasopressor before enrolment (not timed)",
+            ),
+        ),
+        "classic": (
+            _elig_classic,
+            ("at least 1 L of fluid already given (no intake/output table)",),
+        ),
+        "clovers": (
+            _elig_clovers,
+            (
+                "refractory to 1-3 L of initial fluid (no intake/output table)",
+                "within 4 h of meeting the hypotension criterion (not timed)",
+            ),
+        ),
         "villanueva": (
             _elig_villanueva,
             ("transfusion threshold (no blood product table at either site)",),
@@ -770,11 +949,7 @@ def load_trials(cfg) -> tuple[Trial, ...]:
                 published={k: spec.published[k] for k in spec.published},
                 eligible=rule,
                 not_implementable=gaps,
-                table1=(
-                    {k: dict(spec.table1[k]) for k in spec.table1}
-                    if spec.get("table1")
-                    else {}
-                ),
+                table1=_usable_table1(spec, key, logger),
                 applies_to=str(spec.get("applies_to", "cardiogenic")),
             )
         )
@@ -1165,6 +1340,7 @@ TABLE1_LABELS: dict[str, str] = {
     "dx_stroke": "prior stroke",
     "dx_severe_pvd": "peripheral artery disease",
     "ams_gcs_lt15": "altered mental status",
+    "sofa_total": "SOFA score",
     "male": "male sex",
     "dx_hypertension": "hypertension",
     "dx_diabetes": "diabetes",
@@ -1214,6 +1390,14 @@ VARIABLE_CONFIDENCE: dict[str, str] = {
     "on_vasopressin": "measured",
     "imv_before_onset": "measured",
     "male": "measured",
+    # A score computed from chart values on both sides, which is why this is
+    # `measured` and not `ascertainment`. It is the weakest member of that
+    # class all the same: a trial computes SOFA from protocol-mandated daily
+    # labs and ours comes from whatever was drawn, so a missing component
+    # scores zero and biases ours DOWNWARD. Read a SOFA gap as a floor on the
+    # severity difference, not an estimate of it. APACHE II and SAPS II, which
+    # several of these papers report instead, are not computed here at all.
+    "sofa_total": "measured",
     "dx_hypertension": "ascertainment",
     "dx_diabetes": "ascertainment",
     "dx_prior_mi": "ascertainment",
