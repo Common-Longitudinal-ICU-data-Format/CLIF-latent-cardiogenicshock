@@ -27,6 +27,12 @@ pyarrow
 
 # --- analysis and plotting ---------------------------------------------------
 scikit-learn
+
+# 12_trial_fit_outcomes.py only: restricted cubic splines (patsy cr()) and the
+# logistic / least-squares fits of outcome against trial-fit score. Nothing
+# earlier in the pipeline imports it, so a site that only runs 01-11 does not
+# need it.
+statsmodels
 umap-learn
 # PaCMAP is what the report's 2-d panels use; umap-learn is kept so the
 # two projections can be compared. Pulls faiss-cpu for neighbour search.

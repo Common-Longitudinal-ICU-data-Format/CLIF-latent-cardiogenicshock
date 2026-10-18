@@ -30,6 +30,7 @@ The pipeline is in three tiers, by what has to cross a site boundary.
 | [code/03_embedding_analysis.py](code/03_embedding_analysis.py) | pooled | PCA + UMAP + PaCMAP, and the scatterplots |
 | [code/04_site_effect.py](code/04_site_effect.py) | pooled | Why the sites separate, decomposed against token-family counts |
 | [code/05](code/05_site_correction.py)–[code/11](code/11_trial_alignment.py) | pooled | Site correction, downstream prediction, the report, token space, trajectories, trial alignment |
+| [code/12_trial_fit_outcomes.py](code/12_trial_fit_outcomes.py) | pooled | Mortality, ventilator-free and vasopressor-free days against how far each patient sits from the trial population, splined and severity-adjusted |
 
 Three output directories, named so that what may leave is obvious without
 reading any code:
@@ -496,6 +497,101 @@ eligible subset beside the enrolled population on the few variables trials
 report. Where they diverge — our ECLS-SHOCK-eligible patients are 37.9% women
 against the trial's 18.7% — the region is ours and the trial's name on it is a
 label of convenience.
+
+## Does fitting the trial track with doing better?
+
+[code/12_trial_fit_outcomes.py](code/12_trial_fit_outcomes.py) takes the gap 11
+measures and asks what it is worth. Three outcomes — in-hospital mortality,
+**ventilator-free days** and **vasopressor-free days** to day 28 — against two
+readings of the same gap, each unadjusted and adjusted for non-cardiovascular
+SOFA, age and site.
+
+The two free-day outcomes are counted separately, not as one composite. They
+come off on different clocks and the correlation between them among survivors
+is only 0.65: 6,103 patients are ventilator-free for the full 28 days while
+still needing a vasopressor, and 2,718 the reverse. A composite would be
+dominated by whichever has the longer tail while reading as a statement about
+both. Both are derived in [code/clifcs/freedays.py](code/clifcs/freedays.py),
+which counts a day as supported if any record falls in it — coarse, in the same
+unit as the outcome, and biased downward for intermittent support, so a
+free-day count is a floor.
+
+### Distance has no direction, and the direction is the finding
+
+`t1_absdist_{trial}` is how far outside the published interquartile ranges a
+patient sits, averaged over the variables they have. `t1_severity_gap_{trial}`
+is **which way**, signed by `VARIABLE_SEVERITY_SIGN` so that positive means
+sicker or older than the trial's median. Heart rate and temperature are
+deliberately unsigned: both are U-shaped in shock, and a wrong sign is worse
+than a missing one.
+
+The split matters immediately. Among ECLS-SHOCK-eligible patients the 934 who
+are sicker than the trial run **46.6% mortality against 30.6%** for the 229 who
+are healthier — a contrast the old binary inside/outside could not express,
+because both groups are "outside".
+
+### The curve turns
+
+Entering the score as a restricted cubic spline was not decoration. Mortality
+against the severity gap is **U-shaped** for SHOCK, IABP-SHOCK II,
+CULPRIT-SHOCK and ECLS-SHOCK: patients *healthier* than the trial on the
+measured axes die more than those sitting at its median. 12 classifies every
+fitted curve and names the turning ones in its summary rather than leaving it
+to the eye.
+
+A U-shape is a warning about the score, not only about the patients. It says
+the severity gap stops tracking severity at the healthy end — a patient with a
+normal lactate and a decent pressure who is nevertheless in shock is not mild,
+they are atypical, and the measured axes do not see why.
+
+### Where adjustment is collinearity rather than correction
+
+The exposure and the confounder are built from overlapping measurements, and
+for some trials from the *same* measurement. SHOCK publishes exactly one
+usable quartile — age — so its severity gap is a rescaling of age, and
+adjusting it for age regresses a variable on itself. That fit returns a
+72-point mortality difference which is collinearity.
+
+`trial_fit_adjustment_overlap.csv` gives the overlap **per trial and per
+score**, because the two scores are built from different variable sets:
+
+| trial | score | overlap with the adjustment set |
+|---|---|---|
+| SHOCK | `absdist`, `severity_gap` | 100% |
+| IABP-SHOCK II | `severity_gap` | 100% |
+| SOAP II | `severity_gap` | 50% |
+| ECLS-SHOCK | `absdist` | 12% |
+
+Rows at 100% are reported and labelled `collinear` rather than dropped —
+suppressing them would leave the unadjusted estimate looking unopposed.
+
+### Secondary: concordant care by fit
+
+Whether the fit score's slope differs between patients who got the recommended
+treatment and those who did not. **Confounding by indication is severe and is
+not adjustable away**, and it does not point the same way for every trial, so
+each row carries what concordance actually means there — read off the
+concordance definition itself, not the trial's description:
+
+- the negative device trials (IABP-SHOCK II, ECMO-CS, ECLS-SHOCK) invert it:
+  "concordant" means the device was **withheld**, which happens most in
+  patients too well or too sick to cannulate
+- SOAP II and OptimaCC are an agent-choice contrast — one drug used, another
+  avoided — confounded by whatever drove the choice
+- SEPSISPAM and the 65 trial test an **achieved physiological value**, which is
+  partly an outcome of severity rather than a decision
+
+### Outputs
+
+`trial_fit_outcomes_*.csv` (per trial × outcome × score × adjustment),
+`trial_fit_curves_*.csv` (fitted curves for plotting),
+`trial_fit_interaction_*.csv`, `trial_fit_adjustment_overlap.csv`,
+`trial_fit_skipped_*.csv`, the figure
+`figures/<model>/anchor-<anchor>/trial_fit_outcomes.png`, and a written
+summary with limitations at `output/trial_fit_summary_<anchor>.md`.
+
+Needs `statsmodels`, which nothing in 01–11 imports — a site running only the
+site-side stages does not need it.
 
 ## Embedding anchors
 

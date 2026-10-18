@@ -1796,6 +1796,33 @@ def table1_position(frame: pl.DataFrame, trial, logger) -> pl.DataFrame:
     return frame
 
 
+def score_variables(trial, score: str = "absdist") -> list[str]:
+    """
+    the cohort columns a given fit score for this trial is actually built from
+
+    Needed because the two scores are built from different variable sets and
+    the difference decides whether an adjusted model means anything.
+    `absdist` averages every measured continuous variable the paper
+    published; `severity_gap` averages only the subset carrying a severity
+    orientation, which for the older trials can be a single variable.
+
+    SHOCK is the worst case and it is not hypothetical: the only quartile it
+    publishes is age, so its severity gap is a rescaling of age alone. Adjust
+    that model for age and the spline and the adjuster are the same variable.
+    """
+    spec = table1_variables(trial)
+    continuous = [
+        name
+        for name, published in spec.items()
+        if published.get("iqr") is not None
+        and published.get("median") is not None
+        and VARIABLE_CONFIDENCE.get(name) == "measured"
+    ]
+    if score == "severity_gap":
+        return [n for n in continuous if n in VARIABLE_SEVERITY_SIGN]
+    return continuous
+
+
 def inside_all_null(k: int) -> float:
     """
     the share of a *representative* cohort that would fall inside all k IQRs
