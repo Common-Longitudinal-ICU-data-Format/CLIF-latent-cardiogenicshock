@@ -885,6 +885,12 @@ def analyse(paths, anchor: str, cohort_cfg, trial_cfg, args, logger) -> None:
         "nearest_trial", "nearest_lift", "evidence_orphan", "criteria_orphan",
         "assigned_guideline", "guideline_fit",
         "n_specific_trials", "n_specific_inside",
+        # the same coverage summaries restricted to the trials that could
+        # bear on this patient's coded shock type -- see _add_in_type
+        "n_trials_in_type", "n_specific_trials_in_type",
+        "n_specific_inside_in_type", "nearest_trial_in_type",
+        "nearest_lift_in_type", "type_evidence_orphan",
+        "shock_septic", "shock_cardiogenic", "shock_hypovolemic",
         f"{PROJECTION}_1", f"{PROJECTION}_2",
     ]
     keep_cols += [

@@ -1008,6 +1008,10 @@ class Region:
     #: how many of the k neighbours that corresponds to
     threshold_neighbours: int | None = None
     centroid_separation: float | None = None
+    #: the coded shock type this trial's evidence is about, carried over from
+    #: the Trial so `rank_and_orphans` can restrict a comparison to the trials
+    #: that could bear on a given patient at all
+    applies_to: str = "cardiogenic"
 
 
 def neighbour_affinity(
@@ -1110,7 +1114,15 @@ def fit_regions(frame: pl.DataFrame, coords: np.ndarray, trials, cfg, logger):
                 f"  {trial.label}: only {n} eligible patients "
                 f"(need {min_eligible}); no region fitted"
             )
-            regions.append(Region(trial.key, trial.label, n_eligible=n, fitted=False))
+            regions.append(
+                Region(
+                    trial.key,
+                    trial.label,
+                    n_eligible=n,
+                    fitted=False,
+                    applies_to=trial.applies_to,
+                )
+            )
             continue
 
         values = affinity[trial.key]
@@ -1135,6 +1147,7 @@ def fit_regions(frame: pl.DataFrame, coords: np.ndarray, trials, cfg, logger):
                 threshold=threshold,
                 threshold_neighbours=threshold_k,
                 centroid_separation=separation,
+                applies_to=trial.applies_to,
             )
         )
     # stash the affinities for add_distances, which the driver calls next
@@ -1232,7 +1245,7 @@ def rank_and_orphans(frame: pl.DataFrame, regions) -> pl.DataFrame:
     specific_inside = [
         f"inside_{r.key}" for r in fitted if r.key != "soap_ii"
     ]
-    return frame.with_columns(
+    frame = frame.with_columns(
         n_specific_inside=pl.sum_horizontal(
             *(pl.col(c).cast(pl.Int32) for c in specific_inside)
         )
@@ -1240,6 +1253,137 @@ def rank_and_orphans(frame: pl.DataFrame, regions) -> pl.DataFrame:
         evidence_orphan=(pl.col("n_specific_trials") == 0)
         & (pl.col("n_specific_inside") == 0),
         criteria_orphan=pl.col("n_specific_trials") == 0,
+    )
+    return _add_in_type(frame, regions)
+
+
+#: the cohort boolean that says a patient's coded shock is of the type a
+#: trial's evidence is about. A patient with several codes matches several,
+#: which is right: a mixed septic-cardiogenic patient is genuinely in scope
+#: for both literatures.
+SHOCK_TYPE_COLUMN: dict[str, str] = {
+    "cardiogenic": "shock_cardiogenic",
+    "septic": "shock_septic",
+    "hypovolemic": "shock_hypovolemic",
+}
+
+
+def _add_in_type(frame: pl.DataFrame, regions) -> pl.DataFrame:
+    """
+    the same coverage summaries, restricted to the trials that could bear on
+    this patient at all
+
+    WHY THE POOLED COLUMNS ARE NOT ENOUGH. Until the sepsis trials were added
+    the pool was nearly all cardiogenic and the distinction did not arise.
+    With eighteen trials across three literatures it does: `nearest_trial`
+    ranks by neighbourhood lift over every fitted region, so a cardiogenic
+    shock patient can come back with CLOVERS as their nearest trial. That is
+    not false -- they really do sit near those patients in the embedding --
+    but it is not an answer to "which guideline covers this person", and read
+    as one it is worse than no answer.
+
+    The eligibility predicates already gate on coded shock type, so the
+    *criteria* counts barely move. What moves is the population side, which
+    is fitted in the embedding and has no such gate.
+
+    `n_trials_in_type` is the denominator and is reported rather than assumed:
+    a patient whose shock is coded `none coded` or `other shock` matches no
+    trial's `applies_to` at all, and the honest summary for them is "no trial
+    in this literature was even applicable", not "no trial fitted".
+    """
+    specific = [r for r in regions if r.key != "soap_ii"]
+    missing = [
+        c
+        for c in {SHOCK_TYPE_COLUMN[r.applies_to] for r in specific
+                  if r.applies_to in SHOCK_TYPE_COLUMN}
+        if c not in frame.columns
+    ]
+    if missing:
+        # Without the coded type flags there is no in-type question to ask.
+        # Nulls rather than zeros, so a downstream reader cannot mistake
+        # "not computed here" for "nothing applied".
+        return frame.with_columns(
+            n_trials_in_type=pl.lit(None, dtype=pl.Int32),
+            n_specific_trials_in_type=pl.lit(None, dtype=pl.Int32),
+            n_specific_inside_in_type=pl.lit(None, dtype=pl.Int32),
+            nearest_trial_in_type=pl.lit(None, dtype=pl.String),
+            nearest_lift_in_type=pl.lit(None, dtype=pl.Float64),
+            type_evidence_orphan=pl.lit(None, dtype=pl.Boolean),
+        )
+
+    def in_type(region) -> pl.Expr:
+        column = SHOCK_TYPE_COLUMN.get(region.applies_to)
+        if column is None:
+            return pl.lit(False)
+        return pl.col(column).fill_null(False)
+
+    frame = frame.with_columns(
+        n_trials_in_type=pl.sum_horizontal(
+            *(in_type(r).cast(pl.Int32) for r in specific)
+        ),
+        n_specific_trials_in_type=pl.sum_horizontal(
+            *(
+                (in_type(r) & pl.col(f"elig_{r.key}")).cast(pl.Int32)
+                for r in specific
+            )
+        ),
+        n_specific_inside_in_type=pl.sum_horizontal(
+            *(
+                (in_type(r) & pl.col(f"inside_{r.key}")).cast(pl.Int32)
+                for r in specific
+                if r.fitted
+            )
+        )
+        if any(r.fitted for r in specific)
+        else pl.lit(0, dtype=pl.Int32),
+    )
+
+    # nearest trial among those applicable to this patient's coded type.
+    # Out-of-type regions are pushed to -inf rather than null, because
+    # arg_max over a list containing nulls does not do the obvious thing.
+    rankable = [r for r in specific if r.fitted]
+    if rankable:
+        masked = [
+            pl.when(in_type(r))
+            .then(pl.col(f"lift_{r.key}"))
+            .otherwise(float("-inf"))
+            .fill_null(float("-inf"))
+            .alias(f"_lift_in_type_{r.key}")
+            for r in rankable
+        ]
+        frame = frame.with_columns(masked)
+        labels = [r.label for r in rankable]
+        cols = [f"_lift_in_type_{r.key}" for r in rankable]
+        best = pl.max_horizontal(*cols)
+        frame = frame.with_columns(
+            nearest_lift_in_type=pl.when(best > float("-inf"))
+            .then(best)
+            .otherwise(None),
+            nearest_trial_in_type=pl.when(best > float("-inf"))
+            .then(
+                pl.concat_list(*cols)
+                .list.arg_max()
+                .replace_strict(
+                    range(len(labels)), labels, default=None, return_dtype=pl.String
+                )
+            )
+            .otherwise(None),
+        ).drop(cols)
+    else:
+        frame = frame.with_columns(
+            nearest_lift_in_type=pl.lit(None, dtype=pl.Float64),
+            nearest_trial_in_type=pl.lit(None, dtype=pl.String),
+        )
+
+    return frame.with_columns(
+        # only meaningful where some trial in the patient's literature was
+        # applicable; null otherwise, which is the `none coded` case
+        type_evidence_orphan=pl.when(pl.col("n_trials_in_type") > 0)
+        .then(
+            (pl.col("n_specific_trials_in_type") == 0)
+            & (pl.col("n_specific_inside_in_type") == 0)
+        )
+        .otherwise(None),
     )
 
 
@@ -1305,9 +1449,17 @@ def compare_to_published(frame: pl.DataFrame, trials, logger) -> pl.DataFrame:
         )
         if female:
             bits.append(female)
+        # `n` is null for a trial whose paper has not been transcribed yet,
+        # which is most of the sepsis set. Printed as "?" rather than crashing
+        # or quietly reading as zero enrolled.
+        enrolled = (
+            format(row["n_published"], ">5,")
+            if row["n_published"] is not None
+            else format("?", ">5")
+        )
         logger.info(
             f"  {row['trial']:<22} n {row['n_eligible_here']:>6,} here vs "
-            f"{row['n_published']:>5,} enrolled   " + "; ".join(bits)
+            f"{enrolled} enrolled   " + "; ".join(bits)
         )
     return out
 
@@ -1417,6 +1569,37 @@ VARIABLE_CONFIDENCE: dict[str, str] = {
 }
 
 
+#: which direction is "sicker" for each baseline variable
+#:
+#: The distance scores below say how FAR a patient sits from the population a
+#: trial reported. On its own that conflates the two cases the question is
+#: really about: a patient outside the interquartile range because they are
+#: older, more acidotic and on more support than anyone the trial enrolled,
+#: and a patient outside it because they are healthier than the floor the
+#: trial recruited from. Those have opposite implications for whether the
+#: result transfers, and averaging them cancels them out.
+#:
+#: +1  a higher value is sicker or older
+#: -1  a lower value is sicker
+#: variables absent from this registry have no severity orientation and are
+#: excluded from the directional scores while still counting toward distance
+#:
+#: Heart rate and temperature are deliberately absent rather than guessed.
+#: Both are U-shaped in shock -- bradycardia and tachycardia are each bad,
+#: hypothermia and fever are each bad -- so a sign would be wrong for half the
+#: cohort, and a wrong sign is worse here than a missing one.
+VARIABLE_SEVERITY_SIGN: dict[str, int] = {
+    "age_at_admission": +1,
+    "lactate": +1,
+    "creatinine": +1,
+    "sofa_total": +1,
+    "map_at_onset": -1,
+    "sbp_at_onset": -1,
+    "dbp_at_onset": -1,
+    "ph_at_onset": -1,
+}
+
+
 def criteria_frame(cfg) -> pl.DataFrame:
     """
     every trial's published criteria, with whether this pipeline applies it
@@ -1448,7 +1631,7 @@ def table1_variables(trial) -> dict:
 
 def table1_position(frame: pl.DataFrame, trial, logger) -> pl.DataFrame:
     """
-    for each eligible patient, how far outside the published IQR they sit
+    for each patient, where they sit relative to a trial's published baseline
 
     Enrolment criteria are thresholds and admit a wide range of patients; the
     baseline table is what the trial's result was actually observed in. A
@@ -1458,17 +1641,64 @@ def table1_position(frame: pl.DataFrame, trial, logger) -> pl.DataFrame:
 
     Distance is measured in interquartile ranges, which is the only scale the
     published summaries support -- a paper gives a median and an IQR, not a
-    covariance, so there is no way to weight variables against each other or to
-    account for their correlation. 0 means inside the IQR; 1 means one full IQR
-    beyond its edge.
+    covariance, so there is no way to weight variables against each other or
+    to account for their correlation. Treating the variables as independent
+    and equally weighted is therefore a constraint of the source material
+    rather than a modelling choice, and it is the main reason these scores
+    rank patients better than they measure them.
 
-    Only variables the trial published *and* this cohort can compute are used,
-    so the comparison is narrower for the older trials. `n_compared` carries
-    that, and should be read alongside the result: two variables agreeing is
-    not the same evidence as nine.
+    Seven columns per trial, in three groups.
+
+    COVERAGE -- how much of a comparison there was at all:
+
+      t1_n_published_{key}    continuous variables the paper reported that
+                              this cohort could in principle compute
+      t1_n_compared_{key}     how many of those this patient actually has
+      t1_frac_compared_{key}  the ratio, which is the missingness measure
+
+    MAGNITUDE -- how far outside, 0 when inside:
+
+      t1_outside_{key}   count of variables outside their IQR
+      t1_maxdist_{key}   the worst single variable, in IQRs beyond the nearer
+                         edge. Kept unchanged because the README quotes it
+      t1_absdist_{key}   the MEAN over compared variables, which is the
+                         continuous fit score. Averaged rather than summed so
+                         that a trial reporting nine variables and one
+                         reporting four land on the same scale, and so that a
+                         patient missing a variable is not scored as though
+                         they were comfortably inside its range
+
+    DIRECTION -- which way, and the reason magnitude alone will not do:
+
+      t1_severity_gap_{key}  mean signed position in IQR units over the
+                             variables carrying a severity orientation.
+                             Positive means sicker or older than the trial's
+                             median, negative means healthier.
+
+    Two things about the severity gap are deliberate. It is measured from the
+    MEDIAN rather than from the edge of the interquartile range, because a
+    direction that only comes into existence once a patient leaves the IQR is
+    a direction with a hole in the middle of it. And it averages only the
+    variables in VARIABLE_SEVERITY_SIGN, so a trial whose published table is
+    all heart rate and temperature gets a null here rather than a number
+    built on variables with no agreed sicker end.
+
+    A patient with no comparable variable gets nulls throughout rather than
+    zeros. Zero is the score of someone sitting inside every published range,
+    which is the opposite of knowing nothing about them.
     """
     spec = table1_variables(trial)
     key = trial.key
+    null_columns = {
+        f"t1_outside_{key}": pl.lit(None, dtype=pl.Int32),
+        f"t1_maxdist_{key}": pl.lit(None, dtype=pl.Float64),
+        f"t1_absdist_{key}": pl.lit(None, dtype=pl.Float64),
+        f"t1_severity_gap_{key}": pl.lit(None, dtype=pl.Float64),
+        f"t1_n_compared_{key}": pl.lit(0, dtype=pl.Int32),
+        f"t1_n_published_{key}": pl.lit(0, dtype=pl.Int32),
+        f"t1_frac_compared_{key}": pl.lit(None, dtype=pl.Float64),
+    }
+
     available = [
         name
         for name in spec
@@ -1480,51 +1710,90 @@ def table1_position(frame: pl.DataFrame, trial, logger) -> pl.DataFrame:
     continuous = [
         n
         for n in available
-        if "iqr" in spec[n] and VARIABLE_CONFIDENCE.get(n) == "measured"
+        if spec[n].get("iqr") is not None
+        and spec[n].get("median") is not None
+        and VARIABLE_CONFIDENCE.get(n) == "measured"
     ]
-    proportions = [n for n in available if "pct" in spec[n]]
+    proportions = [n for n in available if spec[n].get("pct") is not None]
 
     if not continuous:
         logger.info(
             f"  {trial.label}: no published IQRs usable here "
-            f"({len(proportions)} proportions only); no per-patient position"
+            f"({len(proportions)} proportion(s) only); no per-patient position"
         )
-        return frame.with_columns(
-            **{
-                f"t1_outside_{key}": pl.lit(None, dtype=pl.Int32),
-                f"t1_maxdist_{key}": pl.lit(None, dtype=pl.Float64),
-                f"t1_n_compared_{key}": pl.lit(0, dtype=pl.Int32),
-            }
-        )
+        return frame.with_columns(**null_columns)
 
-    distances = []
+    oriented = [n for n in continuous if n in VARIABLE_SEVERITY_SIGN]
+
+    helpers = []
     for name in continuous:
         q1, q3 = (float(x) for x in spec[name]["iqr"])
         width = max(q3 - q1, 1e-9)
         value = pl.col(name).cast(pl.Float64)
-        # 0 inside the IQR, otherwise how many IQRs beyond the nearer edge
-        distances.append(
+        # 0 inside the IQR, otherwise how many IQRs beyond the nearer edge.
+        # Null in, null out -- filling happens below, against a denominator
+        # that excludes the nulls.
+        helpers.append(
             pl.max_horizontal(
                 (q1 - value) / width, (value - q3) / width, pl.lit(0.0)
             ).alias(f"_t1d_{name}")
         )
+        if name in VARIABLE_SEVERITY_SIGN:
+            median = float(spec[name]["median"])
+            sign = float(VARIABLE_SEVERITY_SIGN[name])
+            helpers.append((sign * (value - median) / width).alias(f"_t1s_{name}"))
 
-    frame = frame.with_columns(distances)
-    outside = [
-        (pl.col(f"_t1d_{n}") > 0).cast(pl.Int32).fill_null(0) for n in continuous
-    ]
-    compared = [
-        pl.col(n).is_not_null().cast(pl.Int32) for n in continuous
-    ]
-    return frame.with_columns(
+    frame = frame.with_columns(helpers)
+
+    distance_cols = [f"_t1d_{n}" for n in continuous]
+    severity_cols = [f"_t1s_{n}" for n in oriented]
+    n_published = len(continuous)
+
+    n_compared = pl.sum_horizontal(
+        *(pl.col(c).is_not_null().cast(pl.Int32) for c in distance_cols)
+    )
+    # The mean over the variables this patient actually has: an explicit sum
+    # of the non-null distances over an explicit count of them, rather than
+    # mean_horizontal, so the denominator cannot be misread.
+    absdist = pl.sum_horizontal(
+        *(pl.col(c).fill_null(0.0) for c in distance_cols)
+    ) / pl.when(n_compared > 0).then(n_compared).otherwise(None)
+
+    if severity_cols:
+        n_oriented = pl.sum_horizontal(
+            *(pl.col(c).is_not_null().cast(pl.Int32) for c in severity_cols)
+        )
+        severity_gap = pl.sum_horizontal(
+            *(pl.col(c).fill_null(0.0) for c in severity_cols)
+        ) / pl.when(n_oriented > 0).then(n_oriented).otherwise(None)
+    else:
+        severity_gap = pl.lit(None, dtype=pl.Float64)
+
+    outside = [(pl.col(c) > 0).cast(pl.Int32).fill_null(0) for c in distance_cols]
+
+    frame = frame.with_columns(
         **{
             f"t1_outside_{key}": pl.sum_horizontal(*outside),
-            f"t1_maxdist_{key}": pl.max_horizontal(
-                *(pl.col(f"_t1d_{n}") for n in continuous)
-            ),
-            f"t1_n_compared_{key}": pl.sum_horizontal(*compared),
+            f"t1_maxdist_{key}": pl.max_horizontal(*(pl.col(c) for c in distance_cols)),
+            f"t1_absdist_{key}": absdist,
+            f"t1_severity_gap_{key}": severity_gap,
+            f"t1_n_compared_{key}": n_compared,
+            f"t1_n_published_{key}": pl.lit(n_published, dtype=pl.Int32),
+            f"t1_frac_compared_{key}": n_compared / float(n_published),
         }
-    ).drop([f"_t1d_{n}" for n in continuous])
+    ).drop(distance_cols + severity_cols)
+
+    eligible = frame.filter(pl.col(f"elig_{key}"))
+    if eligible.height:
+        covered = float(eligible[f"t1_frac_compared_{key}"].mean())
+        gap = eligible[f"t1_severity_gap_{key}"].median()
+        shown = f"{gap:+.2f} IQR from their median" if gap is not None else "n/a"
+        logger.info(
+            f"  {trial.label:<22} {n_published} comparable variable(s), "
+            f"{len(oriented)} oriented; {covered:.0%} present per eligible "
+            f"patient; median severity gap {shown}"
+        )
+    return frame
 
 
 def inside_all_null(k: int) -> float:
@@ -1564,8 +1833,13 @@ def table1_comparison(frame: pl.DataFrame, trial, logger) -> pl.DataFrame:
                 {
                     "trial": trial.label,
                     "variable": TABLE1_LABELS.get(name, name),
+                    "column": name,
                     "kind": "proportion",
                     "confidence": VARIABLE_CONFIDENCE.get(name, "unknown"),
+                    "severity_sign": VARIABLE_SEVERITY_SIGN.get(name),
+                    "n_eligible": int(eligible.height),
+                    "n_present": int(column.len() - column.null_count()),
+                    "pct_missing": float(column.null_count() / column.len()),
                     "published": float(published["pct"]),
                     "published_q1": None,
                     "published_q3": None,
@@ -1583,8 +1857,19 @@ def table1_comparison(frame: pl.DataFrame, trial, logger) -> pl.DataFrame:
         row = {
             "trial": trial.label,
             "variable": TABLE1_LABELS.get(name, name),
+            "column": name,
             "kind": "continuous",
             "confidence": VARIABLE_CONFIDENCE.get(name, "unknown"),
+            "severity_sign": VARIABLE_SEVERITY_SIGN.get(name),
+            "n_eligible": int(eligible.height),
+            "n_present": int(values.len()),
+            # Missingness is reported per variable and not only per patient,
+            # because the two fail differently: a variable missing for most of
+            # the cohort weakens every patient's score a little, while a
+            # patient missing most variables has a score that should not be
+            # read at all. `t1_frac_compared_{key}` is the second; this is the
+            # first.
+            "pct_missing": float(1.0 - values.len() / max(eligible.height, 1)),
             "published": float(published["median"]),
             "published_q1": None,
             "published_q3": None,
@@ -1613,6 +1898,15 @@ def table1_comparison(frame: pl.DataFrame, trial, logger) -> pl.DataFrame:
                 excess_above_q3=above - 0.25,
                 # positive means shifted low, negative means shifted high
                 net_shift_low=below - above,
+            )
+            # The same shift restated in the direction that matters
+            # clinically. `net_shift_low` is about the number line;
+            # `net_shift_sicker` is about the patient, and the two have
+            # opposite signs for a variable like MAP where lower is worse.
+            # Null where the variable has no agreed sicker end.
+            sign = VARIABLE_SEVERITY_SIGN.get(name)
+            row["net_shift_sicker"] = (
+                None if sign is None else float(sign * (above - below))
             )
         rows.append(row)
 
