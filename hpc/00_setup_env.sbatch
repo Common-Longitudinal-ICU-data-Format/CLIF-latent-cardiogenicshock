@@ -36,7 +36,15 @@
 set -euo pipefail
 
 # --- EDIT THESE to match `module avail` on this cluster -----------------
-PYTHON_MODULE="${PYTHON_MODULE:-python/3.12.3}"
+# Empty by default, and on Rush CRI it should stay that way. The cluster
+# has python/3.10.5 and python/3.12.3 and Lmod answers "exist but cannot
+# be loaded as requested" for both -- they sit behind a toolchain
+# prerequisite in a hierarchical module tree. None of that matters: the
+# venv is built on a standalone CPython that uv installed, and activating
+# the venv is what puts the right interpreter on PATH.
+PYTHON_MODULE="${PYTHON_MODULE:-}"
+# The interpreter the venv is created FROM. Must be 3.11 or newer.
+BOOTSTRAP_PYTHON="${BOOTSTRAP_PYTHON:-python3}"
 VENV_HOME="${VENV_HOME:-$HOME/venvs/clif-cs}"
 # ------------------------------------------------------------------------
 
@@ -63,15 +71,17 @@ cd "$REPO_HOME"
 mkdir -p logs
 
 module purge
-module load "$PYTHON_MODULE"
+if [ -n "$PYTHON_MODULE" ]; then
+    module load "$PYTHON_MODULE"
+fi
 
 echo "=============================================================="
 echo " node     $(hostname)"
-echo " python   $(command -v python)  $(python --version 2>&1)"
+echo " python   $(command -v "$BOOTSTRAP_PYTHON")  $("$BOOTSTRAP_PYTHON" --version 2>&1)"
 echo " venv     $VENV_HOME"
 echo "=============================================================="
 
-python - <<'PY'
+"$BOOTSTRAP_PYTHON" - <<'PY'
 import sys
 # cotorra 26.6.3 and cocoa-tokenizer 26.6.2 both declare requires_python
 # >=3.11, so pip refuses to install them on anything older. The repo was
@@ -81,7 +91,9 @@ if sys.version_info < (3, 11):
     raise SystemExit(
         f"need Python 3.11 or newer, got {sys.version.split()[0]}. "
         "cotorra and cocoa-tokenizer declare requires_python >=3.11. "
-        "Fix PYTHON_MODULE."
+        "Point BOOTSTRAP_PYTHON at a newer one -- uv can install it:\n"
+        "  uv python install 3.11\n"
+        "  sbatch --export=ALL,BOOTSTRAP_PYTHON=$(uv python find 3.11) hpc/00_setup_env.sbatch"
     )
 print(f"  python version ok ({sys.version.split()[0]})")
 PY
@@ -90,7 +102,7 @@ if [ -d "$VENV_HOME" ]; then
     echo "note: $VENV_HOME already exists; reusing it."
     echo "      delete it first if you want a clean build."
 else
-    python -m venv "$VENV_HOME"
+    "$BOOTSTRAP_PYTHON" -m venv "$VENV_HOME"
 fi
 # shellcheck disable=SC1091
 source "$VENV_HOME/bin/activate"

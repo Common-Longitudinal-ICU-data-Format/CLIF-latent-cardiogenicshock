@@ -135,6 +135,18 @@ module avail 2>&1 | head -50
 Then set them once, in [`hpc/_common.sh`](../hpc/_common.sh), and in the
 `#SBATCH --partition=` line of each job script.
 
+**You may not need a python module at all.**  is empty by
+default and on Rush CRI it should stay empty: both  and
+ are hierarchical modules sitting behind a toolchain
+prerequisite, and Lmod refuses them with *"exist but cannot be loaded as
+requested"*. None of that matters, because the venv is built on a standalone
+CPython that  installed and activating the venv is what puts the right
+interpreter on PATH. Set  only where the system python is too
+old to create the venv in the first place.
+
+There is no CUDA module either, and none is needed -- the pip  torch
+wheels bundle their own CUDA runtime and the GPU nodes carry the driver.
+
 There may be no GPU partition at all, or it may be reachable only through an
 account or QoS flag. If `sinfo` shows no GRES anywhere, the pipeline still
 runs -- `embed` falls back to CPU at roughly twenty times the wall time --

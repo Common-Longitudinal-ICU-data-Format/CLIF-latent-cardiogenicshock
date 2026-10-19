@@ -37,15 +37,32 @@
 # _common.sh by hand in an interactive shell.
 REPO_HOME="${REPO_HOME:-$HOME/CLIF-latent-cardiogenicshock}"
 VENV_HOME="${VENV_HOME:-$HOME/venvs/clif-cs}"
-PYTHON_MODULE="${PYTHON_MODULE:-python/3.12.3}"
+# PYTHON_MODULE is EMPTY BY DEFAULT, and on Rush CRI it should stay that
+# way. The cluster has python/3.10.5 and python/3.12.3, and Lmod answers
+# "exist but cannot be loaded as requested" for both -- they sit behind a
+# toolchain prerequisite in a hierarchical module tree. None of that matters,
+# because the venv does not need a python module: it was built on a
+# standalone CPython 3.11.16 that uv installed under ~/.local/share/uv, and
+# activating the venv is what puts the right interpreter on PATH.
+#
+# Set it only on a cluster where the system python is too old to create the
+# venv in the first place, e.g. PYTHON_MODULE=python/3.11.
+PYTHON_MODULE="${PYTHON_MODULE:-}"
 SITE="${SITE:-RUSH}"
 # ------------------------------------------------------------------------
 
 set -euo pipefail
 
 module purge
-module load "$PYTHON_MODULE"
+if [ -n "$PYTHON_MODULE" ]; then
+    module load "$PYTHON_MODULE"
+fi
 
+if [ ! -f "$VENV_HOME/bin/activate" ]; then
+    echo "no virtualenv at $VENV_HOME. Build it with:" >&2
+    echo "  sbatch hpc/00_setup_env.sbatch" >&2
+    exit 1
+fi
 source "$VENV_HOME/bin/activate"
 cd "$REPO_HOME"
 mkdir -p logs
