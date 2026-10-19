@@ -590,6 +590,12 @@ concordance definition itself, not the trial's description:
 `figures/<model>/anchor-<anchor>/trial_fit_outcomes.png`, and a written
 summary with limitations at `output/trial_fit_summary_<anchor>.md`.
 
+All of it renders into the report as **4.1 &middot; Fit and outcome**, a
+subsection of the guideline-fit section rather than a section of its own: 11
+produces the score and 12 says what it is worth, so separating them would put
+the two under different headings. The subsection is omitted when 12 has not
+run, and its contents entry with it.
+
 Needs `statsmodels`, which nothing in 01–11 imports — a site running only the
 site-side stages does not need it.
 

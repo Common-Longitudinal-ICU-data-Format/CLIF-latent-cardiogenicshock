@@ -260,6 +260,29 @@ def thousands(x):
     return "—" if x is None else f"{int(x):,}"
 
 
+def pval(x):
+    """a p-value with a floor, since 0.0000 reads as a certainty"""
+    if x is None:
+        return "—"
+    # a bare "<": table() escapes every cell, so an entity here would double up
+    return "<0.0001" if x < 0.0001 else f"{x:.4f}"
+
+
+def present(frame: pl.DataFrame, *columns: str):
+    """
+    the requested columns this frame actually has, and the ones it does not
+
+    11 writes a narrower eligibility table on the federated path than on the
+    site-side one -- proximity cannot be computed from exported decile ranks,
+    so the columns built from it are absent -- and the two anchors can have
+    been produced by different paths. Selecting the intersection keeps the tab
+    renderable; returning the absences lets the caller say which anchor is
+    short rather than quietly rendering fewer columns than the prose describes.
+    """
+    have = [c for c in columns if c in frame.columns]
+    return frame.select(have), [c for c in columns if c not in frame.columns]
+
+
 def read_model_tables(paths, name, required, logger):
     """collect one table across models, refusing to merge mismatched schemas"""
     frames, stale = [], []
@@ -752,14 +775,18 @@ def section_trials(paths, out: list) -> None:
     anchor_tabs = []
     for anchor in anchors:
         blocks = []
+        absent: list[str] = []
         eligibility = pl.read_csv(table_home / f"trial_eligibility_{anchor}.csv")
+        shown, missing = present(
+            eligibility,
+            "trial", "year", "n_eligible", "share_eligible",
+            "mortality_eligible", "n_inside_not_eligible",
+            "centroid_separation_spreads", "criteria_not_applied",
+        )
+        absent += missing
         blocks.append(
             ("Eligibility", table(
-                eligibility.select(
-                    "trial", "year", "n_eligible", "share_eligible",
-                    "mortality_eligible", "n_inside_not_eligible",
-                    "centroid_separation_spreads", "criteria_not_applied",
-                ),
+                shown,
                 {
                     "n_eligible": thousands,
                     "share_eligible": pct,
@@ -772,14 +799,17 @@ def section_trials(paths, out: list) -> None:
         )
         representativeness = table_home / f"trial_representativeness_{anchor}.csv"
         if representativeness.is_file():
+            shown, missing = present(
+                pl.read_csv(representativeness),
+                "trial", "n_published", "n_eligible_here",
+                "age_published", "age_here",
+                "pct_female_published", "pct_female_here",
+                "lactate_published", "lactate_here",
+            )
+            absent += missing
             blocks.append(
                 ("Us vs them", table(
-                    pl.read_csv(representativeness).select(
-                        "trial", "n_published", "n_eligible_here",
-                        "age_published", "age_here",
-                        "pct_female_published", "pct_female_here",
-                        "lactate_published", "lactate_here",
-                    ),
+                    shown,
                     {
                         "n_published": thousands,
                         "n_eligible_here": thousands,
@@ -898,15 +928,18 @@ def section_trials(paths, out: list) -> None:
             )
         outcomes_file = table_home / f"trial_outcomes_{anchor}.csv"
         if outcomes_file.is_file():
+            shown, missing = present(
+                pl.read_csv(outcomes_file),
+                "trial", "arm", "reliable", "n_inside", "n_outside",
+                "mortality_inside", "mortality_outside",
+                "mortality_difference", "mortality_difference_sofa_adj",
+                "icu_los_inside", "icu_los_outside",
+                "sofa_non_cv_inside", "sofa_non_cv_outside",
+            )
+            absent += missing
             blocks.append(
                 ("Outcomes inside vs outside", table(
-                    pl.read_csv(outcomes_file).select(
-                        "trial", "arm", "reliable", "n_inside", "n_outside",
-                        "mortality_inside", "mortality_outside",
-                        "mortality_difference", "mortality_difference_sofa_adj",
-                        "icu_los_inside", "icu_los_outside",
-                        "sofa_non_cv_inside", "sofa_non_cv_outside",
-                    ),
+                    shown,
                     {
                         "n_inside": thousands, "n_outside": thousands,
                         "mortality_inside": pct, "mortality_outside": pct,
@@ -929,7 +962,18 @@ def section_trials(paths, out: list) -> None:
             body = figure(home / f"{name}.png")
             if body:
                 blocks.append((label, body))
-        anchor_tabs.append((anchor, tabs(blocks)))
+        rendered = tabs(blocks)
+        if absent:
+            # Saying which columns are gone, rather than rendering a narrower
+            # table under prose that describes the wider one.
+            rendered = callout(
+                f"<b>This anchor's tables were written by 11's federated path, "
+                f"which cannot compute proximity.</b> Absent here: "
+                + ", ".join(f"<code>{esc(c)}</code>" for c in absent)
+                + ". Re-run <code>python code/11_trial_alignment.py --anchor "
+                f"{esc(anchor)}</code> at a site with patient-level values to "
+                "fill them in.", "warn") + rendered
+        anchor_tabs.append((anchor, rendered))
 
     out.append(tabs(anchor_tabs))
 
@@ -1104,6 +1148,247 @@ def section_trials(paths, out: list) -> None:
         "recognise as cardiogenic shock. <b>Even among the "
         "cardiogenic-coded patients, 26.3% are covered by nothing.</b>",
         "warn"))
+
+
+def section_trial_fit(paths, out: list) -> bool:
+    """
+    12's outcome models against the fit score
+
+    A subsection of 4 rather than a section of its own: it asks what 11's
+    distance is worth, over the same trials and the same anchors, so splitting
+    it off would put the score and its consequence under different headings.
+
+    Renders only what 12 produced. Every table here carries the adjustment
+    overlap alongside it, because the adjusted column cannot be read without
+    knowing how much of the exposure the adjustment removed.
+
+    Returns whether anything was emitted, so main can decide whether to
+    list the heading in the contents.
+    """
+    table_home = paths.output_home / "tables" / "GEM-all"
+    anchors = [
+        anchor
+        for anchor in ANCHORS
+        if (table_home / f"trial_fit_outcomes_{anchor}.csv").is_file()
+    ]
+    if not anchors:
+        return False
+
+    out.append(
+        '<h3 id="trial-fit">4.1 &middot; Does fitting the trial track with '
+        "doing better?</h3>"
+    )
+    out.append(
+        "<p>The tables above establish that most of these patients sit outside "
+        "the populations the recommendations were tested in. This asks what "
+        "that distance is worth: whether mortality, ventilator-free days and "
+        "vasopressor-free days move with it. Two readings of the same gap are "
+        "fitted separately &mdash; <code>absdist</code>, how far outside the "
+        "published interquartile ranges a patient sits, and "
+        "<code>severity_gap</code>, <i>which way</i>, signed so positive means "
+        "sicker or older than the trial's median. The direction score is the "
+        "one that answers the question an inside/outside split cannot, since a "
+        "patient healthier than the trial and a patient sicker than it are "
+        "both &ldquo;outside&rdquo;.</p>"
+    )
+    out.append(
+        "<p>Each score enters as a restricted cubic spline on 4 degrees of "
+        "freedom, so a relation that turns can show itself; a linear model is "
+        "fitted alongside and the two compared by likelihood ratio, which is "
+        "the <code>p (nonlinear)</code> column. Mortality is logistic, the free-day "
+        "outcomes least squares. Predictions are reported at the 10th, 50th and "
+        "90th percentile of the score among that trial's own eligible patients, "
+        "so <code>difference</code> is the change across the middle 80% of the "
+        "fit range rather than across its tails.</p>"
+    )
+    out.append(
+        "<p>Each model is fitted twice: unadjusted, and adjusted for "
+        "non-cardiovascular SOFA, age and site. <b>The adjusted column is not a "
+        "bias-corrected version of the unadjusted one</b> &mdash; the exposure "
+        "and the confounder are built from overlapping measurements, and the "
+        "<b>Adjustment overlap</b> tab gives the share per trial. Where the "
+        "overlap is total the row is marked and should be read as collinearity "
+        "rather than as an estimate.</p>"
+    )
+
+    anchor_tabs = []
+    for anchor in anchors:
+        blocks = []
+        results = pl.read_csv(table_home / f"trial_fit_outcomes_{anchor}.csv")
+        results = results.with_columns(
+            adjusted=pl.when(pl.col("adjusted")).then(pl.lit("yes"))
+            .otherwise(pl.lit("no")),
+            note=pl.when(~pl.col("interpretable"))
+            .then(pl.lit("collinear: score and adjuster are the same variable"))
+            .otherwise(pl.lit("")),
+        )
+        for outcome, label, fmt in (
+            ("in_hospital_mortality", "Mortality", pct),
+            ("vent_free_days", "Ventilator-free days", num(1)),
+            ("pressor_free_days", "Vasopressor-free days", num(1)),
+        ):
+            rows = results.filter(pl.col("outcome") == outcome)
+            if not rows.height:
+                continue
+            columns = [
+                "trial", "score", "adjusted", "n",
+                "predicted_at_p10", "predicted_at_p50", "predicted_at_p90",
+                "difference_p90_minus_p10", "curve_shape",
+                "p_overall", "p_nonlinearity", "note",
+            ]
+            blocks.append((label, table(
+                rows.sort("score", "trial", "adjusted").select(columns),
+                {
+                    "n": thousands,
+                    "predicted_at_p10": fmt,
+                    "predicted_at_p50": fmt,
+                    "predicted_at_p90": fmt,
+                    "difference_p90_minus_p10": fmt,
+                    "p_overall": pval,
+                    "p_nonlinearity": pval,
+                },
+                key_column="trial",
+            )))
+
+        interaction = table_home / f"trial_fit_interaction_{anchor}.csv"
+        if interaction.is_file():
+            blocks.append(("Concordant care, by fit", table(
+                pl.read_csv(interaction).sort("trial", "score", "outcome")
+                .select(
+                    "trial", "score", "outcome", "n", "n_concordant",
+                    "slope_discordant", "interaction", "p_interaction",
+                    "concordance_means", "confounding",
+                ),
+                {
+                    "n": thousands, "n_concordant": thousands,
+                    "slope_discordant": num(3), "interaction": num(3),
+                    "p_interaction": pval,
+                },
+                key_column="trial",
+            )))
+
+        overlap = table_home / "trial_fit_adjustment_overlap.csv"
+        if overlap.is_file():
+            blocks.append(("Adjustment overlap", table(
+                pl.read_csv(overlap).sort("overlap_share", descending=True)
+                .select(
+                    "trial", "score", "fit_score_variables",
+                    "also_adjusted_for", "overlap_share",
+                    "adjusted_interpretable",
+                ),
+                {"overlap_share": pct},
+                key_column="trial",
+            )))
+
+        skipped = table_home / f"trial_fit_skipped_{anchor}.csv"
+        if skipped.is_file():
+            blocks.append(("Trials with no fit score", table(
+                pl.read_csv(skipped).sort("n_eligible", descending=True),
+                {"n_eligible": thousands},
+                key_column="trial",
+            )))
+
+        body = figure(
+            paths.output_home / "figures" / "GEM-all" / f"anchor-{anchor}"
+            / "trial_fit_outcomes.png",
+            "Fitted outcome against fit score, with 95% bands. Each column an "
+            "outcome, each row a trial.",
+        )
+        if body:
+            blocks.append(("Curves", body))
+
+        anchor_tabs.append((anchor, tabs(blocks)))
+
+    out.append(tabs(anchor_tabs))
+
+    out.append(callout(
+        "<b>Fit tracks outcome in every trial, every outcome and both "
+        "directions of adjustment &mdash; the smallest <code>p (overall)</code> "
+        "anywhere in the table is 0.0034.</b> Against the direction score, "
+        "predicted mortality runs from 15.0% at the 10th percentile of fit to "
+        "<b>48.8%</b> at the 90th for ECMO-CS-eligible patients, 30.7% to 57.3% "
+        "for ECLS-SHOCK, 20.8% to 44.7% for OptimaCC and 10.7% to 27.9% for the "
+        "SOAP II subgroup. Ventilator-free days fall 20.5 to 12.5 across the "
+        "same range for ECMO-CS and vasopressor-free days 22.0 to 12.9. The "
+        "gradient is real and it is large; what it <i>is</i> is the question "
+        "the next three callouts are about."))
+
+    out.append(callout(
+        "<b>Direction carries almost all of it, and the unsigned distance is "
+        "close to uninformative.</b> The two scores are computed from the same "
+        "variables and differ only in whether the sign is kept. Keeping it "
+        "nearly doubles the mortality spread for ECMO-CS (33.8 points against "
+        "19.9) and multiplies it fourteen-fold for the SOAP II subgroup (17.3 "
+        "against 1.2), and it is what the nonlinearity is made of: <b>20 of 21 "
+        "unadjusted <code>severity_gap</code> models reject linearity against "
+        "4 of 21 <code>absdist</code> models.</b> A patient far outside a "
+        "trial's ranges in the healthy direction and one equally far outside in "
+        "the sick direction have the same <code>absdist</code> and opposite "
+        "outcomes, so averaging them is what flattens the unsigned score. "
+        "<b>This is the result that justifies computing a direction at all</b>, "
+        "and it is the reason the binary inside/outside column in the tables "
+        "above should not be used as a fit measure."))
+
+    out.append(callout(
+        "<b>The curve turns for the two MI trials, and in the direction that "
+        "says the score stops measuring severity.</b> CULPRIT-SHOCK and "
+        "ECLS-SHOCK are U-shaped on mortality and inverted-U on both free-day "
+        "outcomes, adjusted and not: patients <i>healthier</i> than the trial's "
+        "median on the measured axes do worse than patients sitting at it. That "
+        "cannot be read as &ldquo;being unlike the trial is bad for you&rdquo; "
+        "in any symmetric sense. The likelier reading is that the measured "
+        "axes &mdash; pressures, lactate, pH, age &mdash; stop ordering "
+        "severity at their benign end, where what distinguishes patients is "
+        "something the published baseline tables never reported. A monotone "
+        "model would have averaged the turn away, which is why the spline is "
+        "fitted even where the linear fit is adequate.", "warn"))
+
+    out.append(callout(
+        "<b>Adjustment does not attenuate the gradient, and that is a warning "
+        "rather than a finding.</b> The adjusted estimate is <i>larger</i> than "
+        "the unadjusted one in 25 of 42 trial-score-outcome combinations. For a "
+        "genuine confounder one expects shrinkage, so the honest reading is "
+        "that non-cardiovascular SOFA, age and site are not the confounders "
+        "that matter here &mdash; and that where they do overlap the exposure, "
+        "adjusting removes signal rather than bias. <b>Three rows are pure "
+        "collinearity and are labelled so:</b> SHOCK on both scores and "
+        "IABP-SHOCK II on the direction score reduce to age alone once the "
+        "unavailable criteria are dropped, so their adjusted models regress age "
+        "on age &mdash; which is where IABP-SHOCK II's implausible 2.7% to "
+        "74.9% mortality sweep comes from. They are reported rather than "
+        "dropped because dropping them would leave the unadjusted estimate "
+        "looking unopposed.", "warn"))
+
+    out.append(callout(
+        "<b>The concordance interaction is significant only where concordance "
+        "means choosing one drug over another, and there it is confounded by "
+        "indication beyond repair.</b> OptimaCC (norepinephrine used, "
+        "epinephrine never) and the SOAP II subgroup (norepinephrine used, "
+        "dopamine never) show interactions at p &lt; 0.0001 on all three "
+        "outcomes; the three device trials show nothing except ECLS-SHOCK on "
+        "mortality (p = 0.02 of 18 tests). The device trials were negative, so "
+        "&ldquo;concordant&rdquo; there means the device was <i>withheld</i> "
+        "&mdash; which happens most in patients too well and in patients too "
+        "sick to cannulate, inverting the usual direction at both ends at once. "
+        "Nothing in this tab supports a claim that guideline-concordant care "
+        "pays off differently by fit; it is reported because the question was "
+        "asked and the answer is that this design cannot address it.", "warn"))
+
+    out.append(callout(
+        "<b>Ten trials contribute eligibility but no fit score, and the largest "
+        "of them is not small.</b> A fit score needs a transcribed baseline "
+        "table with interquartile ranges, and 61 published values in "
+        "<code>trials.yaml</code> are still unverified placeholders. <b>All ten "
+        "are the sepsis and haemorrhage trials</b> &mdash; CLOVERS (8,528 "
+        "eligible patients here), SEPSISPAM, SMART, APROCCHSS and CLASSIC "
+        "(8,115 each), VASST (6,819), the 65 trial (4,715), ADRENAL (3,225), "
+        "Villanueva (590) and CRASH-2 (0) &mdash; so they appear in the "
+        "eligibility tables above and nowhere in this subsection. "
+        "<code>trial_table1_to_verify.csv</code> lists every value awaiting "
+        "verification against its paper. Until those are checked, this "
+        "subsection speaks only to the cardiogenic shock literature."))
+
+    return True
 
 
 def section_patient_embeddings(paths, out: list) -> None:
@@ -1473,6 +1758,7 @@ def main() -> None:
     section_tokens(paths, out)
     section_projections(paths, out)
     section_trials(paths, out)
+    fitted = section_trial_fit(paths, out)
     current, note = trajectory_is_current(paths, logger)
     if current:
         section_patient_embeddings(paths, out)
@@ -1514,6 +1800,8 @@ def main() -> None:
         ("trials", "4 &middot; Guideline fit"),
         ("patients", "5 &middot; Embeddings over time"),
     ]
+    if fitted:
+        entries.insert(4, ("trial-fit", "4.1 &middot; Fit and outcome"))
     if current:
         entries += [
             ("paths", "6 &middot; Individual trajectories"),
