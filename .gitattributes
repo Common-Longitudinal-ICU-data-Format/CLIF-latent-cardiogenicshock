@@ -1,0 +1,6 @@
+# Shell and SLURM scripts must keep LF endings. They are authored on
+# Windows and run on a Linux cluster; a CR in a shebang line makes bash
+# fail with "bad interpreter: /bin/bash^M", which reads as a missing
+# interpreter rather than a line-ending problem.
+*.sh   text eol=lf
+*.sbatch text eol=lf
