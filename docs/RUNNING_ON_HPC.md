@@ -155,32 +155,108 @@ can ignore it if it gives trouble.
 cp code/config/paths.example.yaml code/config/paths.yaml
 ```
 
+Filled in for Rush:
+
 ```yaml
 role: site
 
 sites:
   RUSH:
-    data_dir: /project/.../CLIF_RUSH_2_1
+    data_dir: /gpfs/data/healthcare-allocate/CLIF_RUSH_2_1
 
 models:
   GEM-all:
-    home_glob: /project/.../GEM-weights-FL-manuscript/GEM?-all/mdl-cotorra
+    home_glob: /gpfs/data/pearson-lab/PERSONAL/hhieromnimon/GEM-weights-FL-manuscript/GEM?-all/mdl-cotorra
 default_model: GEM-all
 
-tokenizer_yaml: /project/.../GEM-weights-FL-manuscript/tokenizer.yaml
+tokenizer_yaml: /gpfs/data/pearson-lab/PERSONAL/hhieromnimon/GEM-weights-FL-manuscript/tokenizer.yaml
 
-output_home:  /project/.../clif-cs/output      # persistent
-scratch_home: /scratch/$USER/clif-cs           # fast, purgeable
+output_home:  /gpfs/data/pearson-lab/PERSONAL/hhieromnimon/clif-cs/output
+scratch_home: /gpfs/scratch/$USER/clif-cs          # CONFIRM THIS ONE
 ```
 
-Note the `GEM?-` wildcard: it is a single-character match that selects the
-"star" run and would be ambiguous as `GEM*-`.
+`data_dir` is only ever read. The pipeline writes its cohort-restricted
+copies, the `_processed` respiratory waterfall and the `_converted` dose
+tables to `scratch_home`, never back into the CLIF directory, so a read-only
+shared allocation is fine.
 
-Config-only sanity check, reads no data:
+`scratch_home` is the one line left to confirm — it is the only path above
+not yet pinned down, and it needs roughly **40x the size of the raw tables**:
 
 ```bash
-python -c "import sys; sys.path.insert(0,'code'); from clifcs import load_paths; p=load_paths(); print(p.sites, p.model_home, p.tokenizer_yaml)"
+du -sh /gpfs/data/healthcare-allocate/CLIF_RUSH_2_1    # then multiply by 40
+ls -d /gpfs/scratch/$USER 2>/dev/null || echo "no /gpfs/scratch -- ask what the scratch tier is"
 ```
+
+If there is no scratch tier, a subdirectory of the lab allocation works, but
+check the quota against that 40x figure before starting rather than after
+`derive` fails half way.
+
+### The U+25A1 in the weights directory name
+
+The model directories are **not** named `GEM-all`. They are named `GEM□-all`,
+with a literal U+25A1 WHITE SQUARE between `GEM` and the dash:
+
+```
+GEM-weights-FL-manuscript/
+├── GEM-mimic-icu/            <- plain
+├── GEM-ucmc-icu/             <- plain
+├── GEM□-all/                 <- U+25A1, and the only "all" checkpoint
+│   └── mdl-cotorra/
+│       ├── config.json
+│       └── model.safetensors        293 MiB
+├── GEM□-mimic-icu/
+├── GEM□-ucmc-icu/
+└── tokenizer.yaml
+```
+
+That is what the `?` in `GEM?-all` is matching: a single-character wildcard,
+not a typo and not a shell artifact. `GEM*-all` would be ambiguous for the
+other two datasets, which have both a plain and a square-prefixed directory.
+
+This is fragile across a copy. If the transfer to GPFS dropped the character,
+replaced it with an underscore, or expanded it into an escape sequence, the
+glob matches nothing (or two things) and the failure surfaces later as an
+unresolved path. Any *single* replacement character is fine — `?` matches
+whatever it became. Check with:
+
+```bash
+ls -b /gpfs/data/pearson-lab/PERSONAL/hhieromnimon/GEM-weights-FL-manuscript/
+```
+
+Only `config.json` and `model.safetensors` are needed for inference. The
+checkpoints also carry `optimizer.pt` at 587 MiB, which can be left out of
+the copy.
+
+### Preflight before queueing anything
+
+```bash
+bash hpc/00_preflight.sh
+```
+
+Resolves every path, counts the `clif_*` tables it found, checks the
+checkpoint and tokenizer, and probes that `output_home` and `scratch_home`
+are writable. Safe on a login node: it opens no CLIF table. If the model glob
+fails it lists what is actually on disk with the codepoints spelled out, which
+is the fastest way to see a mangled square.
+
+Expected output:
+
+```
+sites
+  [ok  ] RUSH             /gpfs/data/healthcare-allocate/CLIF_RUSH_2_1
+         19 clif_* tables
+model
+  [ok  ] checkpoint       .../GEM□-all/mdl-cotorra
+  ...
+PASS
+```
+
+19 `clif_*` tables is what UCMC and NU each have. Materially fewer means the
+wrong directory or an incomplete extract — check before going further, since
+a missing table degrades quietly: `clif_hospital_diagnosis` absent, for
+instance, makes every diagnosis-based trial criterion read as not met and
+understates eligibility rather than erroring.
 
 ---
 
@@ -189,7 +265,7 @@ python -c "import sys; sys.path.insert(0,'code'); from clifcs import load_paths;
 ### Job 1 — cohort, then STOP
 
 ```bash
-sbatch hpc/01_cohort.sbatch
+bash hpc/00_preflight.sh && sbatch hpc/01_cohort.sbatch
 ```
 
 This is deliberately its own job because **a human has to read the output
