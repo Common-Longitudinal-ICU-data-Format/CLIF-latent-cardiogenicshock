@@ -135,16 +135,25 @@ module avail 2>&1 | head -50
 Then set them once, in [`hpc/_common.sh`](../hpc/_common.sh), and in the
 `#SBATCH --partition=` line of each job script.
 
-**You may not need a python module at all.**  is empty by
-default and on Rush CRI it should stay empty: both  and
- are hierarchical modules sitting behind a toolchain
+**You may not need a python module at all.** `PYTHON_MODULE` is empty by
+default, and on Rush CRI it should stay empty. Both `python/3.10.5` and
+`python/3.12.3` are hierarchical modules sitting behind a toolchain
 prerequisite, and Lmod refuses them with *"exist but cannot be loaded as
-requested"*. None of that matters, because the venv is built on a standalone
-CPython that  installed and activating the venv is what puts the right
-interpreter on PATH. Set  only where the system python is too
-old to create the venv in the first place.
+requested"*. Chasing that prerequisite is wasted work: the venv runs on a
+standalone CPython 3.11.16 that `uv` installed under `~/.local/share/uv`,
+and activating the venv is what puts it on PATH.
 
-There is no CUDA module either, and none is needed -- the pip  torch
+Set `PYTHON_MODULE` only where the system python is too old to create the
+venv in the first place. To build the venv from a specific interpreter
+without a module, use `BOOTSTRAP_PYTHON`:
+
+```bash
+uv python install 3.11
+sbatch --export=ALL,BOOTSTRAP_PYTHON=$(uv python find 3.11) \
+       hpc/00_setup_env.sbatch
+```
+
+There is no CUDA module either, and none is needed: the pip `cu121` torch
 wheels bundle their own CUDA runtime and the GPU nodes carry the driver.
 
 There may be no GPU partition at all, or it may be reachable only through an
