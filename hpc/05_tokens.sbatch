@@ -2,7 +2,7 @@
 #SBATCH --job-name=clifcs-tokens
 #SBATCH --partition=express
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=32G
+#SBATCH --mem=16000M
 #SBATCH --time=00:30:00
 #SBATCH --output=logs/slurm-%x-%j.out
 #SBATCH --error=logs/slurm-%x-%j.out

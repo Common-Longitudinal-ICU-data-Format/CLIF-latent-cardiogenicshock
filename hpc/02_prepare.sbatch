@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --job-name=clifcs-prepare
 #SBATCH --partition=tier1q
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=192G
+#SBATCH --cpus-per-task=24
+#SBATCH --mem=96000M
 #SBATCH --time=12:00:00
 #SBATCH --output=logs/slurm-%x-%j.out
 #SBATCH --error=logs/slurm-%x-%j.out

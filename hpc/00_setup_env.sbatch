@@ -3,7 +3,7 @@
 #SBATCH --partition=gpuq
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=32G
+#SBATCH --mem=16000M
 #SBATCH --time=01:00:00
 #SBATCH --output=logs/slurm-%x-%j.out
 #SBATCH --error=logs/slurm-%x-%j.out
@@ -28,7 +28,7 @@
 # by hand:
 #
 #     srun --partition=gpuq --gres=gpu:1 --cpus-per-task=4 \
-#          --mem=32G --time=01:00:00 --pty bash
+#          --mem=16000M --time=01:00:00 --pty bash
 #
 # Those are alternatives. `srun --pty bash` asks for an interactive terminal
 # and must never appear inside a batch script.
@@ -36,8 +36,7 @@
 set -euo pipefail
 
 # --- EDIT THESE to match `module avail` on this cluster -----------------
-PYTHON_MODULE="${PYTHON_MODULE:-python/3.11}"
-CUDA_MODULE="${CUDA_MODULE:-cuda/12.1}"
+PYTHON_MODULE="${PYTHON_MODULE:-python/3.12.3}"
 VENV_HOME="${VENV_HOME:-$HOME/venvs/clif-cs}"
 # ------------------------------------------------------------------------
 
@@ -46,7 +45,6 @@ mkdir -p logs
 
 module purge
 module load "$PYTHON_MODULE"
-module load "$CUDA_MODULE"
 
 echo "=============================================================="
 echo " node     $(hostname)"
@@ -56,12 +54,17 @@ echo "=============================================================="
 
 python - <<'PY'
 import sys
-if sys.version_info[:2] != (3, 11):
+# cotorra 26.6.3 and cocoa-tokenizer 26.6.2 both declare requires_python
+# >=3.11, so pip refuses to install them on anything older. The repo was
+# developed on 3.11; Rush CRI offers 3.10.5 and 3.12.3, which makes 3.12
+# the only workable choice rather than a preference.
+if sys.version_info < (3, 11):
     raise SystemExit(
-        f"need Python 3.11, got {sys.version.split()[0]}. The pinned "
-        "coreopsis stack is built against it. Fix PYTHON_MODULE."
+        f"need Python 3.11 or newer, got {sys.version.split()[0]}. "
+        "cotorra and cocoa-tokenizer declare requires_python >=3.11. "
+        "Fix PYTHON_MODULE."
     )
-print("  python version ok")
+print(f"  python version ok ({sys.version.split()[0]})")
 PY
 
 if [ -d "$VENV_HOME" ]; then

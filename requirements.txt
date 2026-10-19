@@ -1,4 +1,5 @@
-# Python 3.11.
+# Python 3.11 or newer. cotorra and cocoa-tokenizer both declare
+# requires_python >=3.11, so 3.10 is not an option; 3.12 is fine.
 #
 # Install order matters. `cotorra` depends on torch/torchvision/torchaudio
 # without pins, so a plain install pulls CPU-only PyPI wheels over a CUDA build.
