@@ -118,36 +118,83 @@ close together or touch the tree.
 
 ## Setup
 
-Build the venv on a compute node, not the login node — the login node usually
-has no GPU and often a different CPU generation.
+### First: find out what this cluster calls things
+
+Every module and partition name in these scripts is a **placeholder**. They
+are wrong on any given cluster until checked, and all three fail loudly
+rather than silently, which is the one good thing about them:
 
 ```bash
-git clone <repo> CLIF-latent-cardiogenicshock
-cd CLIF-latent-cardiogenicshock
-
-srun --partition=<gpu-partition> --gres=gpu:1 --cpus-per-task=4 \
-     --mem=32G --time=01:00:00 --pty bash
-
-module load python/3.11
-module load cuda/12.1          # must match the cu121 wheels below
-
-python -m venv ~/venvs/clif-cs
-source ~/venvs/clif-cs/bin/activate
-pip install --upgrade pip
-
-pip install -r requirements.txt
-# CUDA torch LAST: cotorra depends on torch/torchvision/torchaudio unpinned,
-# so a plain install silently replaces a CUDA build with CPU wheels
-pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 \
-    --index-url https://download.pytorch.org/whl/cu121
-
-python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
-# expect: 2.5.1+cu121 True   -- and it must say True HERE, inside the job
+sinfo -o "%20P %5a %10l %6D %N"          # partitions; the one with a * is default
+sinfo -o "%20P %10G %N" | grep -i gpu    # which partitions actually have GPUs
+module spider python                      # every python the cluster has
+module spider cuda
+module avail 2>&1 | head -50
 ```
 
-`statsmodels` is in `requirements.txt` for `12_trial_fit_outcomes.py`, which is
-a pooled-side script. A site running only `01` and `02` does not need it and
-can ignore it if it gives trouble.
+Then set them once, in [`hpc/_common.sh`](../hpc/_common.sh), and in the
+`#SBATCH --partition=` line of each job script.
+
+There may be no GPU partition at all, or it may be reachable only through an
+account or QoS flag. If `sinfo` shows no GRES anywhere, the pipeline still
+runs -- `embed` falls back to CPU at roughly twenty times the wall time --
+and the realistic plan is to split the embed job by site or anchor rather
+than to request one very long allocation.
+
+### Then build the venv
+
+```bash
+sbatch hpc/00_setup_env.sbatch
+```
+
+Run once. It builds the venv, installs the pinned stack in the order that
+matters, and verifies CUDA from inside the allocation.
+
+**It requests a GPU to run a pip install, and that is the point.** The last
+thing it does is check `torch.cuda.is_available()`, and that check can only
+mean anything on a node with a card. On a login node it returns False even
+when everything is correct, so a setup verified there tells you nothing.
+
+### Interactive instead, the first time
+
+Watching pip fail in real time is often worth an allocation:
+
+```bash
+srun --partition=<real-gpu-partition> --gres=gpu:1 --cpus-per-task=4      --mem=32G --time=01:00:00 --pty bash
+```
+
+`srun --pty bash` asks for an interactive terminal. It is an **alternative**
+to `sbatch`, never a line inside a batch script -- a batch job has no
+terminal to attach to and is already on a compute node by the time it runs.
+
+Do not paste the whole setup block into a terminal in one go. If the `srun`
+fails -- a wrong partition name is enough -- every following line executes
+**on the login node** instead, and the first of them builds a venv against
+whatever `python` happens to be on the default PATH. Delete and rebuild if
+that happens; `python --version` inside the venv is the tell.
+
+### Install order is load-bearing
+
+`cotorra` depends on `torch`, `torchvision` and `torchaudio` without version
+pins, so installing `requirements.txt` after the CUDA wheels silently pulls
+CPU-only builds over the top of them. Requirements first, CUDA torch second:
+
+```bash
+pip install -r requirements.txt
+pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1     --index-url https://download.pytorch.org/whl/cu121
+```
+
+The failure is quiet: a CPU-only torch runs `embed` perfectly correctly and
+about twenty times slower, with nothing to say so beyond `torch.__version__`
+lacking a `+cu` suffix. The setup script fails rather than warns on it.
+
+Match the CUDA wheel to the module. If the cluster has CUDA 12.4 and no
+12.1, `cu121` wheels generally still run -- the driver is
+backward-compatible within a major version -- but prefer the matching index
+(`cu124`) when one exists.
+
+`statsmodels` is in `requirements.txt` for `12_trial_fit_outcomes.py`, a
+pooled-side script. A site running only `01` and `02` does not need it.
 
 ### Configure
 
