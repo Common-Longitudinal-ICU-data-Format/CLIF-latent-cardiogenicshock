@@ -771,6 +771,14 @@ def main() -> None:
         "(cohort/bhavani_model.json) instead of refitting",
     )
     parser.add_argument(
+        "--refit-phenotypes",
+        action="store_true",
+        help="fit the phenotype models on THIS cohort instead of applying the "
+        "shared ones. Only correct at the derivation site -- everywhere else "
+        "it makes the pooled breakdowns uninterpretable. Required to run the "
+        "cohort stage without the three --*-model flags",
+    )
+    parser.add_argument(
         "--batch-size",
         type=int,
         default=None,
@@ -799,6 +807,53 @@ def main() -> None:
         if path
     }
     logger = get_logger("01_site_aggregate", paths.log_home / "01_site_aggregate.log")
+
+    # ------------------------------------------------------------------
+    # Refusing to refit by accident.
+    #
+    # The three --*-model flags are documented as required at a contributing
+    # site, and nothing enforced it. At Rush the flags were silently dropped
+    # by a shell bug and the cohort stage refit its own clusters; the only
+    # sign was the word "refit" in one log line, among warnings that looked
+    # like findings about the data -- Seymour agreeing with the published
+    # profiles on 32% of patients, mortality not increasing across
+    # alpha-to-delta. Those were symptoms of the refit, and a reader could
+    # easily have taken them for site characteristics.
+    #
+    # So refitting is now something you ask for. The derivation site passes
+    # --refit-phenotypes and means it; everyone else gets an error naming the
+    # files they should be passing instead.
+    needs_cohort = args.stage in ("all", "cohort") or args.from_stage == "cohort"
+    transferred = (
+        args.phenotype_model or args.seymour_model or args.bhavani_model
+    )
+    if needs_cohort and not transferred and not args.refit_phenotypes:
+        models_home = pathlib.Path(__file__).resolve().parent.parent / "models"
+        parser.error(
+            "the cohort stage would REFIT the phenotype models on this "
+            "cohort, which is only correct at the derivation site. Refitting "
+            'makes "phenotype II", "beta" and "group A" mean something '
+            "different here than at every other site, and the pooled "
+            "breakdowns become uninterpretable.\n\n"
+            "At a contributing site, apply the shared models:\n"
+            f"    --phenotype-model {models_home / 'phenotype_model.json'}\n"
+            f"    --seymour-model   {models_home / 'seymour_model.json'}\n"
+            f"    --bhavani-model   {models_home / 'bhavani_model.json'}\n\n"
+            "At the derivation site, say so explicitly:\n"
+            "    --refit-phenotypes"
+        )
+    if transferred and args.refit_phenotypes:
+        parser.error(
+            "--refit-phenotypes contradicts the --*-model flags; pass one or "
+            "the other"
+        )
+    if args.refit_phenotypes:
+        logger.warning(
+            "REFITTING the phenotype models on this cohort. Correct only at "
+            "the derivation site -- the labels will not be comparable with "
+            "any other site's."
+        )
+
 
     if args.from_stage:
         todo = STAGES[STAGES.index(args.from_stage) :]
