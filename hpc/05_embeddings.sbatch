@@ -29,7 +29,27 @@
 # them. 01 must have run first; the export refuses if the tier-1 manifest was
 # written under a different model or a different salt.
 
-source "$(dirname "$0")/_common.sh"
+# `$(dirname "$0")` DOES NOT WORK IN A BATCH JOB. Slurm copies the script
+# into a per-job spool directory and runs it from there, so $0 is
+# /var/spool/slurmd/job<id>/<script> and the repo is nowhere near it. The
+# first version of these scripts sourced that path, failed, and carried on
+# regardless -- because `set -e` lived inside the file that had not loaded.
+# The job then ran with no module load, no venv activation, and an empty
+# PHENOTYPE_FLAGS, which silently refits the phenotype models instead of
+# applying the shared ones.
+#
+# SLURM_SUBMIT_DIR is where sbatch was invoked, which the docs say is the
+# repository root. Overridable, and checked rather than assumed.
+set -euo pipefail
+
+REPO_HOME="${REPO_HOME:-${SLURM_SUBMIT_DIR:-$PWD}}"
+if [ ! -f "$REPO_HOME/hpc/_common.sh" ]; then
+    echo "cannot find hpc/_common.sh under REPO_HOME=$REPO_HOME" >&2
+    echo "Submit from the repository root, or set REPO_HOME:" >&2
+    echo "  sbatch --export=ALL,REPO_HOME=/path/to/repo <script>" >&2
+    exit 1
+fi
+source "$REPO_HOME/hpc/_common.sh"
 
 if [ "${I_HAVE_CONFIRMED_THE_DUA:-no}" != "yes" ]; then
     echo "Refusing to run."

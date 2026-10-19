@@ -40,7 +40,26 @@ PYTHON_MODULE="${PYTHON_MODULE:-python/3.12.3}"
 VENV_HOME="${VENV_HOME:-$HOME/venvs/clif-cs}"
 # ------------------------------------------------------------------------
 
-cd "$(dirname "$0")/.."
+# `$(dirname "$0")` DOES NOT WORK IN A BATCH JOB. Slurm copies the script
+# into a per-job spool directory and runs it from there, so $0 is
+# /var/spool/slurmd/job<id>/<script> and the repo is nowhere near it. The
+# first version of these scripts sourced that path, failed, and carried on
+# regardless -- because `set -e` lived inside the file that had not loaded.
+# The job then ran with no module load, no venv activation, and an empty
+# PHENOTYPE_FLAGS, which silently refits the phenotype models instead of
+# applying the shared ones.
+#
+# SLURM_SUBMIT_DIR is where sbatch was invoked, which the docs say is the
+# repository root. Overridable, and checked rather than assumed.
+set -euo pipefail
+
+REPO_HOME="${REPO_HOME:-${SLURM_SUBMIT_DIR:-$PWD}}"
+if [ ! -f "$REPO_HOME/requirements.txt" ]; then
+    echo "cannot find requirements.txt under REPO_HOME=$REPO_HOME" >&2
+    echo "Submit from the repository root, or set REPO_HOME." >&2
+    exit 1
+fi
+cd "$REPO_HOME"
 mkdir -p logs
 
 module purge

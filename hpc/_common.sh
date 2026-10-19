@@ -30,6 +30,9 @@
 #              sinfo -o "%20P %10G %N" | grep -i gpu
 
 # --- EDIT THESE ---------------------------------------------------------
+# Normally already resolved by the job script, from SLURM_SUBMIT_DIR,
+# before it sourced this file. The default below is only for sourcing
+# _common.sh by hand in an interactive shell.
 REPO_HOME="${REPO_HOME:-$HOME/CLIF-latent-cardiogenicshock}"
 VENV_HOME="${VENV_HOME:-$HOME/venvs/clif-cs}"
 PYTHON_MODULE="${PYTHON_MODULE:-python/3.12.3}"

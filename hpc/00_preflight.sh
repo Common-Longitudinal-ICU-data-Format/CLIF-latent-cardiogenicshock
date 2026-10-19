@@ -14,6 +14,8 @@
 # twice, and the failure surfaces much later as a confusing path error.
 
 set -uo pipefail
+# Run directly (`bash hpc/00_preflight.sh`), never submitted, so unlike
+# the .sbatch files $0 really is this file and dirname is safe here.
 cd "$(dirname "$0")/.."
 
 # Deliberately does NOT source _common.sh: that does a module purge/load,
