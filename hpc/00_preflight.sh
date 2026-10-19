@@ -52,12 +52,66 @@ except Exception as exc:
     print(f"  [FAIL] paths.yaml did not load: {exc}")
     raise SystemExit(1)
 
+# Every table the pipeline reads as INPUT. The _processed, _converted and
+# clif_sofa tables are derived into scratch by the `derive` and `collate`
+# stages and are deliberately not listed here.
+#
+# Counting clif_*.parquet is not the check: UCMC and NU both hold 19 tables
+# and they are not the same 19 -- the union is 21, because each site ships
+# extras (bal, clinical_trials, intermittent_hemodialysis, the microbiology
+# tables) that this pipeline never opens. What matters is the required set.
+REQUIRED = [
+    "clif_adt",
+    "clif_code_status",
+    "clif_crrt_therapy",
+    "clif_hospital_diagnosis",
+    "clif_hospitalization",
+    "clif_labs",
+    "clif_medication_admin_continuous",
+    "clif_medication_admin_intermittent",
+    "clif_patient",
+    "clif_patient_assessments",
+    "clif_patient_procedures",
+    "clif_position",
+    "clif_respiratory_support",
+    "clif_vitals",
+]
+
+#: absent, these degrade the run quietly rather than stopping it, so each
+#: gets its own line saying what goes wrong
+DEGRADES_QUIETLY = {
+    "clif_hospital_diagnosis":
+        "every diagnosis-based trial criterion reads as not met; "
+        "eligibility and shock type are understated, not errored",
+    "clif_patient_procedures":
+        "IABP, ECMO and microaxial flags all read false, so the device "
+        "trials' concordance is silently wrong rather than absent",
+    "clif_crrt_therapy":
+        "renal support is invisible to the tokenizer",
+    "clif_code_status":
+        "limitation-of-treatment context is lost",
+}
+
 print("sites")
 for site in paths.sites:
     d = pathlib.Path(paths.raw_site_data[site])
-    tables = sorted(p.stem for p in d.glob("clif_*.parquet")) if d.is_dir() else []
-    report(site, d, d.is_dir(), f"{len(tables)} clif_* tables"
-           if tables else "no clif_*.parquet found -- wrong directory?")
+    if not d.is_dir():
+        report(site, d, False, "directory not found")
+        continue
+    present = {f.stem for f in d.glob("clif_*.parquet")}
+    missing = [t for t in REQUIRED if t not in present]
+    report(site, d, not missing,
+           f"all {len(REQUIRED)} required tables present "
+           f"({len(present)} total in directory)" if not missing
+           else f"MISSING {len(missing)} of {len(REQUIRED)} required")
+    for table in missing:
+        note = DEGRADES_QUIETLY.get(table)
+        print(f"           - {table}")
+        if note:
+            print(f"               {note}")
+    extra = sorted(present - set(REQUIRED))
+    if extra:
+        print(f"         also present, never read: {', '.join(extra)}")
 
 print("model")
 try:

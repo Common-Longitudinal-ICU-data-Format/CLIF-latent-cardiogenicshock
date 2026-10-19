@@ -252,11 +252,23 @@ model
 PASS
 ```
 
-19 `clif_*` tables is what UCMC and NU each have. Materially fewer means the
-wrong directory or an incomplete extract — check before going further, since
-a missing table degrades quietly: `clif_hospital_diagnosis` absent, for
-instance, makes every diagnosis-based trial criterion read as not met and
-understates eligibility rather than erroring.
+The check is the **required set by name, not a count**. The pipeline opens
+14 tables; UCMC and NU each hold 19 and they are not the same 19, because
+each site ships extras this pipeline never reads (`bal`,
+`clinical_trials`, `intermittent_hemodialysis`, the microbiology tables,
+and `ecmo_mcs`, which is deliberately unused -- it is a concept table and
+names 82% of UCMC hospitalizations). A site can hold 16 tables and be
+complete, or 20 and be missing something load-bearing.
+
+Missing tables degrade quietly rather than erroring, which is why the
+preflight names each one and what it costs:
+
+| absent | what silently goes wrong |
+|---|---|
+| `clif_hospital_diagnosis` | every diagnosis-based trial criterion reads as not met; eligibility and shock type are understated |
+| `clif_patient_procedures` | IABP, ECMO and microaxial flags all read false, so the device trials' concordance is wrong rather than absent |
+| `clif_crrt_therapy` | renal support is invisible to the tokenizer |
+| `clif_code_status` | limitation-of-treatment context is lost |
 
 ---
 
