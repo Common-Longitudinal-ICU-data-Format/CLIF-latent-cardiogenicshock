@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=clifcs-prepare
-#SBATCH --partition=general
+#SBATCH --partition=tier1q
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=192G
 #SBATCH --time=12:00:00

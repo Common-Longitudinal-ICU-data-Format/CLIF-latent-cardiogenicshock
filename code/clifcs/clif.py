@@ -14,7 +14,43 @@ from __future__ import annotations
 
 import pathlib
 
+import duckdb
 import polars as pl
+
+# ---------------------------------------------------------------------------
+# DuckDB reads TIMESTAMPTZ in the LOCAL SYSTEM TIMEZONE unless told otherwise.
+#
+# clifpy's dose conversion goes through DuckDB and returns pandas via .to_df(),
+# and on that path a TIMESTAMPTZ column comes back shifted into whatever
+# timezone the machine happens to be set to. Two sites in different timezones
+# -- or one cluster whose nodes are set to UTC while a workstation is set to
+# local -- then produce medication timestamps that disagree by hours, which
+# flows straight into tokenization and into the embeddings as a site effect
+# that looks exactly like a difference in practice.
+#
+# This line was previously carried by a fork of clifpy pinned in
+# requirements.txt. That fork has since been deleted from GitHub, so the
+# one-line fix lives here instead, where it is visible and attributable. It
+# must run before clifpy's unit_converter is imported; clifcs is imported at
+# the top of every entry point and clifpy only inside the derive stage, so it
+# does.
+#
+# Upstream clifpy does not set this at all, so nothing resets it afterwards.
+#
+# Called from clifcs/__init__.py so that it runs on `import clifcs`, which
+# every entry point does at module level, long before the derive stage
+# imports clifpy. Defining it here and calling it there rather than running
+# it at this module's import, because clifcs/__init__ does not otherwise
+# import clif.py -- the first version of this fix sat at module level and
+# silently never ran.
+def set_duckdb_utc() -> None:
+    """pin the default DuckDB connection to UTC; see the note above"""
+    duckdb.sql("SET TimeZone = 'UTC'")
+
+
+def duckdb_timezone() -> str:
+    """the default connection's timezone, for the startup assertion in 01"""
+    return str(duckdb.sql("SELECT current_setting('TimeZone')").fetchone()[0])
 
 #: tables that key on hospitalization_id
 #:

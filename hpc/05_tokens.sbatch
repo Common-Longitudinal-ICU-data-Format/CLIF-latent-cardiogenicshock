@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=clifcs-tokens
-#SBATCH --partition=general
+#SBATCH --partition=express
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
 #SBATCH --time=00:30:00

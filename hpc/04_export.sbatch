@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=clifcs-export
-#SBATCH --partition=general
+#SBATCH --partition=tier1q
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=96G
 #SBATCH --time=04:00:00

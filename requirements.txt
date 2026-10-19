@@ -15,7 +15,32 @@ cocoa-tokenizer==26.6.2
 cotorra==26.6.3
 transformers==4.45.2
 accelerate==0.34.2
-clifpy @ git+https://github.com/burkh4rt/clifpy.git@utc-fix
+# Upstream, from PyPI. This was previously pinned to a fork
+# (burkh4rt/clifpy @ utc-fix) which NO LONGER EXISTS -- the repository 404s,
+# so that line could not be installed at a new site at all.
+#
+# Diffing the last installed copy of the fork against upstream v0.5.0 showed
+# it carried exactly three changes, and only one of them touched data:
+#
+#   utils/unit_converter.py   SET TimeZone = 'UTC' on the default DuckDB
+#                             connection. THE LOAD-BEARING ONE -- see
+#                             clifcs/clif.py, which now does this itself.
+#   utils/validator.py        populate atomic counts before returning on an
+#                             empty table, so DQA scoring does not choke on
+#                             None. Robustness, no effect on output.
+#   schemas/3.0/adt_schema.yaml  make room_id required. Irrelevant here and
+#                             unwanted: this pipeline reads CLIF 2.1.
+#
+# Pinned exactly, not >=. clifpy computes the respiratory-support waterfall,
+# dose conversion and SOFA -- all of which feed tokenization, and therefore
+# the embeddings. A site on a different clifpy produces derived tables that
+# differ systematically from every other site's, and that difference lands in
+# the embedding space as a site effect indistinguishable from real case mix.
+clifpy==0.5.0
+
+# called directly by clifcs/clif.py for the timezone setting above; also a
+# clifpy dependency, pinned here only so the import is declared where it is used
+duckdb
 
 # --- dataframes --------------------------------------------------------------
 # polars <2: cocoa/cotorra accept 2.x but the reference implementation was

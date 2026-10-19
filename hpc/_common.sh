@@ -3,6 +3,18 @@
 # Everything cluster-specific lives in one place, so porting to another HPCC
 # is one file rather than five headers.
 
+# Partitions are set per job in each sbatch header, not here, because they
+# differ by job. On Rush CRI:
+#
+#   express    4 nodes, 6 h cap      -- the short jobs (cohort, tokens)
+#   tier1q     147 nodes, 10 d, default -- the long CPU jobs
+#   pearsonq   8 GPU nodes           -- the embed job and env setup. Same
+#              allocation the data lives in; gpuq (6 shared GPU nodes) is
+#              the fallback if pearsonq is busy.
+#
+# Check with:  sinfo -o "%20P %5a %10l %6D %N"
+#              sinfo -o "%20P %10G %N" | grep -i gpu
+
 # --- EDIT THESE ---------------------------------------------------------
 REPO_HOME="${REPO_HOME:-$HOME/CLIF-latent-cardiogenicshock}"
 VENV_HOME="${VENV_HOME:-$HOME/venvs/clif-cs}"
