@@ -71,11 +71,15 @@ output/
     counts/                    attrition, phenotype breakdowns, availability
     purity/                    per-phenotype coherence in GEM space
     token_levels.csv           the rank -> value-range legend
-  token_level_data_<SITE>/     TIER 2 -- token sequences. Needs a DUA.
-    manifest.json
-    tokens_anchor-{24h,onset}.parquet
-    token_levels.csv
+    patient/                   TIER 2 -- embeddings. Needs a DUA.
+      embeddings_anchor-{24h,onset}.parquet
 ```
+
+Tier 2 adds `patient/` to the tier-1 bundle rather than making a second
+directory, so a site has exactly one thing to upload whichever tier it is
+sending. Whether that one directory carries patient-level data is recorded in
+its manifest as `shares_patient_level`, and is visible from the presence of
+`patient/`.
 
 The directory names carry the policy. Someone about to upload a folder can see
 which one it is without reading any code, which is the point.
@@ -91,10 +95,17 @@ It still needs the GPU, because the interesting part of tier 1 is the
 phenotype-coherence measure and that needs the embeddings. They are computed
 into `patient_level_data_<SITE>/` and **stay there**.
 
-**Tier 2 — [`02_site_tokens.py`](../code/02_site_tokens.py).** Only a site whose
-agreement permits patient-level transfer runs it. It writes
-`token_level_data_<SITE>/`: one row per patient per anchor, holding the ordered
-sequence of token ids the model read and the elapsed seconds at each one.
+**Tier 2 — [`02_site_embeddings.py`](../code/02_site_embeddings.py).** Only a
+site whose agreement permits patient-level transfer runs it. It adds
+`patient/` to the bundle tier 1 already wrote: one row per patient per anchor,
+holding the 1024-d embedding plus the labels needed to colour and stratify it
+-- the three phenotypes, the coded shock type, the outcomes, trial
+eligibility, token-family counts, ten last-pre-anchor token bins, and age as a
+five-year band.
+
+The copy in `patient/` is a redaction. The embeddings the model actually
+produced stay in `patient_level_data_<SITE>/`, because those carry the record
+number, the patient id and the onset timestamp.
 
 Two scripts rather than one with a flag, because a flag invites somebody to pass
 it without the question having been asked.
@@ -175,10 +186,10 @@ python code/01_site_aggregate.py --batch-size 8 \
     --bhavani-model   <...>/bhavani_model.json
 
 # tier 2 -- ONLY with a patient-level DUA in place
-python code/02_site_tokens.py
+python code/02_site_embeddings.py
 ```
 
-Then send `output/upload_to_box_<SITE>/`, and `output/token_level_data_<SITE>/`
+Then send `output/upload_to_box_<SITE>/` -- one directory, whichever tier
 if tier 2 was run. Tier 1 alone is a complete, usable
 contribution: counts, the three phenotype breakdowns, and phenotype
 coherence in GEM space.

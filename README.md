@@ -26,7 +26,7 @@ The pipeline is in three tiers, by what has to cross a site boundary.
 | Script | Tier | Does |
 |---|---|---|
 | [code/01_site_aggregate.py](code/01_site_aggregate.py) | **site, always** | Cohort → tokenize → embed → phenotype purity → **aggregate bundle**. Patient flow, cohort sizes, the three phenotype breakdowns, and how coherent each phenotype is in this site's embedding space. Nothing patient-level leaves. |
-| [code/02_site_tokens.py](code/02_site_tokens.py) | **site, DUA-gated** | The ordered **token sequence** per patient — the model's input, not its output. No measured values, no timestamps. **Not de-identified.** A site may decline to run it. |
+| [code/02_site_embeddings.py](code/02_site_embeddings.py) | **site, DUA-gated** | The **GEM embeddings**, added to the tier-1 bundle so a site sends one directory. Pseudonymous row keys, age bands, no timestamps, no measured values. **Not de-identified.** A site may decline to run it. |
 | [code/03_embedding_analysis.py](code/03_embedding_analysis.py) | pooled | PCA + UMAP + PaCMAP, and the scatterplots |
 | [code/04_site_effect.py](code/04_site_effect.py) | pooled | Why the sites separate, decomposed against token-family counts |
 | [code/05](code/05_site_correction.py)–[code/11](code/11_trial_alignment.py) | pooled | Site correction, downstream prediction, the report, token space, trajectories, trial alignment |
@@ -38,9 +38,10 @@ reading any code:
 
 ```
 output/
-  patient_level_data_<SITE>/   LOCAL ONLY -- embeddings. Never shared.
-  upload_to_box_<SITE>/        TIER 1 -- summary tables only.
-  token_level_data_<SITE>/     TIER 2 -- token sequences. Needs a DUA.
+  patient_level_data_<SITE>/   LOCAL ONLY -- unredacted embeddings. Never shared.
+  upload_to_box_<SITE>/        THE ONE DIRECTORY A SITE SENDS
+    counts/ purity/ trials/      TIER 1 -- aggregate, suppressed.
+    patient/                     TIER 2 -- embeddings. Needs a DUA.
 ```
 
 The split between 01 and 02 is the consortium's decision point, which is why it
@@ -70,7 +71,7 @@ artefact here. See [docs/FEDERATION.md](docs/FEDERATION.md).
 python code/01_site_aggregate.py           # cohort .. embed .. purity .. export
 
 # tier 2, ONLY if your DUA permits patient-level transfer
-python code/02_site_tokens.py
+python code/02_site_embeddings.py
 
 # at the coordinating site: drop the received bundles into output/received/,
 # then re-embed and analyse in one step

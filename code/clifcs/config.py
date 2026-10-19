@@ -138,10 +138,11 @@ class Paths:
         """
         the coordinating site's inbox
 
-        Received bundles are dropped in verbatim, keeping the directory names
-        the sending site wrote -- `upload_to_box_<SITE>/` and, where one was
-        sent, `token_level_data_<SITE>/`. Keeping the names means the tier of
-        each is legible without opening anything.
+        Received bundles are dropped in verbatim, keeping the directory
+        names the sending site wrote -- `upload_to_box_<SITE>/`, one per
+        site whichever tier it sent. Whether a bundle carries patient-level
+        data is visible from a `patient/` subdirectory inside it, and is
+        recorded in its manifest as `shares_patient_level`.
         """
         return self.output_home / "received"
 
@@ -178,8 +179,12 @@ class Paths:
     #                               Never shared.
     #   upload_to_box_<SITE>        TIER 1. Summary tables only -- the classic
     #                               CLIF federated contribution.
-    #   token_level_data_<SITE>     TIER 2. Token sequences per patient, where
-    #                               the consortium permits it.
+    #                               TIER 2 adds patient/ to this SAME
+    #                               directory, where the consortium permits
+    #                               it, so a site uploads one thing either way.
+    #   token_level_data_<SITE>     the older tier-2 form, token sequences in a
+    #                               directory of their own. Still read by
+    #                               clifcs.export.bundles; nothing writes one.
     #
     # Each is per site rather than one pooled directory, because a site sends
     # its own and nothing else, and because the person doing the sending should

@@ -723,7 +723,8 @@ def stage_export(paths, sites, logger, min_cell: int, purity) -> None:
         "01 done. output/upload_to_box_<SITE>/ holds summary tables only -- "
         "aggregate, suppressed, and safe to upload. The embeddings stay in "
         "output/patient_level_data_<SITE>/ and are never shared. Run "
-        "02_site_tokens.py only if your consortium permits token transfer."
+        "02_site_embeddings.py only if your consortium permits patient-level "
+        "transfer."
     )
 
 

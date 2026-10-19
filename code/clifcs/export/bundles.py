@@ -42,7 +42,16 @@ import polars as pl
 from clifcs.export import contract, manifest
 
 
-#: the directory-name prefixes the two tiers are shipped under
+#: the directory-name prefixes a bundle is shipped under
+#:
+#: `upload_to_box_<SITE>` is the one a site sends. Tier 1 fills counts/,
+#: purity/ and trials/ in it; tier 2 adds patient/ to the SAME directory, so
+#: a site never has two things to upload.
+#:
+#: `token_level_data_<SITE>` is the older tier-2 form, which shipped token
+#: sequences in a directory of their own for the coordinating site to
+#: re-embed. Still read, because bundles in that shape exist, but nothing
+#: produces one now -- see 02_site_embeddings.py.
 TIER_PREFIXES = {"upload_to_box_": "aggregate", "token_level_data_": "token"}
 
 
@@ -54,13 +63,18 @@ def discover(received_home: pathlib.Path, logger) -> dict[str, dict[str, pathlib
     arrive named the way the sending site wrote them:
 
         received/
-          upload_to_box_UCMC/        tier 1, summary only
-          token_level_data_UCMC/     tier 2, token sequences
-          upload_to_box_RUSH/        tier 1 only -- RUSH sent no tokens
+          upload_to_box_UCMC/        tier 1 + tier 2 (has patient/)
+          upload_to_box_RUSH/        tier 1 only -- RUSH sent no embeddings
+          token_level_data_NU/       the older tier-2 form, token sequences
 
-    Returns `{site: {"aggregate": path, "token": path}}`, with either tier
-    possibly absent. A site that sent only tier 1 is a first-class contributor
-    here, not a degraded one: it appears in every count table and in the
+    Returns `{site: {"aggregate": path, "patient": path, "token": path}}`,
+    with any of them possibly absent. `patient` points at the same directory
+    as `aggregate` when that bundle carries a patient/ subdirectory; it is a
+    separate key rather than a flag so that the three ways a site can
+    contribute stay visible at every call site.
+
+    A site that sent only tier 1 is a first-class contributor here, not a
+    degraded one: it appears in every count table and in the
     phenotype-coherence comparison, and in no projection.
 
     The site name comes from each bundle's manifest rather than from the
@@ -70,9 +84,10 @@ def discover(received_home: pathlib.Path, logger) -> dict[str, dict[str, pathlib
     received_home = pathlib.Path(received_home)
     if not received_home.is_dir():
         raise FileNotFoundError(
-            f"{received_home} does not exist. A coordinating site reads bundles "
-            "from there; copy each contributing site's upload_to_box_<SITE>/ "
-            "and, where it sent one, token_level_data_<SITE>/ into it."
+            f"{received_home} does not exist. A coordinating site reads "
+            "bundles from there; copy each contributing site's "
+            "upload_to_box_<SITE>/ into it -- one directory per site, "
+            "whichever tier they sent."
         )
 
     found: dict[str, dict[str, pathlib.Path]] = {}
@@ -94,7 +109,26 @@ def discover(received_home: pathlib.Path, logger) -> dict[str, dict[str, pathlib
                 "code, model or tokenizer agreement"
             )
             continue
-        site = manifest.read(candidate).get("site") or candidate.name
+        meta = manifest.read(candidate)
+        site = meta.get("site") or candidate.name
+
+        # tier 2 in its current form is patient/ inside the tier-1 bundle
+        if tier == "aggregate" and (candidate / "patient").is_dir():
+            if not meta.get("shares_patient_level"):
+                logger.warning(
+                    f"  {candidate.name}/ has a patient/ directory but its "
+                    "manifest does not say shares_patient_level; treating it "
+                    "as tier 2 anyway, but the bundle was not written by "
+                    "02_site_embeddings.py and may be incomplete"
+                )
+            found.setdefault(site, {})["patient"] = candidate
+        elif tier == "aggregate" and meta.get("shares_patient_level"):
+            logger.warning(
+                f"  {candidate.name}/ says shares_patient_level but has no "
+                "patient/ directory -- the copy is incomplete, so this site "
+                "contributes tier 1 only"
+            )
+
         if tier in found.get(site, {}):
             raise ValueError(
                 f"two {tier} bundles both claim to be site {site!r}: "
@@ -175,84 +209,69 @@ def load_patient_level(
     batch_size=None,
 ) -> pl.DataFrame:
     """
-    the pooled patient-level frame for one anchor, re-embedded from tokens
+    the pooled patient-level frame for one anchor
 
-    Tier 2 ships the model's input, not its output, so this runs the frozen
-    model over each received token bundle and returns embeddings. The result is
-    cached under the coordinating site's own `patient_level_data/`, keyed by
-    site and anchor, because re-embedding 34,000 sequences is a GPU job and
-    every pooled script would otherwise redo it.
+    Two shapes of tier-2 bundle are read, and the first is what sites produce
+    now:
 
-    The cache is invalidated on row count rather than mtime: a re-sent bundle
-    with the same number of patients and different contents is the one case
-    this misses, and the manifest's `created_utc` is what to check by hand if
-    that is suspected.
+      patient/embeddings_anchor-<a>.parquet   inside upload_to_box_<SITE>.
+          The embeddings as the sending site computed them, already redacted
+          to the export contract. Read straight through.
+
+      tokens_anchor-<a>.parquet               inside token_level_data_<SITE>.
+          The older form, shipping the model's input instead of its output.
+          Re-embedded here with the frozen model, which is exact rather than
+          approximate -- eval mode under inference_mode is deterministic --
+          and cached under the coordinating site's own patient_level_data/,
+          because re-embedding 34,000 sequences is a GPU job and every pooled
+          script would otherwise redo it.
+
+    A site appears once regardless of which it sent. Where a site somehow sent
+    both, the shipped embeddings win and the tokens are ignored, because the
+    embeddings are what that site actually computed and the re-embedding is a
+    reproduction of them.
 
     Concatenated `how="diagonal_relaxed"` so a site that sent a label another
     did not sits alongside it as null rather than failing the concatenation --
     but every column still has to be on the allowlist, which is what stops that
     leniency from becoming a hole.
     """
-    from clifcs import reembed as reembed_module
-
-    if paths is None:
-        raise ValueError(
-            "load_patient_level needs `paths` to re-embed received token "
-            "bundles; pass the Paths object from the calling script"
-        )
-
     frames = []
     for site, tiers in sorted(bundles.items()):
+        patient_home = tiers.get("patient")
+        if patient_home is not None:
+            source = (
+                patient_home / "patient" / f"embeddings_anchor-{anchor}.parquet"
+            )
+            if not source.is_file():
+                logger.warning(
+                    f"  {site}: bundle has patient/ but no file for anchor "
+                    f"{anchor}, skipping"
+                )
+                continue
+            frame = pl.read_parquet(source)
+            contract.validate_patient_frame(
+                frame, f"{site} patient bundle, anchor {anchor}"
+            )
+            _check_rows(frame, manifests, site, anchor)
+            frames.append(frame)
+            logger.info(
+                f"  {site}: {frame.height} patients at anchor {anchor} "
+                "(embeddings as sent)"
+            )
+            continue
+
         home = tiers.get("token")
         if home is None:
             continue
-        source = home / f"tokens_anchor-{anchor}.parquet"
-        if not source.is_file():
-            logger.warning(f"  {site}: no token file for anchor {anchor}, skipping")
-            continue
-
-        frame = pl.read_parquet(source)
-        contract.validate_token_frame(frame, f"{site} token bundle, anchor {anchor}")
-
-        expected = (manifests[site].get("row_counts") or {}).get(anchor)
-        if expected is not None and frame.height != int(expected):
-            raise ValueError(
-                f"{site} anchor {anchor}: file holds {frame.height} rows but "
-                f"its manifest says {expected} were exported -- the copy is "
-                "incomplete"
-            )
-        if frame["site"].n_unique() != 1 or frame["site"][0] != site:
-            raise ValueError(
-                f"{site} bundle carries site column value(s) "
-                f"{frame['site'].unique().to_list()}"
-            )
-
-        cache = (
-            paths.patient_level_home
-            / f"reembedded_anchor-{anchor}_{site}.parquet"
+        frame = _reembed_token_bundle(
+            tiers, manifests, site, anchor, logger, paths, batch_size
         )
-        if cache.is_file() and pl.read_parquet_schema(cache) and (
-            pl.scan_parquet(cache).select(pl.len()).collect().item() == frame.height
-        ):
-            logger.info(f"  {site}: reusing {cache.name} ({frame.height} patients)")
-            embeddings = pl.read_parquet(cache)
-        else:
-            embeddings = reembed_module.reembed(
-                paths, frame, site, anchor, logger, batch_size
-            )
-            cache.parent.mkdir(parents=True, exist_ok=True)
-            embeddings.write_parquet(cache)
-            logger.info(f"  {site}: re-embedded -> {cache.name}")
-
-        # the labels travelled beside the sequences; the embeddings are what
-        # was just derived from them
-        labels = frame.drop("tokens_past", "s_elapsed_past")
-        frames.append(labels.join(embeddings, on="row_key", how="inner"))
-        logger.info(f"  {site}: {frames[-1].height} patients at anchor {anchor}")
-
+        if frame is not None:
+            frames.append(frame)
     if not frames:
         raise FileNotFoundError(
-            f"no bundle carries token data for anchor {anchor}. Every "
+            f"no bundle carries patient-level data for anchor {anchor}. Every "
             "contributing site sent tier 1 only, so the projection analyses "
             "cannot run -- the count tables, the phenotype breakdowns and the "
             "phenotype-coherence comparison still can."
@@ -273,6 +292,76 @@ def load_patient_level(
         f"{pooled['site'].n_unique()} site(s)"
     )
     return pooled
+
+
+def _check_rows(frame: pl.DataFrame, manifests, site: str, anchor: str) -> None:
+    """the manifest's row count against the file's, and the site column"""
+    expected = (manifests[site].get("row_counts") or {}).get(anchor)
+    if expected is not None and frame.height != int(expected):
+        raise ValueError(
+            f"{site} anchor {anchor}: file holds {frame.height} rows but "
+            f"its manifest says {expected} were exported -- the copy is "
+            "incomplete"
+        )
+    if frame["site"].n_unique() != 1 or frame["site"][0] != site:
+        raise ValueError(
+            f"{site} bundle carries site column value(s) "
+            f"{frame['site'].unique().to_list()}"
+        )
+
+
+def _reembed_token_bundle(
+    tiers, manifests, site: str, anchor: str, logger, paths, batch_size
+) -> pl.DataFrame | None:
+    """
+    the older tier-2 path: turn a received token sequence back into embeddings
+
+    Kept because bundles in that shape exist. Nothing produces one now --
+    02_site_embeddings.py ships the embeddings themselves.
+    """
+    from clifcs import reembed as reembed_module
+
+    if paths is None:
+        raise ValueError(
+            "load_patient_level needs `paths` to re-embed received token "
+            "bundles; pass the Paths object from the calling script"
+        )
+
+    home = tiers["token"]
+    source = home / f"tokens_anchor-{anchor}.parquet"
+    if not source.is_file():
+        logger.warning(f"  {site}: no token file for anchor {anchor}, skipping")
+        return None
+
+    frame = pl.read_parquet(source)
+    contract.validate_token_frame(frame, f"{site} token bundle, anchor {anchor}")
+    _check_rows(frame, manifests, site, anchor)
+
+    cache = (
+            paths.patient_level_home
+            / f"reembedded_anchor-{anchor}_{site}.parquet"
+        )
+    if cache.is_file() and pl.read_parquet_schema(cache) and (
+        pl.scan_parquet(cache).select(pl.len()).collect().item() == frame.height
+    ):
+        logger.info(f"  {site}: reusing {cache.name} ({frame.height} patients)")
+        embeddings = pl.read_parquet(cache)
+    else:
+        embeddings = reembed_module.reembed(
+            paths, frame, site, anchor, logger, batch_size
+        )
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        embeddings.write_parquet(cache)
+        logger.info(f"  {site}: re-embedded -> {cache.name}")
+
+    # the labels travelled beside the sequences; the embeddings are what
+    # was just derived from them
+    labels = frame.drop("tokens_past", "s_elapsed_past")
+    joined = labels.join(embeddings, on="row_key", how="inner")
+    logger.info(
+        f"  {site}: {joined.height} patients at anchor {anchor} (re-embedded)"
+    )
+    return joined
 
 
 def load_counts(

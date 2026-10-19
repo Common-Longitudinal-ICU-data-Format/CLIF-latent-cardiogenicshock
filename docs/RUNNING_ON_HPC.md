@@ -37,7 +37,7 @@ Running the whole thing in one GPU allocation works and wastes most of it.
 The split in `hpc/` is four jobs: CPU up to `winnow`, GPU for `embed`, CPU
 from `purity` on, and a last tiny CPU job for tier 2.
 
-`02_site_tokens.py` needs **no GPU and almost no time** — it imports no
+`02_site_embeddings.py` needs **no GPU and almost no time** — it imports no
 torch, and on the 34,142-patient UCMC+NU cohort it completed in three
 seconds. It reads the tokenized sequences the `winnow` stage already wrote.
 
@@ -385,15 +385,20 @@ sbatch hpc/04_export.sbatch
 ```
 
 Produces `output/upload_to_box_RUSH/`. Aggregate, small-cell suppressed at
-`--min-cell 11`. **This is the tier 1 deliverable — send this directory.**
+`--min-cell 11`. **This is the tier 1 deliverable — send this directory.** If
+Rush is also sending tier 2, job 5 adds `patient/` to this same directory
+rather than making a second one.
 
 ### Job 5 — tier 2, only if the DUA is in place
 
 ```bash
-sbatch hpc/05_tokens.sbatch     # seconds, CPU
+sbatch --export=ALL,I_HAVE_CONFIRMED_THE_DUA=yes hpc/05_embeddings.sbatch
 ```
 
-Produces `output/token_level_data_RUSH/`, roughly 10 MB per 10,000 patients.
+Adds `patient/` to `output/upload_to_box_RUSH/`, roughly 45 MB per 10,000
+patients. **That one directory is then the whole deliverable** -- tier 1 and
+tier 2 together, nothing else leaves.
+
 Not de-identified. Move it under the same approval you would use to share
 patient-level clinical data.
 

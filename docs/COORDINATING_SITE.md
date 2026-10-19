@@ -84,19 +84,18 @@ Nine stages: `cohort subset derive collate tokenize winnow embed purity export`.
 two failures it catches are an ICU definition that does not match your unit
 labels, and a table that is present but not populated.
 
-Then tier 2, because your consortium permits tokens:
+Then tier 2, because your consortium permits patient-level transfer:
 
 ```bash
-python code/02_site_tokens.py
+python code/02_site_embeddings.py
 ```
 
-You now have three directories, and the names are the policy:
+You now have two directories, and the names are the policy:
 
 | directory | goes where |
 |---|---|
-| `output/patient_level_data_UCMC/` | **nowhere.** Local embeddings. |
-| `output/upload_to_box_UCMC/` | Box. Summary tables, ~19 KB. |
-| `output/token_level_data_UCMC/` | Box, under the DUA. Sequences, ~25 MB. |
+| `output/patient_level_data_UCMC/` | **nowhere.** Unredacted embeddings. |
+| `output/upload_to_box_UCMC/` | Box. The whole bundle: ~19 KB tier 1, plus `patient/` at ~45 MB once tier 2 has run, under the DUA. |
 
 Back up `output/patient_level_data/.id_salt`. It is gitignored and lives under
 `output/`, so clearing that directory gives every future export new pseudonyms
@@ -116,7 +115,7 @@ python code/01_site_aggregate.py --batch-size 8 \
     --bhavani-model   models/bhavani_model.json
 
 # tier 2 -- ONLY with the patient-level DUA executed
-python code/02_site_tokens.py
+python code/02_site_embeddings.py
 ```
 
 The three `--*-model` flags are **not optional at a contributing site**. Without
@@ -124,9 +123,10 @@ them the site refits its own clusters and "phenotype II", "beta" and "group A"
 stop meaning the same thing anywhere, which makes every pooled breakdown
 uninterpretable. The models ship in `models/`, so they arrive with the clone.
 
-Ask for `upload_to_box_<SITE>/` always, and `token_level_data_<SITE>/` only once
-the agreement is executed. **A site that sends tier 1 only is a full
-contributor** -- it appears in every count table and in the phenotype-coherence
+Ask every site for `upload_to_box_<SITE>/`. That is the whole request: a
+tier-2 site's bundle is the same directory with a `patient/` subdirectory in
+it, so there is never a second thing to chase. **A site that sends tier 1 only
+is a full contributor** -- it appears in every count table and in the phenotype-coherence
 comparison, and in no projection.
 
 ---
@@ -137,10 +137,8 @@ Drop what arrives into `output/received/`, keeping the directory names:
 
 ```
 output/received/
-  upload_to_box_UCMC/          your own, copied in
-  token_level_data_UCMC/
-  upload_to_box_NU/
-  token_level_data_NU/
+  upload_to_box_UCMC/          your own, copied in -- has patient/
+  upload_to_box_NU/            has patient/
   upload_to_box_RUSH/          tier 1 only -- RUSH has no DUA yet
 ```
 

@@ -6,7 +6,8 @@ coordinating analyst pooling the results.
 Raw CLIF data never leaves the site. The site runs `01_site_aggregate.py`
 against its own data and its own copy of the frozen model, and sends back a
 **bundle** of aggregate tables. If its agreement permits patient-level
-transfer, it also runs `02_site_tokens.py`, which sends the token sequences. The coordinating site pools whichever bundles arrive.
+transfer, it also runs `02_site_embeddings.py`, which adds the embeddings to
+that same bundle. The coordinating site pools whichever bundles arrive.
 
 
 ---
@@ -21,8 +22,9 @@ site's embedding space. Every number is a count or an average over at least
 `--min-cell` patients, so it travels under a consortium's ordinary terms. Every
 site runs it.
 
-**Tier 2 (`02_site_tokens.py`) is patient-level, and is not
-de-identified.** Record numbers are replaced by a salted hash, timestamps are
+**Tier 2 (`02_site_embeddings.py`) is patient-level, and is not
+de-identified.** It adds `patient/` to the tier-1 bundle, so a site sends
+one directory either way. Record numbers are replaced by a salted hash, timestamps are
 dropped and age is reduced to five-year bands, which narrows what travels — it
 does not make the file anonymous:
 
@@ -146,13 +148,16 @@ is aggregate and small-cell suppressed. **Send this directory.**
 ### 5. Tier 2 — only with a patient-level agreement
 
 ```bash
-python code/02_site_tokens.py
+python code/02_site_embeddings.py
 ```
 
-Adds `output/token_level_data_<SITE>/`: one row per patient per anchor, holding
-the ordered sequence of token ids the model read, and the elapsed seconds at
-each one. Roughly 10 MB per 10,000 patients -- smaller than the embeddings it
-replaces, which stay local.
+Adds `output/upload_to_box_<SITE>/patient/`: one row per patient per anchor,
+holding the 1024-d embedding and the labels needed to colour and stratify it.
+Roughly 45 MB per 10,000 patients.
+
+**It adds to the tier-1 bundle rather than making a second directory**, so the
+site still sends exactly one. The unredacted embeddings stay in
+`output/patient_level_data_<SITE>/`.
 
 **Do not run this without the IRB approval and DUA in place.** Tier 1 is a
 complete contribution on its own, and the pooled analysis degrades rather than
