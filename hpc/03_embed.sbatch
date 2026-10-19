@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=clifcs-embed
-#SBATCH --partition=pearsonq
+#SBATCH --partition=gpuq
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G

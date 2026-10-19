@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=clifcs-setup
-#SBATCH --partition=pearsonq
+#SBATCH --partition=gpuq
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
@@ -27,7 +27,7 @@
 # you want to see pip fail in real time -- request a shell and run the body
 # by hand:
 #
-#     srun --partition=pearsonq --gres=gpu:1 --cpus-per-task=4 \
+#     srun --partition=gpuq --gres=gpu:1 --cpus-per-task=4 \
 #          --mem=32G --time=01:00:00 --pty bash
 #
 # Those are alternatives. `srun --pty bash` asks for an interactive terminal

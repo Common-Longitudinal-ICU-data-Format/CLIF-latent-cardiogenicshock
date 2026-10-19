@@ -160,7 +160,7 @@ when everything is correct, so a setup verified there tells you nothing.
 Watching pip fail in real time is often worth an allocation:
 
 ```bash
-srun --partition=pearsonq --gres=gpu:1 --cpus-per-task=4 \
+srun --partition=gpuq --gres=gpu:1 --cpus-per-task=4 \
      --mem=32G --time=01:00:00 --pty bash
 ```
 

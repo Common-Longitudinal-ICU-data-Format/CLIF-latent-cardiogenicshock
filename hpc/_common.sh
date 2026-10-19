@@ -6,11 +6,12 @@
 # Partitions are set per job in each sbatch header, not here, because they
 # differ by job. On Rush CRI:
 #
-#   express    4 nodes, 6 h cap      -- the short jobs (cohort, tokens)
+#   express    4 nodes, 6 h cap         -- the short jobs (cohort, tokens)
 #   tier1q     147 nodes, 10 d, default -- the long CPU jobs
-#   pearsonq   8 GPU nodes           -- the embed job and env setup. Same
-#              allocation the data lives in; gpuq (6 shared GPU nodes) is
-#              the fallback if pearsonq is busy.
+#   gpuq       6 GPU nodes, 10 d        -- the embed job and env setup
+#
+# The lab-owned GPU partitions (pearsonq and the rest) are deliberately NOT
+# used here. gpuq is the shared one.
 #
 # Check with:  sinfo -o "%20P %5a %10l %6D %N"
 #              sinfo -o "%20P %10G %N" | grep -i gpu
