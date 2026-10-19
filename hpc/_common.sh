@@ -8,7 +8,9 @@
 #
 #   express    4 nodes,   32 CPU, 128 GB, 6 h  -- short jobs
 #   tier1q     147 nodes, 32 CPU, 128 GB, 10 d -- the long CPU jobs (default)
-#   tier2q     42 nodes,  32 CPU, 512 GB, 10 d -- escalate here on OOM
+#   tier2q     42 nodes,  32 CPU, 512 GB, 10 d -- the prepare job lives here,
+#              because collate was OOM-killed at 96 GB and tier1q caps at 128
+#   tier3q     7 nodes,   32 CPU, 1.25 TB, 10 d -- escalate here if it still is
 #   gpuq       6 nodes,   32+ CPU, 512+ GB     -- embed and env setup
 #
 # The lab-owned GPU partitions (pearsonq and the rest) are deliberately NOT
