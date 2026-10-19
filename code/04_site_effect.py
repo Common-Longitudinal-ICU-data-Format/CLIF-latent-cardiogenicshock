@@ -45,6 +45,7 @@ from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import StandardScaler
 
 from clifcs import ANCHORS, get_logger, load_paths
+from clifcs.embedding import site_embedding_files
 from clifcs.figures import save_figure
 from clifcs.palette import GRID, INK_PRIMARY, INK_SECONDARY, SURFACE, site_colors
 from clifcs.tokens import (
@@ -97,11 +98,7 @@ def load_embeddings(paths, anchor: str, logger, batch_size=None) -> pl.DataFrame
             batch_size=batch_size,
         )
 
-    sources = sorted(
-        p
-        for p in paths.patient_level_home.glob(f"embeddings_anchor-{anchor}_*.parquet")
-        if "_share-safe" not in p.name
-    )
+    sources = site_embedding_files(paths.patient_level_home, anchor)
     if not sources:
         raise FileNotFoundError(
             f"no embeddings for anchor {anchor} under {paths.patient_level_home}"

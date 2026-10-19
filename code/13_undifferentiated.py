@@ -66,10 +66,19 @@ import polars as pl
 from omegaconf import OmegaConf
 
 from clifcs import ANCHORS, get_logger, load_cohort_cfg, load_paths
+from clifcs.embedding import site_embedding_files
 from clifcs.concordance import attach_severity
 from clifcs.config import CONFIG_HOME
 from clifcs.figures import save_figure, style
-from clifcs.palette import CATEGORICAL, CONTEXT, GRID, HIGHLIGHT, INK_SECONDARY
+from clifcs.palette import (
+    CATEGORICAL,
+    CONTEXT,
+    GRID,
+    HIGHLIGHT,
+    INK_PRIMARY,
+    INK_SECONDARY,
+    shock_type_colors,
+)
 from clifcs.trials import attach_features
 from clifcs.undifferentiated import (
     GROUPS,
@@ -94,10 +103,7 @@ from clifcs.undifferentiated import (
 
 def load_anchor(paths, anchor: str, logger) -> pl.DataFrame:
     """the per-site embedding files for one anchor, pooled"""
-    sources = sorted(
-        paths.patient_level_home.glob(f"embeddings_anchor-{anchor}_*.parquet")
-    )
-    sources = [p for p in sources if "share-safe" not in p.name]
+    sources = site_embedding_files(paths.patient_level_home, anchor)
     if not sources:
         raise FileNotFoundError(
             f"no embeddings for anchor {anchor} in {paths.patient_level_home}; "
@@ -167,6 +173,381 @@ def attach_cohort(paths, frame: pl.DataFrame, cfg, logger) -> pl.DataFrame:
 
 
 # ================================================================== figures
+
+
+def figure_groups(groups: pl.DataFrame, out_path: pathlib.Path, anchor: str):
+    """
+    who the groups are: size, mortality and severity, per site
+
+    The single most important fact in this section is that the uncoded group is
+    both the largest and much the least sick, and in a table that is two
+    columns a reader has to hold in their head at once. Size as bars and
+    mortality as a point on a second axis puts the two in one shape: the tall
+    bar with the low dot is the whole argument.
+
+    Per site and never pooled, for the reason the module docstring gives.
+    """
+    sites = groups["site"].unique(maintain_order=True).to_list()
+    figure, axes = plt.subplots(
+        1, len(sites), figsize=(5.0 * len(sites), 3.9), squeeze=False, sharey=True
+    )
+    order = [g for g in GROUPS if g in set(groups["shock_type"])]
+    hues = shock_type_colors()
+    for column, site in enumerate(sites):
+        axis = axes[0][column]
+        block = groups.filter(pl.col("site") == site)
+        # Share of the site, not the raw count. NU contributes 25,007 patients
+        # and UCMC 9,135, so on a shared count axis UCMC's bars are a third the
+        # height of NU's whatever its composition is -- which is the one thing
+        # this figure must not say, since composition within a site is the only
+        # comparison the coding differences permit.
+        shares, counts, deaths = [], [], []
+        for group in order:
+            row = block.filter(pl.col("shock_type") == group)
+            shares.append(float(row["share_of_site"][0]) if row.height else 0.0)
+            counts.append(int(row["n"][0]) if row.height else 0)
+            deaths.append(float(row["mortality"][0]) if row.height else float("nan"))
+        positions = np.arange(len(order))
+        axis.bar(
+            positions, shares, width=0.68,
+            color=[hues.get(g, CONTEXT) for g in order], alpha=0.85,
+        )
+        for position, share, n in zip(positions, shares, counts):
+            axis.annotate(
+                f"{n:,}", (position, share), xytext=(0, 2),
+                textcoords="offset points", ha="center", fontsize=6.5,
+                color=INK_SECONDARY,
+            )
+        axis.set_title(site, fontsize=10)
+        axis.set_ylabel("share of the site" if column == 0 else "")
+        axis.set_xticks(positions)
+        axis.set_xticklabels(order, rotation=35, ha="right", fontsize=7.5)
+        axis.grid(axis="y", color=GRID, linewidth=0.5)
+        axis.set_axisbelow(True)
+
+        twin = axis.twinx()
+        twin.plot(
+            positions, deaths, "o", markersize=7, color=INK_PRIMARY,
+            markerfacecolor="white", markeredgewidth=1.6,
+        )
+        twin.set_ylim(0, max(0.55, float(np.nanmax(deaths)) * 1.15))
+        twin.set_ylabel(
+            "in-hospital mortality" if column == len(sites) - 1 else "",
+            fontsize=8,
+        )
+        twin.tick_params(labelsize=7)
+        twin.grid(False)
+        for position, value in zip(positions, deaths):
+            if not np.isnan(value):
+                twin.annotate(
+                    f"{value:.1%}", (position, value), xytext=(0, 7),
+                    textcoords="offset points", ha="center", fontsize=6.5,
+                    color=INK_SECONDARY,
+                )
+
+    figure.suptitle(
+        f"Share of each site (bars) against in-hospital mortality (points), "
+        f"{anchor} anchor",
+        fontsize=10.5,
+    )
+    figure.tight_layout(rect=(0, 0, 1, 0.94))
+    save_figure(figure, out_path)
+    plt.close(figure)
+
+
+def _rate_heatmap(axis, frame: pl.DataFrame, row_key: str, columns: list,
+                  labels: dict, title: str, vmax: float = 1.0):
+    """a group-by-measure grid of rates, annotated, since the cells are few"""
+    rows = frame[row_key].to_list()
+    grid = np.full((len(rows), len(columns)), np.nan)
+    for r, _ in enumerate(rows):
+        for c, column in enumerate(columns):
+            value = frame[column][r]
+            if value is not None:
+                grid[r, c] = float(value)
+    image = axis.imshow(grid, cmap="viridis", vmin=0.0, vmax=vmax, aspect="auto")
+    axis.set_xticks(np.arange(len(columns)))
+    axis.set_xticklabels(
+        [labels.get(c, c) for c in columns], rotation=40, ha="right", fontsize=6.5
+    )
+    axis.set_yticks(np.arange(len(rows)))
+    axis.set_yticklabels(rows, fontsize=7)
+    axis.set_title(title, fontsize=9, loc="left")
+    for r in range(len(rows)):
+        for c in range(len(columns)):
+            if np.isnan(grid[r, c]):
+                continue
+            axis.text(
+                c, r, f"{grid[r, c]:.0%}", ha="center", va="center", fontsize=5.5,
+                color="white" if grid[r, c] < vmax * 0.55 else INK_PRIMARY,
+            )
+    return image
+
+
+def figure_evidence(evidence: pl.DataFrame, out_path: pathlib.Path, anchor: str):
+    """
+    mechanism evidence from outside the shock codes, as a grid
+
+    Six groups by six flags is a table nobody reads across, and the thing worth
+    seeing is a pattern: coded septic patients light up the septic column at
+    ~99% and nothing else does. A grid shows that in one glance and shows the
+    weak flags as weak -- the hypovolemic column is pale everywhere, which is
+    the honest reading of a flag with 21% sensitivity.
+    """
+    shares = [
+        c for c in evidence.columns
+        if c.startswith(("hint_", "culture_")) or c == "any_hint"
+    ]
+    if not shares:
+        return
+    labels = {
+        "hint_septic": "infection code",
+        "hint_cardiogenic": "cardiac code",
+        "hint_hypovolemic": "haemorrhage code",
+        "culture_sent": "culture sent",
+        "culture_positive": "culture positive",
+        "culture_unresulted": "culture unresulted",
+        "any_hint": "any code hint",
+    }
+    sites = evidence["site"].unique(maintain_order=True).to_list()
+    figure, axes = plt.subplots(
+        1, len(sites), figsize=(4.6 * len(sites), 3.6), squeeze=False
+    )
+    image = None
+    for column, site in enumerate(sites):
+        block = (
+            evidence.filter(pl.col("site") == site)
+            .with_columns(
+                _order=pl.col("shock_type").cast(pl.String).replace_strict(
+                    {g: i for i, g in enumerate(GROUPS)}, default=99,
+                    return_dtype=pl.Int32,
+                )
+            )
+            .sort("_order")
+        )
+        image = _rate_heatmap(
+            axes[0][column], block, "shock_type", shares, labels, site
+        )
+    if image is not None:
+        bar = figure.colorbar(image, ax=axes[0].tolist(), fraction=0.025, pad=0.02)
+        bar.ax.tick_params(labelsize=6, labelcolor=INK_SECONDARY)
+        bar.outline.set_visible(False)
+    figure.suptitle(
+        f"Evidence of a mechanism from outside the shock codes ({anchor} anchor)",
+        fontsize=10.5, x=0.01, ha="left",
+    )
+    figure.supxlabel(
+        "not a later diagnosis: none of these carry a timestamp",
+        fontsize=7, color=INK_SECONDARY, x=0.01, ha="left",
+    )
+    figure.tight_layout(rect=(0, 0.06, 1, 0.93))
+    save_figure(figure, out_path)
+    plt.close(figure)
+
+
+def figure_treatments(treatments: pl.DataFrame, out_path: pathlib.Path,
+                      anchor: str):
+    """
+    what each group was given, as a grid of rates
+
+    This replaces the widest table in the section -- seven agents times two
+    windows plus steroids, support and antibiotic timing, which ran off the
+    side of the page. The question is comparative (does the uncoded group get
+    treated like the septic one?) and a grid answers it by column.
+
+    Peri-onset flags only. The admission-wide `ever_` columns are deliberately
+    left in the table rather than drawn beside them: 11 found the two windows
+    give opposite answers, and putting them in adjacent cells of one grid is an
+    invitation to read across.
+    """
+    agents = [c for c in treatments.columns if c.startswith("on_")]
+    extras = [c for c in ("inotrope", "mcs", "abx_within_6h") if c in treatments.columns]
+    measures = agents + extras
+    if not measures:
+        return
+    labels = {c: c.replace("on_", "").replace("_", " ") for c in measures}
+    labels.update({
+        "on_any_steroid": "any steroid",
+        "abx_within_6h": "antibiotics < 6 h",
+        "mcs": "mechanical support",
+        "inotrope": "any inotrope",
+    })
+    sites = treatments["site"].unique(maintain_order=True).to_list()
+    figure, axes = plt.subplots(
+        1, len(sites), figsize=(0.52 * len(measures) * len(sites) + 3.2, 3.8),
+        squeeze=False,
+    )
+    image = None
+    for column, site in enumerate(sites):
+        block = (
+            treatments.filter(pl.col("site") == site)
+            .with_columns(
+                _order=pl.col("shock_type").cast(pl.String).replace_strict(
+                    {g: i for i, g in enumerate(GROUPS)}, default=99,
+                    return_dtype=pl.Int32,
+                )
+            )
+            .sort("_order")
+        )
+        image = _rate_heatmap(
+            axes[0][column], block, "shock_type", measures, labels, site
+        )
+    if image is not None:
+        bar = figure.colorbar(image, ax=axes[0].tolist(), fraction=0.02, pad=0.02)
+        bar.ax.tick_params(labelsize=6, labelcolor=INK_SECONDARY)
+        bar.outline.set_visible(False)
+    figure.suptitle(
+        f"Treatment at shock onset, by coded mechanism ({anchor} anchor)",
+        fontsize=10.5, x=0.01, ha="left",
+    )
+    figure.supxlabel(
+        "share of the group with that drug running in the six hours either side "
+        "of onset; fluids, transfusion and echo are unavailable at both sites",
+        fontsize=7, color=INK_SECONDARY, x=0.01, ha="left",
+    )
+    figure.tight_layout(rect=(0, 0.08, 1, 0.93))
+    save_figure(figure, out_path)
+    plt.close(figure)
+
+
+def figure_neighbours(neighbours: pl.DataFrame, out_path: pathlib.Path,
+                      anchor: str, k: int = 25):
+    """
+    what each group's nearest coded neighbours are, as stacked shares
+
+    The kNN table is three mechanisms times three values of k times two sites,
+    and the only comparison that matters is whether the uncoded group's
+    neighbourhood composition differs from the coded groups' own. Stacked bars
+    summing to 1 make that one read.
+    """
+    wanted = [f"knn{k}_{m}" for m in MECHANISMS]
+    if any(c not in neighbours.columns for c in wanted):
+        return
+    sites = neighbours["site"].unique(maintain_order=True).to_list()
+    hues = shock_type_colors()
+    figure, axes = plt.subplots(
+        1, len(sites), figsize=(4.4 * len(sites), 3.7), squeeze=False, sharey=True
+    )
+    for column, site in enumerate(sites):
+        axis = axes[0][column]
+        block = neighbours.filter(pl.col("site") == site)
+        order = [g for g in GROUPS if g in set(block["shock_type"])]
+        positions = np.arange(len(order))
+        bottom = np.zeros(len(order))
+        for mechanism in MECHANISMS:
+            values = []
+            for group in order:
+                row = block.filter(pl.col("shock_type") == group)
+                values.append(
+                    float(row[f"knn{k}_{mechanism}"][0]) if row.height else 0.0
+                )
+            values = np.array(values)
+            axis.bar(
+                positions, values, bottom=bottom, width=0.68,
+                color=hues.get(mechanism, CONTEXT), alpha=0.9,
+                label=mechanism if column == 0 else None,
+            )
+            bottom += values
+        axis.set_xticks(positions)
+        axis.set_xticklabels(order, rotation=35, ha="right", fontsize=7.5)
+        axis.set_title(site, fontsize=10)
+        axis.set_ylabel("share of the k nearest coded neighbours"
+                        if column == 0 else "")
+        axis.grid(axis="y", color=GRID, linewidth=0.5)
+        axis.set_axisbelow(True)
+    axes[0][0].legend(fontsize=7.5, frameon=False, loc="upper left")
+    figure.suptitle(
+        f"Mechanism composition of the {k} nearest coded neighbours "
+        f"({anchor} anchor, within site)",
+        fontsize=10.5,
+    )
+    figure.tight_layout(rect=(0, 0, 1, 0.93))
+    save_figure(figure, out_path)
+    plt.close(figure)
+
+
+def figure_concordance(concordance: pl.DataFrame, out_path: pathlib.Path,
+                       anchor: str):
+    """
+    outcome by whether the treatment matched the probe's assignment
+
+    Four cells per site and class -- treated or not, confidently assigned or
+    not -- which is sixteen rows of a table and one readable panel.
+
+    THE SHAPE IS NOT AN EFFECT. A clinician gives an inotrope because they read
+    the same record the probe reads, so the treated group is the group whose
+    mechanism was legible to both. The figure is drawn because the comparison
+    was asked for, and the caption says what it cannot support.
+    """
+    if not concordance.height or "treated_as_assigned" not in concordance.columns:
+        return
+    sites = concordance["site"].unique(maintain_order=True).to_list()
+    classes = [
+        c for c in MECHANISMS
+        if c in set(concordance["probe_assignment"].to_list())
+    ]
+    if not classes:
+        return
+    figure, axes = plt.subplots(
+        1, len(sites), figsize=(4.6 * len(sites), 3.8), squeeze=False, sharey=True
+    )
+    for column, site in enumerate(sites):
+        axis = axes[0][column]
+        block = concordance.filter(pl.col("site") == site)
+        ticks, offset = [], 0.0
+        for klass in classes:
+            for confident in (True, False):
+                for treated, colour in ((True, CATEGORICAL[0]), (False, CATEGORICAL[1])):
+                    row = block.filter(
+                        (pl.col("probe_assignment") == klass)
+                        & (pl.col("probe_confident") == confident)
+                        & (pl.col("treated_as_assigned") == treated)
+                    )
+                    if not row.height:
+                        offset += 1.0
+                        continue
+                    n = int(row["n"][0])
+                    value = float(row["mortality"][0])
+                    axis.bar(
+                        offset, value, width=0.78, color=colour,
+                        alpha=0.9 if confident else 0.42,
+                    )
+                    axis.annotate(
+                        f"{n:,}", (offset, value), xytext=(0, 2),
+                        textcoords="offset points", ha="center", fontsize=5.5,
+                        color=INK_SECONDARY,
+                    )
+                    offset += 1.0
+                ticks.append((offset - 1.0, f"{klass}{chr(10)}"
+                              f"{'confident' if confident else 'ambiguous'}"))
+            offset += 0.6
+        axis.set_xticks([t for t, _ in ticks])
+        axis.set_xticklabels([label for _, label in ticks], fontsize=6,
+                             rotation=30, ha="right")
+        axis.set_title(site, fontsize=10)
+        axis.set_ylabel("in-hospital mortality" if column == 0 else "")
+        axis.grid(axis="y", color=GRID, linewidth=0.5)
+        axis.set_axisbelow(True)
+    handles = [
+        plt.Line2D([], [], marker="s", linestyle="", markersize=7,
+                   color=CATEGORICAL[0], label="treated as assigned"),
+        plt.Line2D([], [], marker="s", linestyle="", markersize=7,
+                   color=CATEGORICAL[1], label="not treated as assigned"),
+    ]
+    axes[0][0].legend(handles=handles, fontsize=7, frameon=False, loc="upper left")
+    figure.suptitle(
+        f"Mortality by whether treatment matched the probe ({anchor} anchor)",
+        fontsize=10.5,
+    )
+    figure.supxlabel(
+        "confounded by indication and not adjustable: the clinician read the "
+        "same record the probe reads. Numbers are cell sizes; pale bars are "
+        "the ambiguously assigned.",
+        fontsize=7, color=INK_SECONDARY,
+    )
+    figure.tight_layout(rect=(0, 0.03, 1, 0.93))
+    save_figure(figure, out_path)
+    plt.close(figure)
 
 
 def figure_proximity(proximity: pl.DataFrame, out_path: pathlib.Path, anchor: str):
@@ -841,6 +1222,24 @@ def analyse(paths, anchor: str, cfg, args, logger) -> None:
     style()
     figure_home = paths.figure_home / f"anchor-{anchor}"
     figure_home.mkdir(parents=True, exist_ok=True)
+    # the table-shaped results, drawn. Each of these replaces a table that was
+    # too wide to read across, and the tables stay in the report beneath them.
+    for key, draw in (
+        ("groups", figure_groups),
+        ("evidence", figure_evidence),
+        ("treatments", figure_treatments),
+    ):
+        table = results.get(key)
+        if table is not None and table.height:
+            draw(table, figure_home / f"undiff_{key}.png", anchor)
+    if results.get("neighbours") is not None and results["neighbours"].height:
+        figure_neighbours(
+            results["neighbours"], figure_home / "undiff_neighbours.png", anchor
+        )
+    if results.get("concordance") is not None and results["concordance"].height:
+        figure_concordance(
+            results["concordance"], figure_home / "undiff_concordance.png", anchor
+        )
     if results.get("proximity") is not None and results["proximity"].height:
         figure_proximity(
             results["proximity"], figure_home / "undiff_proximity.png", anchor

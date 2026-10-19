@@ -812,6 +812,7 @@ def analyse(paths, anchor: str, trial_cfg, args, logger) -> None:
     trials = load_trials(trial_cfg, logger)
     frame = load_alignment(paths, anchor, logger)
     frame = attach_free_days(paths, frame, logger)
+    frame = attach_assigned(frame, trials, logger)
 
     pending = sum(
         1
@@ -966,13 +967,25 @@ def analyse(paths, anchor: str, trial_cfg, args, logger) -> None:
             table.write_csv(paths.table_home / f"{name}.csv")
             logger.info(f"  {name}.csv  ({table.height} rows)")
 
+    # ------------------------------------------- the four-cell comparison
+    cells = four_cell_table(frame, trials, logger)
+    if cells.height:
+        cells.write_csv(paths.table_home / f"trial_fit_cells_{anchor}.csv")
+        logger.info(f"  trial_fit_cells_{anchor}.csv ({cells.height} rows)")
+
+    style()
+    figure_home = paths.figure_home / f"anchor-{anchor}"
+    figure_home.mkdir(parents=True, exist_ok=True)
     if curves_frame.height:
-        style()
-        figure_home = paths.figure_home / f"anchor-{anchor}"
         plot_curves(
             curves_frame, figure_home / "trial_fit_outcomes.png", anchor
         )
-        logger.info(f"  figures -> {figure_home}")
+    if cells.height:
+        plot_four_cells(
+            frame, cells, trials, figure_home / "trial_fit_cells.png", anchor
+        )
+    plot_space(frame, figure_home / "trial_fit_space.png", anchor, logger)
+    logger.info(f"  figures -> {figure_home}")
 
     write_summary(
         paths.output_home / f"trial_fit_summary_{anchor}.md",
@@ -993,6 +1006,462 @@ def analyse(paths, anchor: str, trial_cfg, args, logger) -> None:
                 f"      {row['trial']:<22} {row['n_eligible']:>7,} eligible "
                 f"-- {row['reason']}"
             )
+
+
+# ------------------------------------------------- the four-cell comparison
+
+#: the 2x2 the outcome tables could not show, in reading order.
+#:
+#: (inside the published IQRs, treated per the guideline) -> label. The first
+#: cell is the only one the trial's own result actually speaks to: a patient
+#: who resembles the enrolled population *and* got what the trial recommends.
+#: The other three are each one step away from it, and keeping them in a fixed
+#: order means the same cell sits in the same place in every panel.
+CELLS = (
+    (True, True, "resembles\ntreated"),
+    (True, False, "resembles\nuntreated"),
+    (False, True, "differs\ntreated"),
+    (False, False, "differs\nuntreated"),
+)
+
+#: below this a cell gets its count printed and no estimate.
+#:
+#: The hollow marker already says "under 50, do not read the shape", but
+#: ECLS-SHOCK has one patient who resembles its population and was not
+#: treated, and a Wilson interval on n=1 drew a point at 100% mortality
+#: spanning the whole axis. At that size the estimate is not weak evidence,
+#: it is no evidence, and drawing it invites a reader to see a pattern in
+#: the position of a single patient.
+MIN_CELL_TO_DRAW = 10
+
+#: blue for the cells the trial tested, orange for the ones it did not
+CELL_COLOURS = (CATEGORICAL[0], CATEGORICAL[0], CATEGORICAL[1], CATEGORICAL[1])
+
+
+def _wilson(successes: int, total: int, z: float = 1.96):
+    """Wilson score interval, which behaves at the small counts here"""
+    if total == 0:
+        return (float("nan"), float("nan"), float("nan"))
+    p = successes / total
+    denominator = 1.0 + z * z / total
+    centre = (p + z * z / (2 * total)) / denominator
+    spread = (
+        z
+        * np.sqrt(p * (1.0 - p) / total + z * z / (4 * total * total))
+        / denominator
+    )
+    return p, max(0.0, centre - spread), min(1.0, centre + spread)
+
+
+def four_cell_table(frame: pl.DataFrame, trials, logger) -> pl.DataFrame:
+    """
+    one row per trial x outcome x cell: for the figure, and to check it against
+
+    A figure a reader cannot check against numbers is an assertion, so the same
+    cells are written out as a table. `reliable` carries the same 50-patient
+    floor the inside/outside tables use: ECLS-SHOCK puts six concordant
+    patients inside its published ranges, and a violin of six points is a
+    drawing rather than a distribution.
+    """
+    rows = []
+    for trial in trials:
+        key = trial.key
+        outside_col, concordant_col = f"t1_outside_{key}", f"concordant_{key}"
+        compared = f"t1_n_compared_{key}"
+        if outside_col not in frame.columns or concordant_col not in frame.columns:
+            continue
+        part = frame.filter(
+            pl.col(f"elig_{key}")
+            & (pl.col(compared) > 0)
+            & pl.col(outside_col).is_not_null()
+            & pl.col(concordant_col).is_not_null()
+        )
+        if part.height < 50:
+            continue
+        part = part.with_columns(resembles=pl.col(outside_col) == 0)
+        for resembles, concordant, label in CELLS:
+            cell = part.filter(
+                (pl.col("resembles") == resembles)
+                & (pl.col(concordant_col) == concordant)
+            )
+            for outcome, pretty, kind in OUTCOMES:
+                if outcome not in cell.columns:
+                    continue
+                values = cell[outcome].drop_nulls()
+                if not values.len():
+                    continue
+                if kind == "logistic":
+                    point, low, high = _wilson(
+                        int(values.sum()), int(values.len())
+                    )
+                else:
+                    point = float(values.mean())
+                    spread = float(values.std() or 0.0) / max(
+                        np.sqrt(values.len()), 1.0
+                    )
+                    low, high = point - 1.96 * spread, point + 1.96 * spread
+                rows.append(
+                    {
+                        "trial": trial.label,
+                        "outcome": outcome,
+                        "resembles_trial": resembles,
+                        "treated_per_guideline": concordant,
+                        "cell": label.replace(chr(10), " "),
+                        "n": int(values.len()),
+                        "value": point,
+                        "ci_low": low,
+                        "ci_high": high,
+                        "reliable": int(values.len()) >= 50,
+                    }
+                )
+    table = pl.DataFrame(rows) if rows else pl.DataFrame()
+    if table.height:
+        thin = table.filter(~pl.col("reliable"))["cell"].len()
+        logger.info(
+            f"  four-cell: {table.height} cells, {thin} below the 50-patient floor"
+        )
+    return table
+
+
+def attach_assigned(frame: pl.DataFrame, trials, logger) -> pl.DataFrame:
+    """
+    collapse the per-trial columns onto the one guideline each patient was given
+
+    11 assigns every patient their single most relevant guideline and writes
+    `assigned_guideline`, but leaves the fit score and the concordance flag in
+    eighteen per-trial columns. The space figure needs one column per quantity,
+    not eighteen, and picking the assigned trial's is the only collapse that
+    does not mix patients judged against different trials into one scale.
+
+    Adds `assigned_absdist`, `assigned_severity_gap` and
+    `concordant_assigned`, each null where no guideline was assigned -- which
+    is 18,779 of 34,142 patients and shows up as the grey context layer.
+    """
+    if "assigned_guideline" not in frame.columns:
+        return frame
+    label_to_key = {t.label: t.key for t in trials}
+    for target, prefix in (
+        ("assigned_absdist", "t1_absdist_"),
+        ("assigned_severity_gap", "t1_severity_gap_"),
+        ("concordant_assigned", "concordant_"),
+    ):
+        branches = [
+            (pl.col("assigned_guideline") == label, pl.col(f"{prefix}{key}"))
+            for label, key in label_to_key.items()
+            if f"{prefix}{key}" in frame.columns
+        ]
+        if not branches:
+            continue
+        expression = pl.when(branches[0][0]).then(branches[0][1])
+        for condition, value in branches[1:]:
+            expression = expression.when(condition).then(value)
+        frame = frame.with_columns(expression.otherwise(None).alias(target))
+    covered = int(frame["assigned_absdist"].is_not_null().sum()) if (
+        "assigned_absdist" in frame.columns
+    ) else 0
+    logger.info(
+        f"  assigned-guideline fit score present for {covered:,} of "
+        f"{frame.height:,} patients"
+    )
+    return frame
+
+
+def plot_four_cells(
+    frame: pl.DataFrame, cells: pl.DataFrame, trials, out_path: pathlib.Path,
+    anchor: str,
+) -> None:
+    """
+    the four cells drawn, one row per outcome and one column per trial
+
+    Replaces three wide tables that nobody could read across. The question is
+    whether resembling the enrolled population and being treated as the trial
+    recommends move the outcome, and in a table that comparison is four numbers
+    in different rows of different tables.
+
+    The mark differs by row because the outcomes do. Mortality is binary, and a
+    violin of a binary variable is two lumps at 0 and 1 that say only what the
+    proportion already says, so it gets a proportion with a Wilson interval.
+    The free-day outcomes are bounded and bimodal -- piled at 0 and at the
+    28-day horizon -- which is exactly where a violin earns its place and a mean
+    with an error bar misleads, so they get violins with the cell mean marked.
+
+    Cells below 50 patients are drawn hollow. ECLS-SHOCK has six patients in
+    its resembles-and-treated cell, and at that size the shape of a violin is
+    an artefact of the kernel rather than a property of the patients.
+    """
+    if cells.height == 0:
+        return
+    trial_labels = [t.label for t in trials if t.label in set(cells["trial"])]
+    if not trial_labels:
+        return
+    outcomes = [o for o, _, _ in OUTCOMES]
+    pretty = {o: label for o, label, _ in OUTCOMES}
+    kinds = {o: kind for o, _, kind in OUTCOMES}
+    key_of = {t.label: t.key for t in trials}
+
+    # sharey per row: the comparison a reader makes is across trials within an
+    # outcome, and seven independent mortality axes made a 10-point difference
+    # at one trial look like a 30-point difference at another
+    figure, axes = plt.subplots(
+        len(outcomes),
+        len(trial_labels),
+        figsize=(3.0 * len(trial_labels), 2.6 * len(outcomes)),
+        squeeze=False,
+        sharey="row",
+    )
+    positions = np.arange(len(CELLS))
+
+    for row, outcome in enumerate(outcomes):
+        for column, label in enumerate(trial_labels):
+            axis = axes[row][column]
+            axis.grid(axis="y", color=GRID, linewidth=0.5, alpha=0.7)
+            axis.set_axisbelow(True)
+            key = key_of[label]
+            outside_col, concordant_col = f"t1_outside_{key}", f"concordant_{key}"
+            part = frame.filter(
+                pl.col(f"elig_{key}")
+                & pl.col(outside_col).is_not_null()
+                & pl.col(concordant_col).is_not_null()
+            ).with_columns(resembles=pl.col(outside_col) == 0)
+
+            for index, (resembles, concordant, _) in enumerate(CELLS):
+                cell_rows = cells.filter(
+                    (pl.col("trial") == label)
+                    & (pl.col("outcome") == outcome)
+                    & (pl.col("resembles_trial") == resembles)
+                    & (pl.col("treated_per_guideline") == concordant)
+                )
+                if not cell_rows.height:
+                    continue
+                stats = cell_rows.row(0, named=True)
+                colour = CELL_COLOURS[index]
+                solid = bool(stats["reliable"])
+                if stats["n"] < MIN_CELL_TO_DRAW:
+                    axis.annotate(
+                        f"n={stats['n']}",
+                        (positions[index], 0.5), xycoords=("data", "axes fraction"),
+                        ha="center", va="center", fontsize=6, color=INK_MUTED,
+                    )
+                    continue
+
+                if kinds[outcome] == "logistic":
+                    axis.errorbar(
+                        positions[index], stats["value"],
+                        yerr=[[stats["value"] - stats["ci_low"]],
+                              [stats["ci_high"] - stats["value"]]],
+                        fmt="o", markersize=6, color=colour,
+                        markerfacecolor=colour if solid else "white",
+                        capsize=3, linewidth=1.2,
+                    )
+                else:
+                    values = (
+                        part.filter(
+                            (pl.col("resembles") == resembles)
+                            & (pl.col(concordant_col) == concordant)
+                        )[outcome]
+                        .drop_nulls()
+                        .to_numpy()
+                    )
+                    if values.size >= 5:
+                        body = axis.violinplot(
+                            [values], positions=[positions[index]],
+                            widths=0.72, showextrema=False,
+                        )
+                        for patch in body["bodies"]:
+                            patch.set_facecolor(colour)
+                            patch.set_alpha(0.55 if solid else 0.22)
+                    axis.plot(
+                        positions[index], stats["value"], "o", markersize=4.5,
+                        color=colour,
+                        markerfacecolor=colour if solid else "white",
+                    )
+                axis.annotate(
+                    f"{stats['n']:,}",
+                    (positions[index], 0.02), xycoords=("data", "axes fraction"),
+                    ha="center", va="bottom", fontsize=6, color=INK_MUTED,
+                )
+
+            if row == 0:
+                axis.set_title(label, fontsize=9)
+            if column == 0:
+                axis.set_ylabel(pretty[outcome], fontsize=8)
+            axis.set_xticks(positions)
+            if row == len(outcomes) - 1:
+                axis.set_xticklabels([c[2] for c in CELLS], fontsize=6.5)
+            else:
+                axis.set_xticklabels([])
+            axis.tick_params(labelsize=7)
+
+    figure.suptitle(
+        "Outcome by whether the patient resembles the trial population and "
+        f"was treated as it recommends ({anchor} anchor)",
+        fontsize=10.5,
+    )
+    figure.supxlabel(
+        "blue = cells the trial's result speaks to; hollow = fewer than 50 "
+        "patients, shape not interpretable; numbers are cell sizes",
+        fontsize=7, color=INK_SECONDARY,
+    )
+    figure.tight_layout(rect=(0, 0.02, 1, 0.96))
+    save_figure(figure, out_path)
+    plt.close(figure)
+
+
+def plot_space(frame: pl.DataFrame, out_path: pathlib.Path, anchor: str,
+               logger) -> None:
+    """
+    the cohort in 11's projection, coloured by fit and by outcome side by side
+
+    The question this answers and the tables cannot: are the patients who sit
+    far from every trial population the *same* patients who do badly, or a
+    different region of the space. A table of means per trial cannot separate
+    "poor fit and death coincide" from "poor fit and death are both common",
+    and putting both on one layout can.
+
+    EVERY NUMERIC PANEL IS A BINNED LOCAL MEAN, NOT A SCATTER. The first
+    version drew one point per patient and was unreadable for exactly the
+    reason this cohort is interesting: mortality is 16.6%, so 5,600 coloured
+    points over 28,500 grey ones read as "most of them died" wherever the
+    coloured ones happened to land on top. A hexagonal bin coloured by the mean
+    of its members shows the local rate, which is the quantity the eye was
+    being asked to estimate anyway, and makes the panels comparable to one
+    another instead of comparable to whichever was drawn last. Bins under
+    `mincnt` patients are left empty rather than shown at a rate computed from
+    three people.
+
+    Read the fit panels against each other before reading either against the
+    outcomes. If fit and coverage disagree about which region is poorly served,
+    the eligibility criteria and the baseline tables are picking out different
+    patients -- which is section 3's finding, restated geometrically.
+    """
+    if any(c not in frame.columns for c in ("pacmap_1", "pacmap_2")):
+        logger.warning(
+            "  alignment file carries no pacmap coordinates; space figure "
+            "skipped (re-run 11 after 03)"
+        )
+        return
+
+    panels: list[tuple[str, str, str, str]] = []
+    if "assigned_absdist" in frame.columns:
+        panels.append(("assigned_absdist",
+                       "distance outside the assigned trial's IQRs",
+                       "mean", "IQRs"))
+    if "guideline_fit" in frame.columns:
+        panels.append(("guideline_fit", "how the assigned guideline fits",
+                       "categorical", ""))
+    if "n_regions_inside" in frame.columns:
+        panels.append(("n_regions_inside", "trial regions the patient is inside",
+                       "mean", "regions"))
+    if "in_hospital_mortality" in frame.columns:
+        panels.append(("in_hospital_mortality", "in-hospital mortality",
+                       "rate", "share who died"))
+    for column, label in (
+        ("vent_free_days", f"ventilator-free days to {HORIZON_DAYS}"),
+        ("pressor_free_days", f"vasopressor-free days to {HORIZON_DAYS}"),
+    ):
+        if column in frame.columns:
+            panels.append((column, label, "mean", "days"))
+    if "concordant_assigned" in frame.columns:
+        panels.append(("concordant_assigned", "assigned guideline followed",
+                       "rate", "share treated per guideline"))
+    if not panels:
+        return
+
+    columns = 4
+    rows = int(np.ceil(len(panels) / columns))
+    figure, axes = plt.subplots(
+        rows, columns, figsize=(3.6 * columns, 3.4 * rows), squeeze=False
+    )
+    x = frame["pacmap_1"].to_numpy().astype(float)
+    y = frame["pacmap_2"].to_numpy().astype(float)
+    mincnt = 10
+
+    for position, (column, label, kind, units) in enumerate(panels):
+        axis = axes[position // columns][position % columns]
+
+        if kind == "categorical":
+            raw = frame[column].to_list()
+            levels = sorted({v for v in raw if v is not None})
+            present = np.array([v is not None for v in raw])
+            axis.scatter(
+                x[~present], y[~present], s=1.0, c=CONTEXT, linewidths=0,
+                rasterized=True,
+            )
+            # commonest level first, so the 337 patients matching a trial on
+            # both counts are not buried under the 18,779 matching none
+            ordered = sorted(levels, key=lambda v: -sum(1 for r in raw if r == v))
+            for index, level in enumerate(ordered):
+                mask = np.array([r == level for r in raw])
+                axis.scatter(
+                    x[mask], y[mask], s=1.6 + 1.4 * index,
+                    c=CATEGORICAL[index % len(CATEGORICAL)],
+                    linewidths=0, rasterized=True, zorder=2 + index,
+                    label=f"{level} ({int(mask.sum()):,})",
+                )
+            axis.legend(
+                fontsize=5.5, frameon=False, loc="lower center",
+                bbox_to_anchor=(0.5, -0.17), markerscale=4,
+                handletextpad=0.2, labelspacing=0.25,
+            )
+            axis.set_title(label, fontsize=8.5, loc="left")
+        else:
+            values = frame[column].cast(pl.Float64).to_numpy()
+            known = ~np.isnan(values)
+            axis.scatter(
+                x[~known], y[~known], s=0.8, c=CONTEXT, linewidths=0,
+                rasterized=True,
+            )
+            if int(known.sum()) < mincnt:
+                axis.set_title(f"{label}\nnot measured", fontsize=8.5,
+                               loc="left")
+            else:
+                top = float(np.nanpercentile(values[known], 98))
+                bottom = float(np.nanmin(values[known]))
+                mesh = axis.hexbin(
+                    x[known], y[known], C=values[known],
+                    reduce_C_function=np.mean,
+                    gridsize=46, mincnt=mincnt, cmap="viridis",
+                    # rate panels: floor at 0 but let the top come from the
+                    # bins. Pinning it to 1.0 is defensible and unreadable --
+                    # local mortality tops out near 0.5, so half the ramp went
+                    # unused and every bin sat in the dark third of it.
+                    vmin=0.0 if kind == "rate" else bottom,
+                    vmax=None if kind == "rate" else max(top, bottom + 1e-9),
+                    linewidths=0,
+                )
+                bar = figure.colorbar(mesh, ax=axis, fraction=0.042, pad=0.02)
+                bar.ax.tick_params(labelsize=6, labelcolor=INK_SECONDARY)
+                bar.outline.set_visible(False)
+                bar.set_label(units, fontsize=6, color=INK_SECONDARY)
+                overall = float(np.nanmean(values[known]))
+                summary = (
+                    f"{overall:.1%} overall" if kind == "rate"
+                    else f"mean {overall:.1f}"
+                )
+                axis.set_title(
+                    f"{label}\n{summary}, {int(known.sum()):,} patients",
+                    fontsize=8.5, loc="left",
+                )
+        axis.set_xticks([])
+        axis.set_yticks([])
+        for side in ("top", "right", "bottom", "left"):
+            axis.spines[side].set_visible(False)
+
+    for position in range(len(panels), rows * columns):
+        axes[position // columns][position % columns].axis("off")
+
+    figure.suptitle(
+        f"Guideline fit and outcome on one layout ({anchor} anchor, PaCMAP)",
+        fontsize=11, x=0.01, ha="left",
+    )
+    figure.supxlabel(
+        f"hexagons are local means over at least {mincnt} patients; pale grey "
+        "is not measured for that panel; mean scales clipped at p98",
+        fontsize=7, color=INK_SECONDARY, x=0.01, ha="left",
+    )
+    figure.tight_layout(rect=(0, 0.03, 1, 0.95))
+    save_figure(figure, out_path)
+    plt.close(figure)
 
 
 def main() -> None:

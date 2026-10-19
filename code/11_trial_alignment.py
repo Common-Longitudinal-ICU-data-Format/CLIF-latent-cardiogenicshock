@@ -51,6 +51,7 @@ from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
 from clifcs import ANCHORS, get_logger, load_cohort_cfg, load_paths
+from clifcs.embedding import site_embedding_files
 from clifcs.concordance import (
     add_concordance,
     attach_procedures,
@@ -126,10 +127,7 @@ def load_anchor(paths, anchor: str, logger, batch_size=None) -> pl.DataFrame:
             batch_size=batch_size,
         )
 
-    sources = sorted(
-        paths.patient_level_home.glob(f"embeddings_anchor-{anchor}_*.parquet")
-    )
-    sources = [p for p in sources if "share-safe" not in p.name]
+    sources = site_embedding_files(paths.patient_level_home, anchor)
     if not sources:
         raise FileNotFoundError(
             f"no embeddings for anchor {anchor} in {paths.patient_level_home}; "

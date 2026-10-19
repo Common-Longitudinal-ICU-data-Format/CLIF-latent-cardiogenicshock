@@ -45,6 +45,7 @@ from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import StandardScaler
 
 from clifcs import ANCHORS, get_logger, load_paths
+from clifcs.embedding import site_embedding_files
 from clifcs.correction import METHODS, fit
 
 PCA_COMPONENTS = 50
@@ -57,11 +58,7 @@ def embedding_matrix(frame: pl.DataFrame) -> np.ndarray:
 
 
 def load_embeddings(paths, anchor: str, logger) -> pl.DataFrame:
-    sources = sorted(
-        p
-        for p in paths.patient_level_home.glob(f"embeddings_anchor-{anchor}_*.parquet")
-        if "_share-safe" not in p.name
-    )
+    sources = site_embedding_files(paths.patient_level_home, anchor)
     if not sources:
         raise FileNotFoundError(f"no embeddings for {anchor} in {paths.patient_level_home}")
     frame = pl.concat([pl.read_parquet(p) for p in sources], how="diagonal_relaxed")
@@ -207,10 +204,20 @@ def main() -> None:
             )
             if args.write_corrected and method != "raw":
                 corrected = correction.apply(x, sites)
+                # A subdirectory, not a sibling. These were first written as
+                # `embeddings_anchor-<anchor>_corrected-<method>.parquet`,
+                # which matches the `embeddings_anchor-<anchor>_*.parquet`
+                # glob that 03, 04, 06, 11 and 13 all use to pool the per-site
+                # files -- so writing one silently tripled the apparent cohort
+                # the next time 03 ran, and the figures looked entirely
+                # plausible at 102,426 patients. Nothing in the pool directory
+                # may share that prefix.
                 out = (
                     paths.patient_level_home
-                    / f"embeddings_anchor-{anchor}_corrected-{method}.parquet"
+                    / "corrected"
+                    / f"anchor-{anchor}_{method}.parquet"
                 )
+                out.parent.mkdir(parents=True, exist_ok=True)
                 pl.concat(
                     [
                         frame.select(

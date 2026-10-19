@@ -30,6 +30,62 @@ from clifcs.config import CONFIG_HOME
 
 SPLITS = ("train", "tuning", "held_out")
 
+
+def site_embedding_files(patient_level_home, anchor: str) -> list:
+    """
+    the per-site embedding files for one anchor, and nothing else
+
+    `embeddings_anchor-<anchor>_<SITE>.parquet` is how a site contributes, and
+    every pooling script globs for it. The glob is wider than the contract:
+    anything dropped in that directory whose name starts the same way gets
+    pooled as though it were another hospital.
+
+    That is not hypothetical. 05's corrected embeddings were briefly written as
+    `embeddings_anchor-onset_corrected-leace.parquet`, and the next run of 03
+    pooled the raw file with both corrected ones and reported 102,426 patients
+    against a 34,142-patient cohort -- with figures that looked entirely
+    reasonable, because tripling a cohort with affine images of itself does not
+    distort a projection in any obvious way. The corrected files now live in a
+    subdirectory; this function is the second line of defence, so the next
+    thing to land there fails loudly instead.
+
+    A share-safe copy is a redaction of a file that is usually already in the
+    list, and reading both double-counts that site -- so it is read only when
+    its unredacted twin is absent, which is the case where it came from a
+    collaborating site rather than from this machine. 03 already did this; the
+    other four scripts dropped share-safe files unconditionally and so would
+    have ignored a remote site that could only ship the redacted form.
+    """
+    import pathlib
+
+    found = sorted(
+        pathlib.Path(patient_level_home).glob(
+            f"embeddings_anchor-{anchor}_*.parquet"
+        )
+    )
+    prefix = f"embeddings_anchor-{anchor}_"
+    rejected = []
+    for path in found:
+        tag = path.stem.split(prefix, 1)[-1].replace("_share-safe", "")
+        # a site tag is a bare name; a hyphen means a role prefix, not a site
+        if "-" in tag:
+            rejected.append(path.name)
+    if rejected:
+        raise RuntimeError(
+            "these files match the per-site embedding pattern but are not site "
+            "files: " + ", ".join(rejected) + ". Move them out of "
+            f"{patient_level_home} -- pooling them would silently inflate the "
+            "cohort, which is how a 34,142-patient cohort once came back as "
+            "102,426."
+        )
+    unredacted = {p.name for p in found if "_share-safe" not in p.name}
+    return [
+        p
+        for p in found
+        if "_share-safe" not in p.name
+        or p.name.replace("_share-safe", "") not in unredacted
+    ]
+
 #: What to do when a patient's pre-anchor history exceeds the model's max_len.
 #:
 #: cotorra keeps the first max_len tokens, which is right for the 24h anchor --

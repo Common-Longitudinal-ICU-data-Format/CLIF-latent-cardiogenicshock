@@ -968,13 +968,21 @@ def treatment_profile(frame: pl.DataFrame, cfg, logger) -> pl.DataFrame:
             aggregations.append(
                 pl.col(f"ever_{agent}").mean().alias(f"ever_{agent}")
             )
+    # fill_null(False) is load-bearing. 01 writes `cardiac_inotrope` and
+    # `cardiac_mcs` as True-or-null rather than True-or-false -- 29,780 of
+    # 34,142 patients are null on the first -- so a plain mean() skips the
+    # nulls and returns 1.0 for every group. The first version of this table
+    # reported 100% inotrope and 100% mechanical support in all six groups and
+    # looked like a plausible ceiling effect rather than a bug.
     for column, alias in (
         ("on_any_steroid", "on_any_steroid"),
         ("cardiac_mcs", "mcs"),
         ("cardiac_inotrope", "inotrope"),
     ):
         if column in frame.columns:
-            aggregations.append(pl.col(column).mean().alias(alias))
+            aggregations.append(
+                pl.col(column).fill_null(False).mean().alias(alias)
+            )
     for column in ("hours_to_first_antibiotic", "hours_to_first_agent"):
         if column in frame.columns:
             aggregations += [
@@ -1083,6 +1091,8 @@ def assignment_concordance(frame: pl.DataFrame, logger) -> pl.DataFrame:
         pl.len().alias("n"),
         pl.col("in_hospital_mortality").mean().alias("mortality"),
     ]
+    # `in_hospital_mortality` is a real boolean, unlike the cardiac flags --
+    # checked rather than assumed, after those turned out to be True-or-null
     for column in ("pressor_free_days", "vent_free_days"):
         if column in frame.columns:
             outcomes.append(pl.col(column).mean().alias(column))

@@ -199,6 +199,26 @@ def phenotype_colors() -> dict:
 def mortality_colors() -> dict:
     return dict(zip(MORTALITY_LEVELS, husl_colors(range(2)).values()))
 
+
+def shock_type_colors() -> dict:
+    """
+    one hue per coded shock mechanism
+
+    Six levels is past what the all-pairs colourblind gate can validate, so
+    these are NOT safe as the sole channel in a single pooled scatter -- see
+    the note on CATEGORICAL_8. They exist for the faceted figure, where each
+    panel draws one mechanism in its own hue against the grey context layer and
+    there is only one pair to check per panel. Using one blue for all six
+    panels, which is what that figure did first, loses the only cue that lets a
+    reader compare panels without re-reading the titles.
+
+    The pooled scatter is drawn with them as well, and is labelled as the
+    version to distrust.
+    """
+    from clifcs.shock_type import SHOCK_TYPES
+
+    return husl_colors(SHOCK_TYPES)
+
 #: single-hue blue ramp, steps 100-700, for continuous magnitude
 SEQUENTIAL_BLUE = (
     "#cde2fb",  # 100

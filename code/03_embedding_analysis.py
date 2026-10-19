@@ -47,6 +47,7 @@ from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
 from clifcs import ANCHORS, get_logger, load_paths
+from clifcs.embedding import site_embedding_files
 from clifcs.figures import key_string, save_figure
 from clifcs.palette import (
     CONTEXT,
@@ -56,6 +57,7 @@ from clifcs.palette import (
     INK_SECONDARY,
     mortality_colors,
     phenotype_colors,
+    shock_type_colors,
     continuous_cmap,
     site_colors,
     SURFACE,
@@ -298,9 +300,10 @@ def plot_categorical_facets(
     ylabel: str,
     out_path: pathlib.Path,
     columns: int = 3,
+    colors: dict | None = None,
 ) -> None:
     """
-    one panel per category: that category in the highlight hue, the rest grey
+    one panel per category: that category in its own hue, the rest grey
 
     This is the documented answer past three series, and shock type has six.
     A scatter shows every series at once, so the all-pairs colourblind gate
@@ -315,6 +318,13 @@ def plot_categorical_facets(
     same cloud, so "septic shock is everywhere" and "cardiogenic shock sits in
     one corner" are both readable, and the reader can compare panel to panel
     rather than trusting an overplotted legend.
+
+    `colors` gives each panel its own hue, keyed by category. The gate is
+    satisfied either way -- one hue against the grey context is a single pair --
+    and a per-panel hue is what lets the eye carry a category between this
+    figure and the pooled one without re-reading six titles. Without it every
+    panel was the same blue, which made the six panels look like six views of
+    one thing. Falls back to HIGHLIGHT so existing callers keep working.
     """
     levels = [(key, label) for key, label in order]
     rows = int(np.ceil(len(levels) / columns))
@@ -339,7 +349,8 @@ def plot_categorical_facets(
             linewidths=0, rasterized=True, zorder=1,
         )
         ax.scatter(
-            xs[mask], ys[mask], s=size * 1.6, c=HIGHLIGHT,
+            xs[mask], ys[mask], s=size * 1.6,
+            c=(colors or {}).get(key, HIGHLIGHT),
             linewidths=0, alpha=0.85, rasterized=True, zorder=2,
         )
         share = mask.sum() / max(len(mask), 1)
@@ -380,6 +391,7 @@ def plot_continuous(
     out_path: pathlib.Path,
     rng: np.random.Generator,
     upper_percentile: float = 99.0,
+    log: bool = False,
 ) -> None:
     """
     scatter coloured by a continuous value, with the colourbar off the scatter
@@ -387,6 +399,16 @@ def plot_continuous(
     ICU length of stay is heavily right-skewed, so the scale is clipped at the
     99th percentile: on a raw scale a handful of multi-month stays compress
     everyone else into the lightest step and the plot shows nothing.
+
+    Clipping alone was not enough for it. The distribution is dense below a
+    week, so even clipped at p99 most of the cohort still landed in the first
+    two or three steps of the ramp and the figure was a pale smear with a few
+    dark points -- the gradient existed exactly where no patients were. `log`
+    colours on log10(1 + value) instead, which puts roughly one step per
+    doubling and so spends the ramp where the patients are: the difference
+    between a two-day and a six-day stay becomes visible, which is the
+    comparison the figure is for. The colourbar is ticked in the original units
+    so nothing has to be exponentiated to be read.
     """
     figure, scatter_ax, legend_ax = _new_figure()
     size = _marker_size(frame.height)
@@ -398,13 +420,19 @@ def plot_continuous(
     values = np.asarray(shuffled[column].to_list(), dtype=float)
     vmax = float(np.nanpercentile(values, upper_percentile))
     vmin = float(np.nanmin(values))
-    norm = Normalize(vmin=vmin, vmax=max(vmax, vmin + 1e-9))
+
+    def _to_scale(v):
+        return np.log10(1.0 + v) if log else v
+
+    shown = _to_scale(values)
+    scale_max, scale_min = float(_to_scale(vmax)), float(_to_scale(vmin))
+    norm = Normalize(vmin=scale_min, vmax=max(scale_max, scale_min + 1e-9))
 
     points = scatter_ax.scatter(
         np.asarray(shuffled[x].to_list()),
         np.asarray(shuffled[y].to_list()),
         s=size,
-        c=values,
+        c=shown,
         cmap=LOS_CMAP,
         norm=norm,
         linewidths=0,
@@ -418,6 +446,11 @@ def plot_continuous(
     colorbar.set_label(label, color=INK_SECONDARY, fontsize=7)
     colorbar.ax.tick_params(labelsize=6, color=GRID, labelcolor=INK_SECONDARY)
     colorbar.outline.set_visible(False)
+
+    if log:
+        ticks = [t for t in (0, 1, 2, 5, 10, 20, 50, 100, 200) if vmin <= t <= vmax]
+        colorbar.set_ticks([float(_to_scale(t)) for t in ticks])
+        colorbar.set_ticklabels([str(t) for t in ticks])
 
     median = float(np.nanmedian(values))
     legend_ax.text(
@@ -503,17 +536,7 @@ def _load_anchor_local(paths, anchor: str, logger) -> pl.DataFrame:
     whether they can ship identifiers, so the union of columns is taken and
     only `REQUIRED_COVARIATES` are insisted on.
     """
-    sources = sorted(
-        paths.patient_level_home.glob(f"embeddings_anchor-{anchor}_*.parquet")
-    )
-    # a share-safe copy is a redaction of a file already in the list locally;
-    # only read it when its unredacted twin is absent (i.e. it came from elsewhere)
-    stems = {p.name.replace("_share-safe", "") for p in sources}
-    sources = [
-        p
-        for p in sources
-        if "_share-safe" not in p.name or p.name.replace("_share-safe", "") not in stems
-    ]
+    sources = site_embedding_files(paths.patient_level_home, anchor)
     if not sources:
         logger.warning(
             f"[{anchor}] no embeddings_anchor-{anchor}_*.parquet in "
@@ -608,8 +631,38 @@ def _load_anchor_local(paths, anchor: str, logger) -> pl.DataFrame:
     return frame
 
 
+def load_corrected(paths, anchor: str, method: str, logger) -> pl.DataFrame:
+    """
+    05's site-corrected embeddings for one anchor
+
+    05 writes these only under --write-corrected, since 06 refits the
+    correction itself and does not need them on disk. Projecting them answers
+    a question the correction table cannot: the table says the linear site
+    probe falls from AUC 1.000 to 0.512, which is the whole point of the map,
+    but it says nothing about what the space looks like afterwards -- whether
+    the two site clouds now sit on top of one another or merely slid together,
+    and whether anything clinical survived the erasure.
+    """
+    source = (
+        paths.patient_level_home / "corrected" / f"anchor-{anchor}_{method}.parquet"
+    )
+    if not source.is_file():
+        logger.warning(
+            f"[{anchor}] no {source.name}; run "
+            f"05_site_correction.py --anchor {anchor} --write-corrected"
+        )
+        return pl.DataFrame()
+    frame = pl.read_parquet(source)
+    logger.info(f"[{anchor}] {frame.height:,} patients from {source.name}")
+    return frame
+
+
 def analyse_anchor(paths, anchor: str, args, logger) -> pl.DataFrame:
-    frame = load_anchor(paths, anchor, logger, getattr(args, "batch_size", None))
+    corrected = getattr(args, "corrected", None)
+    if corrected:
+        frame = load_corrected(paths, anchor, corrected, logger)
+    else:
+        frame = load_anchor(paths, anchor, logger, getattr(args, "batch_size", None))
     if frame.height == 0:
         return pl.DataFrame()
 
@@ -624,7 +677,11 @@ def analyse_anchor(paths, anchor: str, args, logger) -> pl.DataFrame:
 
     frame, explained = project(frame, args.seed, logger)
 
+    # corrected runs write beside the raw ones rather than over them: the pair
+    # is only readable as a before/after if both are still on disk
     figure_home = paths.figure_home / f"anchor-{anchor}"
+    if corrected:
+        figure_home = figure_home / f"corrected-{corrected}"
     figure_home.mkdir(parents=True, exist_ok=True)
 
     projections = (
@@ -644,6 +701,8 @@ def analyse_anchor(paths, anchor: str, args, logger) -> pl.DataFrame:
         "24h": "24 h after admission",
         "onset": "cardiogenic shock onset",
     }[anchor]
+    if corrected:
+        anchor_label += f", site effect removed ({corrected})"
 
     for key, x, y, xlabel, ylabel, pretty in projections:
         base = f"{pretty} of {paths.model_key} embeddings, {anchor_label}"
@@ -689,6 +748,26 @@ def analyse_anchor(paths, anchor: str, args, logger) -> pl.DataFrame:
                 xlabel,
                 ylabel,
                 figure_home / f"{key}_shock_type.png",
+                colors=shock_type_colors(),
+            )
+            # The same six hues in one scatter. Six levels is past what the
+            # all-pairs colourblind gate can validate and the mechanisms
+            # overlap heavily, so whichever is drawn last looks larger than
+            # it is -- the faceted figure above is the one to trust. This
+            # exists because the facets cannot show which mechanisms occupy
+            # the same ground, and that is a real question about the space.
+            plot_categorical(
+                shock_frame,
+                x,
+                y,
+                "shock_type",
+                shock_type_colors(),
+                [(s, s) for s in SHOCK_TYPES],
+                f"{base}\nshock types together -- the faceted version is the one to trust",
+                xlabel,
+                ylabel,
+                figure_home / f"{key}_shock_type_pooled.png",
+                rng,
             )
 
         plot_categorical(
@@ -713,9 +792,10 @@ def analyse_anchor(paths, anchor: str, args, logger) -> pl.DataFrame:
             f"{base}\ncoloured by ICU length of stay",
             xlabel,
             ylabel,
-            "ICU LOS (days)",
+            "ICU LOS (days, log scale)",
             figure_home / f"{key}_icu_los.png",
             rng,
+            log=True,
         )
 
     logger.info(f"[{anchor}] wrote 8 figures to {figure_home}")
@@ -767,10 +847,28 @@ def analyse_anchor(paths, anchor: str, args, logger) -> pl.DataFrame:
         "icu_los_days",
         "in_hospital_mortality",
         *optional,
-    ).write_parquet(paths.patient_level_home / f"projections_anchor-{anchor}.parquet")
+    ).write_parquet(
+        paths.patient_level_home
+        / (
+            f"projections_anchor-{anchor}_corrected-{corrected}.parquet"
+            if corrected
+            else f"projections_anchor-{anchor}.parquet"
+        )
+    )
 
+    # Suffixed on a corrected run. 11, 13 and the report all join against
+    # `projections_anchor-<anchor>.parquet` and none of them want coordinates
+    # from an erased space, so overwriting it would silently redraw every
+    # downstream overlay in a projection its own prose does not describe.
     purity = neighbourhood_purity(frame, anchor, args.seed, logger)
-    purity.write_csv(paths.table_home / f"neighbourhood_purity_anchor-{anchor}.csv")
+    purity.write_csv(
+        paths.table_home
+        / (
+            f"neighbourhood_purity_anchor-{anchor}_corrected-{corrected}.csv"
+            if corrected
+            else f"neighbourhood_purity_anchor-{anchor}.csv"
+        )
+    )
 
     return summarize_anchor(frame, anchor)
 
@@ -881,6 +979,14 @@ def main() -> None:
         help="which checkpoint's embeddings to analyse (default: default_model)",
     )
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--corrected",
+        choices=("site-standardized", "leace"),
+        default=None,
+        help="project 05's site-corrected embeddings instead of the raw ones; "
+        "figures go to figures/<model>/anchor-<anchor>/corrected-<method>/ so "
+        "the before and after sit side by side. Needs 05 --write-corrected.",
+    )
     parser.add_argument(
         "--max-points",
         type=int,
