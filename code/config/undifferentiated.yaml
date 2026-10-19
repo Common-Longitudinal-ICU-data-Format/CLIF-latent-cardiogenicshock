@@ -1,0 +1,230 @@
+%YAML 1.2
+---
+# The undifferentiated shock analysis: who has no coded mechanism, what the
+# embedding says they resemble, and whether they were treated accordingly.
+#
+# The cohort is selected on physiology -- sustained hypotension or vasoactive
+# support plus end-organ damage -- which is mechanism-agnostic by construction.
+# clifcs.shock_type attaches what the coders said the mechanism was, and leaves
+# 54.6% of patients with no shock code at all. Those are the subject here.
+#
+# ---------------------------------------------------------------------------
+# WHY EVERY COMPARISON IS WITHIN SITE
+#
+# NU leaves 56.6% of its patients uncoded against UCMC's 48.9% -- a 1.16-fold
+# gap, which is not in itself alarming. What does differ is *which* mechanism
+# gets coded when one is: UCMC codes cardiogenic shock 2.5 times as often as NU
+# (13.5% of its patients against 5.3%) and NU codes septic shock 1.7 times as
+# often as UCMC (20.3% against 12.3%). So the coded patients -- the probe's
+# training set and the centroids' definition -- have a materially different
+# mechanism mix at the two hospitals, and neither the class priors nor the
+# centroids transport. Centroids are fitted per site, neighbourhoods are
+# searched within site, and the probe is scored within-site and cross-site
+# separately.
+#
+# ---------------------------------------------------------------------------
+# WHAT CANNOT BE ASSESSED, STATED BEFORE THE SETTINGS
+#
+# Three of the treatment comparisons have no data behind them at either site
+# and are reported as not assessable rather than approximated:
+#
+#   fluid volume      no intake/output table in either extract, so fluid volume
+#                     in the first 6/24 h cannot be computed. A count of
+#                     crystalloid administration *events* was considered and
+#                     rejected: an event without a volume cannot separate a
+#                     30 mL/kg resuscitation from a carrier line.
+#   transfusion       no blood product table at either site.
+#   echo / POCUS      no echo table, and ejection fraction appears in no
+#                     vitals, labs or assessment category. Whether a study was
+#                     *done* is as unavailable as what it showed, so whether
+#                     the team looked for a mechanism cannot be answered.
+#
+# This matters more here than elsewhere in the pipeline. Echo is the single
+# most informative thing a clinician does to differentiate shock, so its
+# absence means the analysis cannot see the main act of differentiation --
+# only the drugs that follow it.
+
+undifferentiated:
+
+  # The shock_type level that defines the group. `mixed` and `other shock` are
+  # NOT undifferentiated: a patient carrying R57.8 was looked at and called
+  # unspecified, which is a different clinical event from never being coded at
+  # all. They are reported as their own comparison groups.
+  label: none coded
+
+  # --------------------------------------------------------- later evidence
+  #
+  # How many of the undifferentiated eventually get a mechanism attached.
+  #
+  # NOTE WHAT IS STRUCTURALLY IMPOSSIBLE HERE. clif_hospital_diagnosis is
+  # hospitalization-level and untimed, so a code recorded on day 20 cannot be
+  # distinguished from one recorded on arrival. An undifferentiated patient has
+  # no shock code at any point in the admission by definition -- so whether a
+  # subtype *shock* diagnosis arrives later is not a question this data can
+  # answer at all, and no amount of care with poa_present changes that.
+  #
+  # What remains is evidence of a mechanism recorded by some other means: a
+  # positive culture, or a non-shock diagnosis that implies the mechanism.
+  # Neither is timed either. They are reported as evidence of a mechanism
+  # somewhere in the admission, never as a diagnosis that arrived later.
+  later_evidence:
+    # Non-shock codes that imply a mechanism. Prefixes, dots stripped and
+    # upper-cased, matched against both ICD-10-CM and ICD-9-CM -- the two do
+    # not collide, since the ICD-9 codes here are numeric and ICD-10's start
+    # with a letter. Quoted where a bare token would parse as a number.
+    code_groups:
+      septic:
+        - A40      # streptococcal sepsis
+        - A41      # other sepsis
+        - R6520    # severe sepsis without septic shock
+        - '0380'   # ICD-9 septicaemia
+        - '0381'
+        - '0382'
+        - '0384'
+        - '0388'
+        - '0389'
+        - '99591'  # ICD-9 sepsis
+        - '99592'  # ICD-9 severe sepsis
+      cardiogenic:
+        - I21      # acute myocardial infarction
+        - I22      # subsequent MI
+        - I50      # heart failure
+        - '410'    # ICD-9 acute MI
+        - '428'    # ICD-9 heart failure
+      hypovolemic:
+        - K920     # haematemesis
+        - K921     # melaena
+        - K922     # GI haemorrhage, unspecified
+        - '5780'   # ICD-9 haematemesis
+        - '5781'
+        - '5789'
+        # D62 and its ICD-9 twin 285.1, acute posthaemorrhagic anaemia, were
+        # here and have been removed. D62 alone is coded on 7,916 of NU's
+        # 14,163 uncoded patients -- 55.9%, against 0.7 to 1.3% for each of the
+        # GI haemorrhage codes -- so it accounted for essentially the whole
+        # flag and made 57% of the undifferentiated look like evidence of
+        # bleeding. It is a post-procedural anaemia code far more often than it
+        # is evidence of a haemorrhagic shock mechanism, and at that prevalence
+        # it cannot distinguish one patient from another whichever it means.
+
+    # A positive culture is independent evidence of infection, and unlike a
+    # diagnosis code it records something that was measured. Read from
+    # clif_microbiology_culture over the whole hospitalization.
+    #
+    # POSITIVITY IS NOT NON-NULLNESS. The table holds one row per organism
+    # *tested for*, so `organism_category` is non-null on 100% of UCMC rows and
+    # 93% of NU's; a draft that read non-null as growth would have called every
+    # cultured patient infected. Growth is a category that is neither null nor
+    # `no_growth`, which is 30% of UCMC rows and 29% of NU's.
+    #
+    # NU's 40,572 null rows are treated as unknown rather than as no growth.
+    # They are 6.8% of its table and there is nothing to distinguish an
+    # unresulted culture from an unmapped organism name, so counting them
+    # either way would be a guess; the missingness is reported instead.
+    culture_positive: !!bool true
+    no_growth_value: no_growth
+
+  # ------------------------------------------------------------ the geometry
+  #
+  # Matches 03, 04 and clifcs.purity, so the numbers here sit beside the 97%
+  # site purity the README quotes rather than needing their own scale.
+  geometry:
+    pca_components: !!int 50
+
+    # The three neighbourhood sizes, reported together because they answer
+    # different questions: k=10 is whether the nearest handful agree, k=50 is
+    # whether the wider region does, and a patient who looks septic at k=10 and
+    # cardiogenic at k=50 sits on a boundary -- which is worth seeing.
+    neighbours: [10, 25, 50]
+
+    # Cosine, on the raw 1024-d embeddings rather than in PCA space. Centring
+    # the space before taking an angle makes the angle depend on the cohort
+    # mean, which is not what direction in representation space means.
+    # Euclidean distance in the 50-d PCA space is computed alongside and the
+    # two rankings compared, so a result that depends on the metric shows up
+    # as a low rank correlation rather than staying invisible.
+    metric: cosine
+
+  # --------------------------------------------------------------- the probe
+  probe:
+    # The three mechanisms. `mixed` is deliberately excluded from training and
+    # scored as a held-out validation set instead: if the entropy means
+    # anything, patients the coders called mixed should sit higher on it than
+    # patients they called one thing.
+    classes: [septic, cardiogenic, hypovolemic]
+
+    # Multinomial logistic on the PCA scores, L2-regularised. A linear probe,
+    # not a classifier worth deploying: the question is whether the frozen
+    # representation linearly separates the mechanisms, and a gradient-boosted
+    # answer would conflate the information being present with a flexible model
+    # being able to find it.
+    penalty_C: !!float 1.0
+    max_iter: !!int 2000
+
+    # Patient-level, not hospitalization-level. A patient can appear with more
+    # than one hospitalization and their embeddings are not independent, so
+    # splitting on hospitalization leaks them across the fold boundary.
+    folds: !!int 5
+    group_column: patient_id
+
+    # Above this the assignment is called ambiguous, below it confident.
+    # Expressed on normalised entropy (0 = certain, 1 = uniform over the three
+    # classes) rather than on the top probability, so a 0.50/0.45/0.05 split
+    # reads as ambiguous rather than as a 0.50 assignment.
+    #
+    # A reporting threshold, not a decision rule: the full probability vector
+    # and the entropy are written per patient, so any other cut can be applied
+    # downstream without rerunning the probe.
+    max_entropy_confident: !!float 0.6
+
+  # ------------------------------------------------------- the leakage check
+  #
+  # Treatments are tokenized -- the vocabulary carries medication
+  # administrations -- so an embedding taken after onset has read the
+  # clinician's working diagnosis. A norepinephrine-and-antibiotics prefix says
+  # they thought it was septic, so a probe that separates the mechanisms at
+  # +24 h may be reading the treatment rather than the patient.
+  #
+  # These offsets are read from 09's grid, which embeds the same patients at
+  # the same anchor repeatedly. 0 h is the onset anchor: everything known
+  # before shock, nothing after. The rise in separation from 0 to +6 to +24 is
+  # the leakage, and is reported as such rather than as the probe improving.
+  snapshots:
+    offsets_hours: [0, 6, 24]
+    reference_offset: !!int 0
+
+  # -------------------------------------------------------------- treatments
+  treatments:
+    # Peri-onset agent flags come from clifcs.trials.attach_features, which
+    # reads the medication table over onset +/- 6 h. The admission-wide
+    # ever_<agent> flags are kept beside them: anchoring to the shock reversed
+    # the direction of the trial comparison in 11, so the two windows are never
+    # used interchangeably.
+    agents:
+      - norepinephrine
+      - vasopressin
+      - epinephrine
+      - phenylephrine
+      - dobutamine
+      - milrinone
+      - dopamine
+
+    # Hours from shock onset to the first antibiotic administration, from
+    # clif_medication_admin_intermittent. Negative where antibiotics preceded
+    # the shock, which is common and is not an error -- it is the sepsis
+    # pathway working.
+    #
+    # Identified by med_group rather than by a list of med_categories. An
+    # earlier draft of this file listed twenty drug names and got two of them
+    # wrong: the categories are underscore-separated (`ampicillin_sulbactam`),
+    # so the hyphenated spellings matched nothing and would have silently
+    # undercounted. The group is populated at both sites over millions of rows
+    # and is the CMS SEP-1 qualifying list, which is the clinically meaningful
+    # denominator for antibiotic timing anyway.
+    antibiotic_med_group: CMS_sepsis_qualifying_antibiotics
+
+    # Window for the first agent given, in hours either side of onset. Wider
+    # than the flag window on purpose: sequence needs the first administration
+    # whenever it happened, and a 6 h cap would record no first agent for a
+    # patient started at hour 7.
+    sequence_window_hours: !!int 24

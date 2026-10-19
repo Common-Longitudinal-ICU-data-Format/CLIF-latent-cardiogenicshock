@@ -1692,6 +1692,356 @@ def section_models(paths, out: list, logger) -> None:
         "site without being told to."))
 
 
+def section_undifferentiated(paths, out: list) -> bool:
+    """
+    13's analysis of the patients with no coded shock mechanism
+
+    Its own section rather than a subsection of 1, even though the cohort table
+    already reports the shock-type counts. The counts answer "how many"; this
+    answers "what are they", which needs the embedding, a probe and a treatment
+    comparison, and does not belong under a heading about enrollment.
+
+    Returns whether anything was emitted, so main can decide whether to list the
+    heading in the contents.
+    """
+    table_home = paths.output_home / "tables" / "GEM-all"
+    anchors = [
+        anchor
+        for anchor in ANCHORS
+        if (table_home / f"undiff_groups_{anchor}.csv").is_file()
+    ]
+    if not anchors:
+        return False
+
+    out.append(
+        '<h2 id="undifferentiated">10 &middot; Undifferentiated shock</h2>'
+    )
+    out.append(
+        "<p>The cohort is selected on physiology &mdash; sustained hypotension "
+        "or vasoactive support, plus end-organ damage &mdash; which is "
+        "mechanism-agnostic by construction. Attaching the coded mechanism "
+        "leaves <b>18,626 of 34,142 patients (54.6%) with no shock code at "
+        "all</b>. This section asks what those patients resemble in the frozen "
+        "model's representation, whether a linear probe trained on the coded "
+        "patients will assign them a mechanism, and whether the treatment they "
+        "received matches the assignment.</p>"
+    )
+    out.append(
+        "<p><b>Everything here is computed within site.</b> The two hospitals "
+        "leave a similar share uncoded (NU 56.6%, UCMC 48.9%) but reach for "
+        "different mechanisms when they do code one: UCMC codes cardiogenic "
+        "shock 2.5 times as often as NU (13.5% of its patients against 5.3%) "
+        "and NU codes septic shock 1.7 times as often as UCMC (20.3% against "
+        "12.3%). The coded patients are what defines every centroid and trains "
+        "every probe below, so a mechanism mix differing that much means "
+        "neither the centroids nor the class priors transport. Centroids are "
+        "fitted per site, neighbourhoods are searched within site, and the "
+        "probe is scored within-site and cross-site separately.</p>"
+    )
+
+    anchor_tabs = []
+    for anchor in anchors:
+        blocks = []
+        blocks.append(("Who they are", table(
+            pl.read_csv(table_home / f"undiff_groups_{anchor}.csv"),
+            {
+                "n": thousands, "share_of_site": pct, "mortality": pct,
+                "median_age": num(0), "median_sofa": num(0),
+                "median_lactate": num(1), "median_icu_los": num(1),
+                "pct_female": pct, "pct_on_vasoactive": pct,
+            },
+            key_column="shock_type",
+        )))
+
+        evidence = table_home / f"undiff_evidence_{anchor}.csv"
+        if evidence.is_file():
+            frame = pl.read_csv(evidence)
+            shares = [
+                c for c in frame.columns
+                if c.startswith(("hint_", "culture_")) or c == "any_hint"
+            ]
+            blocks.append(("Evidence from elsewhere", table(
+                frame,
+                {"n": thousands, **{c: pct for c in shares}},
+                key_column="shock_type",
+            )))
+
+        reference = table_home / f"undiff_reference_{anchor}.csv"
+        if reference.is_file():
+            blocks.append(("What a distance means", table(
+                pl.read_csv(reference),
+                {
+                    "n": thousands,
+                    "mean_cosine": num(4), "median_cosine": num(4),
+                },
+                key_column="label",
+            )))
+
+        neighbours = table_home / f"undiff_neighbours_{anchor}.csv"
+        if neighbours.is_file():
+            frame = pl.read_csv(neighbours)
+            blocks.append(("Neighbour composition", table(
+                frame,
+                {
+                    "n": thousands,
+                    **{c: pct for c in frame.columns if c.startswith("knn")},
+                },
+                key_column="shock_type",
+            )))
+
+        metrics = table_home / f"undiff_probe_metrics_{anchor}.csv"
+        if metrics.is_file():
+            blocks.append(("Probe", table(
+                pl.read_csv(metrics).sort("scoring", "class", "tested_on"),
+                {
+                    "n": thousands, "n_positive": thousands,
+                    "auroc": num(3), "brier": num(4),
+                },
+                key_column="class",
+            )))
+
+        calibration = table_home / f"undiff_probe_calibration_{anchor}.csv"
+        if calibration.is_file():
+            blocks.append(("Calibration", table(
+                pl.read_csv(calibration).sort(
+                    "scoring", "class", "tested_on", "bin_low"
+                ),
+                {
+                    "bin_low": num(1), "bin_high": num(1), "n": thousands,
+                    "mean_predicted": num(3), "observed": num(3),
+                },
+                key_column="class",
+            )))
+
+        check = table_home / f"undiff_probe_vs_evidence_{anchor}.csv"
+        if check.is_file():
+            frame = pl.read_csv(check)
+            blocks.append(("Does the assignment check out", table(
+                frame,
+                {
+                    "n": thousands, "mortality": pct,
+                    **{
+                        c: pct for c in frame.columns
+                        if c.startswith(("hint_", "culture_"))
+                    },
+                },
+                key_column="probe_assignment",
+            )))
+
+        snapshots = table_home / f"undiff_snapshots_{anchor}.csv"
+        if snapshots.is_file():
+            blocks.append(("Leakage by snapshot", table(
+                pl.read_csv(snapshots)
+                .filter(pl.col("scoring") == "within-site")
+                .group_by("class", "offset_hours")
+                .agg(pl.col("auroc").mean(), pl.col("n").sum())
+                .sort("class", "offset_hours"),
+                {"offset_hours": num(0), "n": thousands, "auroc": num(3)},
+                key_column="class",
+            )))
+
+        treatments = table_home / f"undiff_treatments_{anchor}.csv"
+        if treatments.is_file():
+            frame = pl.read_csv(treatments)
+            rates = [
+                c for c in frame.columns
+                if c.startswith(("on_", "ever_", "pct_"))
+                or c in ("mcs", "inotrope", "abx_within_6h")
+            ]
+            blocks.append(("What they were given", table(
+                frame,
+                {
+                    "n": thousands,
+                    **{c: pct for c in rates},
+                    "median_hours_to_first_antibiotic": num(1),
+                    "median_hours_to_first_agent": num(1),
+                },
+                key_column="shock_type",
+            )))
+
+        first = table_home / f"undiff_first_agents_{anchor}.csv"
+        if first.is_file():
+            blocks.append(("Which agent came first", table(
+                pl.read_csv(first),
+                {"n": thousands, "share": pct},
+                key_column="shock_type",
+            )))
+
+        concordance = table_home / f"undiff_concordance_{anchor}.csv"
+        if concordance.is_file():
+            frame = pl.read_csv(concordance)
+            blocks.append(("Treated as assigned", table(
+                frame,
+                {
+                    "n": thousands, "mortality": pct,
+                    "pressor_free_days": num(1), "vent_free_days": num(1),
+                    "sofa_non_cv": num(1), "sofa_total": num(1),
+                },
+                key_column="probe_assignment",
+            )))
+
+        adjusted = table_home / f"undiff_concordance_adjusted_{anchor}.csv"
+        if adjusted.is_file():
+            blocks.append(("Treated as assigned, adjusted", table(
+                pl.read_csv(adjusted).select(
+                    "probe_assignment", "outcome", "model", "n", "n_treated",
+                    "effect_unadjusted", "p_unadjusted",
+                    "effect_adjusted", "p_adjusted", "adjusted_for",
+                ),
+                {
+                    "n": thousands, "n_treated": thousands,
+                    "effect_unadjusted": num(3), "effect_adjusted": num(3),
+                    "p_unadjusted": pval, "p_adjusted": pval,
+                },
+                key_column="probe_assignment",
+            )))
+
+        not_assessable = table_home / "undiff_not_assessable.csv"
+        if not_assessable.is_file():
+            blocks.append(("Not assessable", table(
+                pl.read_csv(not_assessable), key_column="comparison",
+            )))
+
+        home = paths.output_home / "figures" / "GEM-all" / f"anchor-{anchor}"
+        for name, label in (
+            ("undiff_probe", "Probe AUROC"),
+            ("undiff_snapshots", "Leakage"),
+            ("undiff_entropy", "How undecided"),
+            ("undiff_proximity", "Distance to centroids"),
+            ("undiff_overlay", "Where they sit"),
+        ):
+            body = figure(home / f"{name}.png")
+            if body:
+                blocks.append((label, body))
+        anchor_tabs.append((anchor, tabs(blocks)))
+
+    out.append(tabs(anchor_tabs))
+
+    out.append(callout(
+        "<b>The centroids do not separate the mechanisms, but a linear probe "
+        "does &mdash; comfortably.</b> Coded patients sit a mean cosine "
+        "distance of <b>0.456</b> from their own mechanism's centroid against "
+        "<b>0.494</b> from the other two, a gap of 0.038 on a scale where the "
+        "within-group spread is an order of magnitude larger. On that measure "
+        "the mechanisms are not distinct regions, which is the same answer "
+        "section 4 got for the trial populations (centroid separation 0.03 to "
+        "0.32). Yet a multinomial logistic regression on the same 50 "
+        "components reaches an AUROC of <b>0.90 for cardiogenic, 0.87 for "
+        "septic and 0.79 for hypovolemic</b>. <b>The information is there and "
+        "it is linearly decodable; it simply does not lie along the direction "
+        "joining the class means.</b> Distance to a centroid is the wrong "
+        "instrument for this space, and the nearest-centroid columns are "
+        "reported mainly to show why."))
+
+    out.append(callout(
+        "<b>The separation is not the model reading the treatment back out.</b> "
+        "This was the main thing that could have been wrong with the probe: "
+        "medication administrations are part of the token vocabulary, so an "
+        "embedding taken after the clinician starts treating has seen the "
+        "antibiotics and the inotrope that the working diagnosis produced, and "
+        "a probe scored there would be recovering documented clinical judgement "
+        "rather than latent structure. Re-running the identical probe on 09's "
+        "grid at 0 h, +6 h and +24 h from onset gives AUROCs of <b>0.899 / "
+        "0.917 / 0.919</b> for cardiogenic, <b>0.869 / 0.877 / 0.887</b> for "
+        "septic and <b>0.791 / 0.811 / 0.824</b> for hypovolemic. A full day of "
+        "post-onset record &mdash; every drug, every lab, every escalation "
+        "&mdash; buys about <b>two AUROC points</b>. Essentially all of the "
+        "separation is present before the shock is treated, and the +24 h rise "
+        "is in any case not attributable to treatment alone, since the patient "
+        "is also deteriorating over the same hours."))
+
+    out.append(callout(
+        "<b>One of the three assignments survives an external check; the other "
+        "two do not.</b> The only evidence available against a probe assignment "
+        "is non-shock coding and microbiology, and it supports the septic class "
+        "clearly. Among uncoded patients the probe confidently calls septic, "
+        "<b>51.6% have a positive culture at NU and 73.4% at UCMC</b>, against "
+        "32.2% and 58.1% for the ones it is unsure about and a 37.8% base rate "
+        "in the uncoded group at UCMC; the infection-code rate moves the same "
+        "way (39.3% against 11.9% at NU). Mortality agrees &mdash; confidently "
+        "septic is the deadliest assigned group at both sites (15.2% and "
+        "24.5%). <b>The cardiogenic class does not replicate this.</b> "
+        "Patients confidently called cardiogenic carry a cardiogenic diagnosis "
+        "code 39.0% (NU) and 47.5% (UCMC) of the time against base rates of "
+        "29.1% and 26.1% &mdash; an enrichment, but a weak one. And "
+        "<b>confidently-cardiogenic patients die at 1.1% (NU) and 3.4% "
+        "(UCMC)</b>, against 25.2% among the patients the coders actually "
+        "called cardiogenic. Whatever that class is selecting, it is not "
+        "patients in cardiogenic shock.", "warn"))
+
+    out.append(callout(
+        "<b>The likeliest reading of the whole section: the probe is sorting "
+        "the uncoded by severity and by how septic they look, not by "
+        "mechanism.</b> The uncoded are much less sick than any coded group "
+        "&mdash; 6.2% in-hospital mortality pooled (4.6% NU, 11.2% UCMC) "
+        "against 25.2% cardiogenic, 29.6% septic and 43.3% mixed &mdash; so "
+        "most of them are not a diagnostic puzzle but a mild population the "
+        "physiological criteria admitted and nobody thought was in shock. A "
+        "three-way probe forced to choose among septic, cardiogenic and "
+        "hypovolemic will put such a patient somewhere, and the class it picks "
+        "carries no claim that any mechanism was present. The septic class "
+        "works because infection leaves independent traces in cultures; the "
+        "other two have nothing comparable to be checked against, and their "
+        "mortality ordering suggests they are absorbing the patients with the "
+        "least evidence of anything.", "warn"))
+
+    out.append(callout(
+        "<b>Treatment matching the assignment tracks with lower mortality, and "
+        "this cannot be read as a reason to follow the probe.</b> Among uncoded "
+        "patients the probe calls cardiogenic, those who actually received an "
+        "inotrope or mechanical support have a mortality log-odds <b>0.71 "
+        "lower</b> unadjusted and <b>0.48 lower</b> adjusted for "
+        "non-cardiovascular SOFA, age and site (p = 0.016); for the septic "
+        "class, antibiotics within six hours give &minus;0.26 unadjusted and "
+        "&minus;0.16 adjusted, which does not reach significance (p = 0.069). "
+        "<b>Confounding by indication is the whole of this.</b> A clinician "
+        "gives an inotrope because they read the same record the probe reads "
+        "and reached the same conclusion, so concordance measures agreement "
+        "between two readings of one patient &mdash; and a patient whose "
+        "mechanism is legible enough for both to agree is a different patient "
+        "from one whose is not. Adjusting for severity removes the part "
+        "severity carries and leaves the clinician's judgement, which is "
+        "measured nowhere in this data.", "warn"))
+
+    out.append(callout(
+        "<b>A diagnosis arriving later is not something this data can see, and "
+        "one attempt to approximate it had to be withdrawn.</b> The hospital "
+        "diagnosis table has no timestamp, and an uncoded patient carries no "
+        "shock code at any point in the admission by definition, so "
+        "&ldquo;how many are later given a subtype&rdquo; is unanswerable "
+        "rather than merely hard. What is reported instead is whether a "
+        "mechanism was recorded by some other means anywhere in the admission. "
+        "The first version of that flag included <code>D62</code>, acute "
+        "posthaemorrhagic anaemia, as evidence of a haemorrhagic mechanism; it "
+        "is coded on <b>7,916 of NU's 14,163 uncoded patients (55.9%)</b> "
+        "against 0.7 to 1.3% for each of the specific gastrointestinal "
+        "haemorrhage codes, so it made 57% of the undifferentiated appear to "
+        "have evidence of bleeding and was carrying the entire flag on its own. "
+        "It is a post-procedural anaemia code far more often than it is "
+        "evidence of hypovolemic shock, and at that prevalence it could not "
+        "have distinguished one patient from another whichever it meant. It is "
+        "removed, and at NU the hypovolemic flag now reads <b>21.1% in coded "
+        "hypovolemic patients against 2.7% in the uncoded</b> &mdash; a "
+        "low-sensitivity flag rather than a meaningless one.", "warn"))
+
+    out.append(callout(
+        "<b>Three of the treatment comparisons have no data behind them at "
+        "either site, and the third is the one that matters.</b> Fluid volume "
+        "needs an intake/output table and neither extract has one; transfusion "
+        "needs a blood product table and neither has one; <b>echocardiography "
+        "and POCUS need an echo table, and neither site has that either</b>. "
+        "The third is not a gap in a list &mdash; echo is the main act of "
+        "differentiating shock, and whether a study was <i>done</i> is as "
+        "unavailable here as what it showed. So this section cannot see the "
+        "differentiation itself, only the drugs that follow it, and it cannot "
+        "distinguish a patient nobody managed to diagnose from one nobody "
+        "tried to. Counting crystalloid administration events as a fluid proxy "
+        "was considered and rejected: an event without a volume cannot separate "
+        "a 30 mL/kg resuscitation from a carrier line.", "warn"))
+
+    return True
+
+
 def section_methods(paths, cfg, out: list) -> None:
     out.append('<h2 id="methods">Methods &amp; caveats</h2>')
     out.append(
@@ -1777,6 +2127,7 @@ def main() -> None:
             "report.", "warn"))
     section_sites(paths, out)
     section_models(paths, out, logger)
+    undifferentiated = section_undifferentiated(paths, out)
     section_methods(paths, cfg, out)
 
     stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -1810,8 +2161,10 @@ def main() -> None:
     entries += [
         ("sites", "8 &middot; UCMC versus NU"),
         ("models", "9 &middot; Models"),
-        ("methods", "Methods &amp; caveats"),
     ]
+    if undifferentiated:
+        entries.append(("undifferentiated", "10 &middot; Undifferentiated shock"))
+    entries.append(("methods", "Methods &amp; caveats"))
     toc = "".join(
         f'<li><a href="#{anchor}">{label}</a></li>' for anchor, label in entries
     )

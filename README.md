@@ -31,6 +31,7 @@ The pipeline is in three tiers, by what has to cross a site boundary.
 | [code/04_site_effect.py](code/04_site_effect.py) | pooled | Why the sites separate, decomposed against token-family counts |
 | [code/05](code/05_site_correction.py)–[code/11](code/11_trial_alignment.py) | pooled | Site correction, downstream prediction, the report, token space, trajectories, trial alignment |
 | [code/12_trial_fit_outcomes.py](code/12_trial_fit_outcomes.py) | pooled | Mortality, ventilator-free and vasopressor-free days against how far each patient sits from the trial population, splined and severity-adjusted |
+| [code/13_undifferentiated.py](code/13_undifferentiated.py) | pooled | The 54.6% with no coded shock mechanism: what they resemble in the latent space, whether a linear probe assigns them one, and whether treatment matched it |
 
 Three output directories, named so that what may leave is obvious without
 reading any code:
@@ -257,6 +258,137 @@ code entered on day 20 is indistinguishable from one entered on admission; and
 `poa_present` would narrow that but is populated for every UCMC row and only 61%
 of NU's, so it is reported rather than required
 (`shock_type.require_present_on_arrival`).
+
+## Probing the undifferentiated group
+
+[code/13_undifferentiated.py](code/13_undifferentiated.py) takes the uncoded
+group above as its subject: what those 18,626 patients resemble in the frozen
+model's representation, whether a linear probe trained on the coded patients
+will assign them a mechanism, and whether the treatment they received matches
+the assignment. Settings and the ICD groups live in
+[code/config/undifferentiated.yaml](code/config/undifferentiated.yaml).
+
+**Everything is computed within site.** The two hospitals leave a similar share
+uncoded (NU 56.6%, UCMC 48.9%) but reach for different mechanisms when they do
+code one — the 2.5x cardiogenic and 1.7x septic gaps above. The coded patients
+define every centroid and train every probe here, so a mechanism mix differing
+that much means neither the centroids nor the class priors transport.
+
+### The centroids do not separate the mechanisms, but a linear probe does
+
+Coded patients sit a mean cosine distance of **0.456** from their own
+mechanism's centroid against **0.494** from the other two — a gap of 0.038,
+against a within-group spread an order of magnitude larger. By that measure the
+mechanisms are not distinct regions, which is the same answer the trial regions
+gave (centroid separation 0.03–0.32).
+
+A multinomial logistic regression on the same 50 components nonetheless reaches
+**AUROC 0.90 for cardiogenic, 0.87 for septic and 0.79 for hypovolemic**,
+cross-validated with patients as the grouping unit. Cross-site scoring —
+train on one hospital, test on the other — gives 0.89 / 0.85 / 0.75, so very
+little of the within-site number was documentation habit.
+
+The information is there and it is linearly decodable; it simply does not lie
+along the direction joining the class means. **Distance to a centroid is the
+wrong instrument for this space**, and the nearest-centroid columns are kept
+mainly to show why.
+
+### The separation is not the model reading the treatment back out
+
+This was the main thing that could have invalidated the probe. Medication
+administrations are part of the token vocabulary, so an embedding taken after
+the clinician starts treating has seen the antibiotics and the inotrope that
+the working diagnosis produced.
+
+Re-running the identical probe on 09's grid at 0 h, +6 h and +24 h from onset:
+
+| class | 0 h | +6 h | +24 h |
+|---|---:|---:|---:|
+| cardiogenic | 0.899 | 0.917 | 0.919 |
+| septic | 0.869 | 0.877 | 0.887 |
+| hypovolemic | 0.791 | 0.811 | 0.824 |
+
+A full day of post-onset record buys about **two AUROC points**. Essentially all
+of the separation is present before the shock is treated — and the rise is not
+attributable to treatment alone in any case, since the patient is also
+deteriorating over the same hours. No re-embedding was needed for this: 09
+already writes all three offsets for all 34,142 patients.
+
+### One assignment survives an external check; the other two do not
+
+The only evidence available against a probe assignment is non-shock coding and
+microbiology. It supports the septic class: among uncoded patients the probe
+confidently calls septic, **51.6% have a positive culture at NU and 73.4% at
+UCMC**, against 32.2% and 58.1% for the ones it is unsure about. Mortality
+agrees — confidently septic is the deadliest assigned group at both sites
+(15.2% and 24.5%).
+
+The cardiogenic class does not replicate it. Patients confidently called
+cardiogenic carry a cardiogenic diagnosis code 39.0% (NU) and 47.5% (UCMC) of
+the time against base rates of 29.1% and 26.1%, and they **die at 1.1% and
+3.4%** against 25.2% among patients the coders actually called cardiogenic.
+Whatever that class selects, it is not patients in cardiogenic shock.
+
+The likeliest reading of the section as a whole is that the probe sorts the
+uncoded by severity and by how septic they look, not by mechanism. A three-way
+probe forced to choose will put a mild patient somewhere, and the class it picks
+carries no claim that any mechanism was present.
+
+### D62 had to be withdrawn from the evidence flag
+
+Whether a diagnosis arrives *later* is not answerable here — the diagnosis table
+has no timestamp and an uncoded patient has no shock code at any point by
+definition. What is reported instead is whether a mechanism was recorded by some
+other means anywhere in the admission.
+
+The first version of that flag counted `D62`, acute posthaemorrhagic anaemia, as
+evidence of a haemorrhagic mechanism. It is coded on **7,916 of NU's 14,163
+uncoded patients (55.9%)** against 0.7–1.3% for each specific gastrointestinal
+haemorrhage code, so it made 57% of the undifferentiated look like evidence of
+bleeding and was carrying the whole flag by itself. It is a post-procedural
+anaemia code far more often than evidence of hypovolemic shock, and at that
+prevalence it could not have distinguished one patient from another whichever it
+meant. Removed; the flag now reads 21.1% in NU's coded hypovolemic patients
+against 2.7% in its uncoded.
+
+### What cannot be assessed
+
+Three of the treatment comparisons have no table behind them at either site:
+fluid volume (no intake/output), transfusion (no blood product table) and
+**echocardiography or POCUS (no echo table)**. The third is the serious one —
+echo is the main act of differentiating shock, and whether a study was *done* is
+as unavailable as what it showed, so this analysis cannot distinguish a patient
+nobody managed to diagnose from one nobody tried to. Counting crystalloid
+administration events as a fluid proxy was considered and rejected: an event
+without a volume cannot separate a 30 mL/kg resuscitation from a carrier line.
+
+Treatment concordance is therefore scoreable for two of the probe's three
+classes. Among uncoded patients called cardiogenic, those who received an
+inotrope or mechanical support have a mortality log-odds 0.71 lower unadjusted
+and 0.48 lower adjusted for non-cardiovascular SOFA, age and site (p = 0.016);
+for the septic class, antibiotics within six hours give −0.26 and −0.16
+(p = 0.069). **Confounding by indication is the whole of this** — the clinician
+read the same record the probe reads, so concordance measures agreement between
+two readings of one patient, and adjusting for severity leaves the judgement
+itself unmeasured.
+
+### Outputs
+
+`undiff_groups_*.csv`, `undiff_evidence_*.csv`, `undiff_reference_*.csv`,
+`undiff_neighbours_*.csv`, `undiff_probe_metrics_*.csv`,
+`undiff_probe_calibration_*.csv`, `undiff_probe_vs_evidence_*.csv`,
+`undiff_snapshots_*.csv`, `undiff_treatments_*.csv`,
+`undiff_first_agents_*.csv`, `undiff_concordance_*.csv`,
+`undiff_concordance_adjusted_*.csv` and `undiff_not_assessable.csv`; the
+per-patient `undiff_proximity_*`, `undiff_probe_predictions_*` and
+`undiff_snapshot_assignments_*` parquets alongside the other patient-level
+files; five figures under `figures/<model>/anchor-<anchor>/`; and a written
+summary at `output/undifferentiated_summary_<anchor>.md`.
+
+All of it renders into the report as **10 · Undifferentiated shock**, which is
+omitted along with its contents entry when 13 has not run. The snapshot stage
+needs 09's grid and degrades to the offsets that exist; `--skip-snapshots`
+turns it off.
 
 ## Guideline fit
 
