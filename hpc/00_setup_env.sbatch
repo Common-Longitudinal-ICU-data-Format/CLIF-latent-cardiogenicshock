@@ -1,7 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=clifcs-setup
-#SBATCH --partition=gpuq
-#SBATCH --gres=gpu:1
+#SBATCH --partition=tier1q
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16000M
 #SBATCH --time=01:00:00
@@ -12,11 +11,26 @@
 #
 # WHY THIS IS A BATCH JOB AND NOT SOMETHING YOU TYPE
 #
-# The venv has to be built somewhere that looks like where the work will run:
-# the login node usually has no GPU and often a different CPU generation, and
-# the last line of this script verifies CUDA, which can only pass on a node
-# that has a card. Requesting --gres=gpu:1 for a pip install feels wasteful
-# and is the point -- it is the only way the check means anything.
+# The venv has to be built somewhere that looks like where the work will run --
+# the login node is often a different CPU generation, and some clusters do not
+# let you spend twenty minutes of pip on it at all.
+#
+# NO GPU. An earlier version asked for a GPU so the verification below could
+# call torch.cuda.is_available(), and argued that spending one on a pip install
+# was the only way to make the check mean anything. That was wrong twice over:
+#
+#   * the check that actually matters is the `+cu121` string on the installed
+#     wheel, which catches cotorra pulling CPU torch over the CUDA build. That
+#     is a property of what pip resolved, not of the node, and it passes or
+#     fails identically on a CPU node.
+#   * torch.cuda.is_available() is already asserted at the top of
+#     04_embed.sbatch, the only job that needs a card. Checking it here too
+#     gated the whole venv on a scarce 6-node partition to learn something the
+#     job that needs it re-learns anyway.
+#
+# And tier 1 is now entirely CPU: 01-03 never load the GEM weights. A site with
+# no GPU can run the whole of its contribution, so it must be able to build the
+# venv too.
 #
 # This script deliberately does NOT source _common.sh. That activates the
 # venv, which does not exist yet.
@@ -27,7 +41,7 @@
 # you want to see pip fail in real time -- request a shell and run the body
 # by hand:
 #
-#     srun --partition=gpuq --gres=gpu:1 --cpus-per-task=4 \
+#     srun --partition=tier1q --cpus-per-task=4 \
 #          --mem=16000M --time=01:00:00 --pty bash
 #
 # Those are alternatives. `srun --pty bash` asks for an interactive terminal
@@ -134,10 +148,11 @@ if "+cu" not in torch.__version__:
         "over the cu121 wheels -- rerun the two pip install lines in order."
     )
 if not torch.cuda.is_available():
-    problems.append(
-        "no CUDA device visible. If this job did get a GPU, the CUDA module "
-        "is wrong or does not match the cu121 wheels."
-    )
+    # NOT a failure here. This job runs on a CPU partition by design, so no
+    # device is the expected answer and says nothing about the install. The
+    # assertion lives at the top of 04_embed.sbatch, which is the only job
+    # that needs a card -- and a site running tier 1 only never needs one.
+    print("  (no CUDA device -- expected on a CPU node; 04_embed asserts it)")
 else:
     print(f"  gpu                {torch.cuda.get_device_name(0)}")
     print(f"  vram               "
@@ -163,3 +178,7 @@ PY
 echo
 echo "Next:  bash hpc/00_preflight.sh      (login node, checks paths.yaml)"
 echo "Then:  sbatch hpc/01_cohort.sbatch"
+echo
+echo "CUDA was NOT verified here -- this job runs on a CPU partition, and"
+echo "tier 1 (jobs 01-03) never loads the GEM weights. The card is checked at"
+echo "the top of hpc/04_embed.sbatch, which is where one is first needed."

@@ -168,22 +168,37 @@ than to request one very long allocation.
 sbatch hpc/00_setup_env.sbatch
 ```
 
-Run once. It builds the venv, installs the pinned stack in the order that
-matters, and verifies CUDA from inside the allocation.
+Run once. It builds the venv and installs the pinned stack in the order that
+matters. **CPU partition, no GPU.**
 
-**It requests a GPU to run a pip install, and that is the point.** The last
-thing it does is check `torch.cuda.is_available()`, and that check can only
-mean anything on a node with a card. On a login node it returns False even
-when everything is correct, so a setup verified there tells you nothing.
+An earlier version asked for `--gres=gpu:1` so it could finish with
+`torch.cuda.is_available()`, on the argument that spending a GPU on a pip
+install was the only way to make that check mean anything. Both halves of that
+were wrong. The check that catches the real failure -- cotorra pulling CPU
+torch over the cu121 wheels -- is the `+cu121` string on the installed wheel,
+which is a property of what pip resolved and reads the same on any node. And
+`torch.cuda.is_available()` is already asserted at the top of
+[`hpc/04_embed.sbatch`](../hpc/04_embed.sbatch), the only job that needs a
+card, so checking it here gated the whole venv on a six-node partition to
+learn something the job that needs it re-learns anyway.
+
+Tier 1 is CPU throughout -- jobs 01-03 never load the GEM weights -- so a site
+with no GPU runs its entire contribution, and has to be able to build the venv
+to do it.
 
 ### Interactive instead, the first time
 
 Watching pip fail in real time is often worth an allocation:
 
 ```bash
-srun --partition=gpuq --gres=gpu:1 --cpus-per-task=4 \
-     --mem=32G --time=01:00:00 --pty bash
+srun --partition=tier1q --cpus-per-task=4 \
+     --mem=16000M --time=01:00:00 --pty bash
 ```
+
+Note `--mem=16000M`, not `16G`. Memory is capped per CPU here and Slurm's
+`G` is 1024 MB, so `--mem=16G` on 4 CPUs asks 4096 MB/CPU and is refused by
+96 MB against a 4000 MB cap. That reads as *"Requested node configuration is
+not available"*, which sounds like a shortage and is not.
 
 `srun --pty bash` asks for an interactive terminal. It is an **alternative**
 to `sbatch`, never a line inside a batch script -- a batch job has no
