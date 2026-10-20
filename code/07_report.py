@@ -653,13 +653,30 @@ def section_tokens(paths, out: list) -> None:
 
 
 #: the per-anchor colourings 03 writes, in reading order
+#:
+#: Every entry is rendered for the raw space AND for each of 05's corrected
+#: spaces, so adding one here adds it to both. Panels 03 did not produce are
+#: dropped by the `if body` filter rather than leaving a hole, which is how a
+#: label a site could not supply degrades.
 PROJECTION_PANELS = [
     ("site", "site"),
     ("shock_type", "shock type (one panel each)"),
     ("shock_type_pooled", "shock type (together)"),
-    ("phenotype", "phenotype"),
+    ("phenotype", "Zweck phenotype"),
+    ("seymour_phenotype", "Seymour phenotype"),
+    ("bhavani_phenotype", "Bhavani phenotype"),
     ("mortality", "mortality"),
     ("icu_los", "ICU LOS"),
+    # the physiology and severity the embedding was taken at
+    ("tok_map", "MAP (decile bin the model read)"),
+    ("sofa_non_cv", "non-cardiovascular SOFA"),
+    # what happened in the 24 hours after the anchor
+    ("new_imv_24h", "new invasive ventilation"),
+    ("pressor_escalation_24h", "vasopressor escalation"),
+    # the three trial questions, one panel per trial inside each
+    ("elig", "trial eligibility"),
+    ("trial_fit", "inside every published IQR"),
+    ("concordance", "treated per the recommendation"),
 ]
 
 #: 05's affine corrections, in the order 05 reports them
@@ -700,11 +717,24 @@ def trajectory_coverage(paths, logger=None) -> tuple[str, str]:
     figure is about these patients.
     """
     cohort_file = paths.cohort_home / "cohort.parquet"
-    trajectory_file = (
-        paths.output_home / "patient_level_data" / "GEM-all"
-        / "trajectory_projections.parquet"
+    # 09 suffixes its output when it applies a site correction, and correcting
+    # is its default -- site dominates that geometry at ~1.9x neighbour purity,
+    # so an uncorrected flow field is largely a picture of three hospitals.
+    # Looking only for the unsuffixed name reported "09 has not been run" for
+    # every corrected run and omitted sections 4-6 on a complete analysis.
+    home = paths.output_home / "patient_level_data" / "GEM-all"
+    trajectory_file = next(
+        (
+            candidate
+            for candidate in (
+                home / "trajectory_projections.parquet",
+                *sorted(home.glob("trajectory_projections_corrected-*.parquet")),
+            )
+            if candidate.is_file()
+        ),
+        None,
     )
-    if not trajectory_file.is_file():
+    if trajectory_file is None:
         return "stale", "09 has not been run"
     if not cohort_file.is_file():
         return "current", ""
@@ -817,14 +847,14 @@ def section_projections(paths, out: list) -> None:
     out.append(callout(
         "<b>The corrected tabs are the same patients after 05's affine map has "
         "removed the linearly-decodable site information.</b> The correction "
-        "table in section 7 says the linear site probe falls from AUC 1.000 to "
-        "0.519 under LEACE, which is what the map is for; it says nothing about "
-        "what the space looks like afterwards. These panels do. <b>Read them "
-        "for whether anything clinical survived</b> &mdash; if the phenotype "
-        "and mortality structure disappears along with the site structure, the "
-        "correction removed the representation rather than the confound. Note "
-        "that neighbour purity on site only falls from 1.59x to 1.51x even "
-        "after LEACE drives the linear probe to chance, which is 04's finding "
+        "table in section 7 reports how far the linear site probe falls under "
+        "each map, which is what the map is for; it says nothing about what the "
+        "space looks like afterwards. These panels do. <b>Read them for whether "
+        "anything clinical survived</b> &mdash; if the phenotype and mortality "
+        "structure disappears along with the site structure, the correction "
+        "removed the representation rather than the confound. Note that "
+        "neighbour purity on site falls far less than the linear probe does "
+        "even after LEACE drives that probe to chance, which is 04's finding "
         "restated: the sites differ in which token types they emit at all, and "
         "an affine map on the embedding closes the linear channel without "
         "making the two representations exchangeable."))

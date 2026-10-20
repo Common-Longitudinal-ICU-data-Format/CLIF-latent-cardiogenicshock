@@ -103,9 +103,38 @@ def offsets(args) -> list[float]:
     return list(np.arange(args.start_hours, args.end_hours + 1e-9, args.step_hours))
 
 
-def grid_home(paths, site: str, offset: float) -> pathlib.Path:
+#: which patients the grid is extracted for. The full cohort at 26 grid points
+#: is 13x the work of one anchor -- about 12-20 hours for 40,000 patients on a
+#: single consumer GPU -- and the figure this analysis exists for is the flow
+#: among cardiogenic shock patients, who are a quarter of that.
+SUBSETS = ("all", "cardiogenic")
+
+
+def subset_filter(name: str) -> "pl.Expr | None":
+    """the cohort predicate for a --subset value"""
+    if name == "all":
+        return None
+    # the union of the two readings of cardiogenic shock, which is what the
+    # side-by-side comparison needs: CS_DEFINITIONS splits them again for the
+    # figures, so extracting the union covers both panels from one pass
+    return (pl.col("shock_type") == "cardiogenic") | pl.col(
+        "cardiac_origin"
+    ).fill_null(False)
+
+
+def grid_home(paths, site: str, offset: float, subset: str = "all") -> pathlib.Path:
+    # The subset is part of the path. Without it a later --subset all run would
+    # find the cardiogenic shards already present, skip them, and silently
+    # build a whole-cohort figure out of a quarter of the cohort.
     tag = f"{'m' if offset < 0 else 'p'}{abs(int(round(offset))):03d}"
-    return paths.scratch_home / "trajectory" / paths.model_key / site / tag
+    return (
+        paths.scratch_home
+        / "trajectory"
+        / paths.model_key
+        / subset
+        / site
+        / tag
+    )
 
 
 # =============================================================== extraction
@@ -127,11 +156,20 @@ def extract_grid(paths, args, logger) -> None:
     extraction_cfg = OmegaConf.load(CONFIG_HOME / "extraction.yaml")
     extraction_cfg.extract.batch_size = int(args.batch_size)
 
+    predicate = subset_filter(args.subset)
+    if predicate is not None:
+        before = cohort.height
+        cohort = cohort.filter(predicate)
+        logger.info(
+            f"subset {args.subset!r}: {cohort.height:,} of {before:,} patients "
+            f"({cohort.height / max(before, 1):.1%})"
+        )
+
     for site in paths.sites:
         keep = set(cohort.filter(pl.col("site") == site)["hospitalization_id"].to_list())
         source = paths.processed(site)
         for offset in offsets(args):
-            destination = grid_home(paths, site, offset)
+            destination = grid_home(paths, site, offset, args.subset)
             out_file = destination / "embeddings.parquet"
             if out_file.is_file() and not args.force:
                 logger.info(f"[{site} t={offset:+.0f}h] exists, skipping")
@@ -208,10 +246,10 @@ def extract_grid(paths, args, logger) -> None:
 
 def load_grid(paths, args, logger) -> pl.DataFrame:
     parts = [
-        pl.read_parquet(grid_home(paths, site, offset) / "embeddings.parquet")
+        pl.read_parquet(grid_home(paths, site, offset, args.subset) / "embeddings.parquet")
         for site in paths.sites
         for offset in offsets(args)
-        if (grid_home(paths, site, offset) / "embeddings.parquet").is_file()
+        if (grid_home(paths, site, offset, args.subset) / "embeddings.parquet").is_file()
     ]
     if not parts:
         raise FileNotFoundError("no trajectory embeddings; run --stage extract first")
@@ -1062,6 +1100,16 @@ def main() -> None:
     parser.add_argument("--start-hours", type=float, default=-24.0)
     parser.add_argument("--end-hours", type=float, default=48.0)
     parser.add_argument("--step-hours", type=float, default=6.0)
+    parser.add_argument(
+        "--subset",
+        choices=SUBSETS,
+        default="cardiogenic",
+        help="which patients to extract the grid for. Defaults to cardiogenic "
+        "-- the union of the ICD code and the cardiac_origin flag, about a "
+        "quarter of the cohort -- because that is what the flow figures are "
+        "for and the full cohort is 4x the GPU time. Shards are kept in "
+        "separate directories per subset, so switching does not reuse them.",
+    )
     parser.add_argument("--min-tokens", type=int, default=8)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument(

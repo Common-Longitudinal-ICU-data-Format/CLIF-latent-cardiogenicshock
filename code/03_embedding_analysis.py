@@ -616,6 +616,75 @@ def _load_anchor_from_bundles(
     return frame
 
 
+def _attach_export_labels(
+    paths, frame: pl.DataFrame, anchor: str, logger, embeddings: bool = True
+) -> pl.DataFrame:
+    """
+    join the labels the export assembles but the embedding files do not carry
+
+    `tok_*`, `fam_n_*`, the per-trial columns, the downstream labels and
+    `sofa_non_cv` are all put together in `writer.attach_labels` at export
+    time. A local `patient_level_data_<SITE>/embeddings_anchor-*.parquet`
+    carries none of them, and neither does 05's corrected copy -- so every
+    panel coloured by one was silently skipped, because the guards test for
+    column presence.
+
+    `embeddings=False` keeps the caller's own `emb_*` columns, which is what
+    the corrected path needs: the labels describe the patient and transfer
+    across the affine map untouched, but the vectors must not be replaced by
+    the raw ones they were derived from.
+    """
+    cohort_file = paths.cohort_home / "cohort.parquet"
+    if not cohort_file.is_file() or "site" not in frame.columns:
+        return frame
+    cohort = pl.read_parquet(cohort_file)
+
+    from clifcs.export import writer
+
+    out = []
+    for site in frame["site"].unique().to_list():
+        part = frame.filter(pl.col("site") == site)
+        if str(site) not in paths.sites:
+            out.append(part)
+            continue
+        try:
+            enriched, _ = writer.attach_labels(
+                paths,
+                cohort,
+                str(site),
+                anchor,
+                logger,
+                eligibility=writer.trial_columns(paths, anchor, str(site), logger),
+            )
+        except (FileNotFoundError, KeyError) as exc:
+            logger.warning(
+                f"[{anchor}/{site}] could not attach the export labels "
+                f"({exc}); panels coloured by them will be skipped"
+            )
+            out.append(part)
+            continue
+
+        if embeddings:
+            part = enriched
+        else:
+            added = [
+                c
+                for c in enriched.columns
+                if not c.startswith("emb_") and c not in part.columns
+            ]
+            part = part.join(
+                enriched.select("hospitalization_id", "site", *added),
+                on=["hospitalization_id", "site"],
+                how="left",
+            )
+        logger.info(
+            f"[{anchor}/{site}] attached "
+            f"{len(set(part.columns) - set(frame.columns))} label column(s)"
+        )
+        out.append(part)
+    return pl.concat(out, how="diagonal_relaxed")
+
+
 def _load_anchor_local(paths, anchor: str, logger) -> pl.DataFrame:
     """
     pool every site's embedding file for one anchor, on a machine that holds them
@@ -642,40 +711,13 @@ def _load_anchor_local(paths, anchor: str, logger) -> pl.DataFrame:
     # assembly half of the export, reused here so a local run colours by the
     # same things a pooled one does. Redaction is NOT reused: this machine's
     # own analysis wants the real age and the real record number.
-    cohort_for_labels = None
-    cohort_file = paths.cohort_home / "cohort.parquet"
-    if cohort_file.is_file():
-        cohort_for_labels = pl.read_parquet(cohort_file)
-
     frames = []
     for source in sources:
         part = pl.read_parquet(source)
         missing = [c for c in REQUIRED_COVARIATES if c not in part.columns]
         if missing:
             raise KeyError(f"{source.name} is missing required columns {missing}")
-
-        site = str(part["site"].unique().to_list()[0])
-        if cohort_for_labels is not None and site in paths.sites:
-            try:
-                from clifcs.export import writer
-
-                enriched, _ = writer.attach_labels(
-                    paths,
-                    cohort_for_labels,
-                    site,
-                    anchor,
-                    logger,
-                    eligibility=writer.trial_columns(paths, anchor, site, logger),
-                )
-                gained = len(set(enriched.columns) - set(part.columns))
-                part = enriched
-                logger.info(f"[{anchor}/{site}] attached {gained} label column(s)")
-            except (FileNotFoundError, KeyError) as exc:
-                logger.warning(
-                    f"[{anchor}/{site}] could not attach the export labels "
-                    f"({exc}); panels coloured by them will be skipped"
-                )
-
+        part = _attach_export_labels(paths, part, anchor, logger)
         logger.info(
             f"[{anchor}] {part.height:>6} patients from {source.name} "
             f"({part['site'].unique().to_list()})"
@@ -780,6 +822,21 @@ def load_corrected(paths, anchor: str, method: str, logger) -> pl.DataFrame:
         return pl.DataFrame()
     frame = pl.read_parquet(source)
     logger.info(f"[{anchor}] {frame.height:,} patients from {source.name}")
+
+    # 05 writes whatever columns IT saw, and 05 loads the raw per-site files
+    # without attaching the export labels -- so the corrected frame arrives
+    # with the original covariates and none of tok_*, elig_*, t1_*,
+    # concordant_* or sofa_non_cv. The corrected panels then covered 8
+    # colourings against the raw set's 14, which is the wrong way round: the
+    # whole point of drawing them is comparing the same panel either side of
+    # the correction.
+    #
+    # The labels are joined on here rather than in 05 because they describe the
+    # patient, not the representation: an affine map on the embedding cannot
+    # change anyone's trial eligibility or SOFA score. Only emb_* differs
+    # between the two frames, so the raw embeddings are dropped before joining
+    # or they would overwrite the corrected ones.
+    frame = _attach_export_labels(paths, frame, anchor, logger, embeddings=False)
     return frame
 
 

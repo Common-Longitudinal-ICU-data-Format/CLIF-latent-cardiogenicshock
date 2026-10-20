@@ -315,6 +315,12 @@ def trial_columns(paths, anchor: str, site: str, logger) -> pl.DataFrame:
         if c.startswith(contract.TRIAL_PREFIX)
         or c.startswith(contract.TRIAL_FIT_PREFIXES)
         or c.startswith(contract.CONCORDANCE_PREFIX)
+        # `sofa_non_cv` rides in this parquet because the trials stage is the
+        # only place that computes it. Filtering on the three trial prefixes
+        # alone dropped it on the way back out -- the same loss as writing it
+        # without reading it, one layer down. The contract names it, and 12
+        # adjusts on it.
+        or c == "sofa_non_cv"
     ]
     eligible = [c for c in wanted if c.startswith(contract.TRIAL_PREFIX)]
     logger.info(
