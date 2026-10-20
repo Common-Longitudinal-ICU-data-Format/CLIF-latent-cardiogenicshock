@@ -202,10 +202,19 @@ import os
 import sys
 
 tier = os.environ.get("TIER", "site")
+
+#: import name -> distribution name, where they differ
+DISTRIBUTION = {"cocoa": "cocoa-tokenizer", "sklearn": "scikit-learn",
+                "umap": "umap-learn"}
 problems = []
 
 # --- always: what tier 1 cannot run without
-BASE = ("cocoa_tokenizer", "clifpy", "polars", "duckdb", "omegaconf", "sklearn")
+# IMPORT names, not distribution names. `cocoa-tokenizer` imports as `cocoa`,
+# `scikit-learn` as `sklearn`, `umap-learn` as `umap`. An earlier version
+# checked for "cocoa_tokenizer", which never imports -- so this block would
+# have reported FAIL on a perfectly good environment, and nobody found out
+# because the install itself kept failing first.
+BASE = ("cocoa", "clifpy", "polars", "duckdb", "omegaconf", "sklearn")
 EXTRA = {
     "site":   (),
     "embed":  ("cotorra", "transformers", "accelerate"),
@@ -217,9 +226,19 @@ EXTRA = {
 for name in BASE + EXTRA:
     try:
         module = importlib.import_module(name)
-        print(f"  {name:<18} {getattr(module, '__version__', 'ok')}")
     except ImportError as exc:
         problems.append(f"{name} did not import: {exc}")
+    else:
+        version = getattr(module, "__version__", None)
+        if version is None:
+            # cocoa carries no __version__; ask the installed distribution,
+            # which is what the pin in requirements-site.txt actually names
+            try:
+                import importlib.metadata as md
+                version = md.version(DISTRIBUTION.get(name, name))
+            except Exception:
+                version = "ok"
+        print(f"  {name:<18} {version}")
 
 # --- torch, only for the tiers that installed it
 if tier in ("embed", "all"):
