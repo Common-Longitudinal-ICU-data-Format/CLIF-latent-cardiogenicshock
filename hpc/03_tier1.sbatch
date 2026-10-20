@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=clifcs-export
+#SBATCH --job-name=clifcs-tier1
 #SBATCH --partition=tier1q
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64000M
@@ -7,13 +7,25 @@
 #SBATCH --output=logs/slurm-%x-%j.out
 #SBATCH --error=logs/slurm-%x-%j.out
 #
-# Stage 4 of 4: purity -> trials -> export. CPU.
+# Stage 3 of 3 for TIER 1: tokencounts -> trials -> export. CPU, no GPU.
+#
+# This is the last job a site has to run. After it, output/upload_to_box_<SITE>/
+# is a complete contribution: patient flow, the phenotype breakdowns, the trial
+# comparison and the token-prevalence tables. Nothing in it is patient-level and
+# the GEM weights were never loaded, so a site with no GPU and no patient-level
+# agreement stops here.
+#
+# The `tokencounts` stage counts how often each token appears at this site. It
+# is what 04_site_effect.py draws its tornado from, and it is tokenizer-only --
+# which is why it sits in tier 1, and why the comparison now exists for a site
+# that shares nothing patient-level.
 #
 # The `trials` stage reads raw CLIF again -- diagnoses, vitals, medications --
-# to compute trial eligibility here, because the coordinating site cannot:
-# under role=pooled it has no raw data and paths.site_data raises. The elig_*
-# columns in the bundle are what pooled 11 reads, so a bundle built from a
-# stale commit silently carries fewer trials than the pooled run expects.
+# to compute eligibility, IQR fit and treatment concordance here, because the
+# coordinating site cannot: under role=pooled it has no raw data and
+# paths.site_data raises. It also writes trial_patient_anchor-*.parquet, which
+# is what 02 exports those columns from, so a stale commit here silently
+# carries fewer trials than the pooled run expects.
 
 # `$(dirname "$0")` DOES NOT WORK IN A BATCH JOB. Slurm copies the script
 # into a per-job spool directory and runs it from there, so $0 is
@@ -37,7 +49,7 @@ if [ ! -f "$REPO_HOME/hpc/_common.sh" ]; then
 fi
 source "$REPO_HOME/hpc/_common.sh"
 
-python code/01_site_aggregate.py --from-stage purity --min-cell "${MIN_CELL:-11}"
+python code/01_site_tables.py --from-stage tokencounts --min-cell "${MIN_CELL:-11}"
 
 echo ""
 echo "===================================================================="
@@ -51,4 +63,9 @@ echo ""
 echo "  Never send it. If it is lost, every future export carries pseudonyms"
 echo "  that cannot be matched to the ones already sent, and this site's"
 echo "  contribution can be replaced but not updated."
+echo ""
+echo "TIER 1 IS COMPLETE AND IS A FULL CONTRIBUTION. Stop here unless your"
+echo "IRB approval and DUA cover patient-level transfer. If they do:"
+echo "    sbatch hpc/04_embed.sbatch     (GPU -- loads the GEM weights)"
+echo "    sbatch hpc/05_tier2.sbatch     (CPU -- purity, then export)"
 echo "===================================================================="

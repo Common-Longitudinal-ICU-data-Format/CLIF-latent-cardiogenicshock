@@ -147,6 +147,14 @@ def main() -> None:
     parser.add_argument("--model", default=None)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
+        "--save-map",
+        action="store_true",
+        help="save each fitted affine map to output/patient_level_data/"
+        "corrections/anchor-<anchor>_<method>.npz. 09 needs this: it applies "
+        "the same map to all 26 grid points, and refitting on the grid would "
+        "weight the fit by whose grid is complete",
+    )
+    parser.add_argument(
         "--write-corrected",
         action="store_true",
         help="also save the corrected embeddings; 06 refits corrections itself, "
@@ -202,6 +210,18 @@ def main() -> None:
                     logger,
                 )
             )
+            if args.save_map:
+                # The map fitted on the TRAINING split, which is the one the
+                # AUCs above describe. Refitting on all rows would use more
+                # data but would mean the saved map is not the measured one.
+                out = (
+                    paths.patient_level_home
+                    / "corrections"
+                    / f"anchor-{anchor}_{method}.npz"
+                )
+                correction.save(out)
+                logger.info(f"[{anchor}] saved map -> corrections/{out.name}")
+
             if args.write_corrected and method != "raw":
                 corrected = correction.apply(x, sites)
                 # A subdirectory, not a sibling. These were first written as

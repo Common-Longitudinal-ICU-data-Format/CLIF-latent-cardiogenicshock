@@ -4,7 +4,7 @@
 reading what the sites sent
 
 The coordinating site's view of the world is a directory of bundles, one per
-contributing site, written by `01_site_aggregate.py` and, where an agreement
+contributing site, written by `01_site_tables.py` and, where an agreement
 permits it, extended by `02_site_embeddings.py`. This module discovers them,
 checks them against the contract and against each other, and assembles the
 pooled frame the numbered analyses read.
@@ -48,11 +48,12 @@ from clifcs.export import contract, manifest
 #: purity/ and trials/ in it; tier 2 adds patient/ to the SAME directory, so
 #: a site never has two things to upload.
 #:
-#: `token_level_data_<SITE>` is the older tier-2 form, which shipped token
-#: sequences in a directory of their own for the coordinating site to
-#: re-embed. Still read, because bundles in that shape exist, but nothing
-#: produces one now -- see 02_site_embeddings.py.
-TIER_PREFIXES = {"upload_to_box_": "aggregate", "token_level_data_": "token"}
+#: Schema 2.0's `token_level_data_<SITE>` is no longer read. It shipped token
+#: sequences for the coordinating site to re-embed; the sequences were
+#: withdrawn from the contract in 3.0 because they are more disclosive than the
+#: embedding derived from them, so a bundle in that shape has to be re-exported
+#: rather than ingested. `check` refuses it on the schema version first.
+TIER_PREFIXES = {"upload_to_box_": "aggregate"}
 
 
 def discover(received_home: pathlib.Path, logger) -> dict[str, dict[str, pathlib.Path]]:
@@ -65,13 +66,12 @@ def discover(received_home: pathlib.Path, logger) -> dict[str, dict[str, pathlib
         received/
           upload_to_box_UCMC/        tier 1 + tier 2 (has patient/)
           upload_to_box_RUSH/        tier 1 only -- RUSH sent no embeddings
-          token_level_data_NU/       the older tier-2 form, token sequences
 
-    Returns `{site: {"aggregate": path, "patient": path, "token": path}}`,
-    with any of them possibly absent. `patient` points at the same directory
-    as `aggregate` when that bundle carries a patient/ subdirectory; it is a
-    separate key rather than a flag so that the three ways a site can
-    contribute stay visible at every call site.
+    Returns `{site: {"aggregate": path, "patient": path}}`, with `patient`
+    possibly absent. It points at the same directory as `aggregate` when that
+    bundle carries a patient/ subdirectory; it is a separate key rather than a
+    flag so that the two ways a site can contribute stay visible at every call
+    site.
 
     A site that sent only tier 1 is a first-class contributor here, not a
     degraded one: it appears in every count table and in the
@@ -147,17 +147,12 @@ def discover(received_home: pathlib.Path, logger) -> dict[str, dict[str, pathlib
 
 def manifests_of(bundles: dict[str, dict[str, pathlib.Path]]) -> dict[str, dict]:
     """
-    one manifest per site, preferring the token bundle's where both exist
+    one manifest per site
 
-    They agree on model, tokenizer and salt by construction -- `check` asserts
-    it -- so either will do; the token one is preferred because it carries the
-    row counts that the patient-level read-back is validated against.
+    A site uploads exactly one directory, so there is exactly one manifest and
+    it carries the row counts the patient-level read-back is validated against.
     """
-    out = {}
-    for site, tiers in bundles.items():
-        home = tiers.get("token") or tiers.get("aggregate")
-        out[site] = manifest.read(home)
-    return out
+    return {site: manifest.read(tiers["aggregate"]) for site, tiers in bundles.items()}
 
 
 def check(
@@ -190,12 +185,12 @@ def check(
             "point."
         )
 
-    aggregate_only = sorted(s for s, tiers in bundles.items() if "token" not in tiers)
+    aggregate_only = sorted(s for s, tiers in bundles.items() if "patient" not in tiers)
     if aggregate_only:
         logger.info(
-            f"{', '.join(aggregate_only)} sent tier 1 only (no token transfer "
-            "permitted), so they contribute to every count table and to the "
-            "phenotype-coherence comparison, and to no projection"
+            f"{', '.join(aggregate_only)} sent tier 1 only (no patient-level "
+            "transfer permitted), so they contribute to every count table and "
+            "to the token-prevalence comparison 04 reads, and to no projection"
         )
     return manifests
 
@@ -211,25 +206,18 @@ def load_patient_level(
     """
     the pooled patient-level frame for one anchor
 
-    Two shapes of tier-2 bundle are read, and the first is what sites produce
-    now:
+There is one shape of tier-2 bundle under schema 3.0:
 
       patient/embeddings_anchor-<a>.parquet   inside upload_to_box_<SITE>.
           The embeddings as the sending site computed them, already redacted
           to the export contract. Read straight through.
 
-      tokens_anchor-<a>.parquet               inside token_level_data_<SITE>.
-          The older form, shipping the model's input instead of its output.
-          Re-embedded here with the frozen model, which is exact rather than
-          approximate -- eval mode under inference_mode is deterministic --
-          and cached under the coordinating site's own patient_level_data/,
-          because re-embedding 34,000 sequences is a GPU job and every pooled
-          script would otherwise redo it.
-
-    A site appears once regardless of which it sent. Where a site somehow sent
-    both, the shipped embeddings win and the tokens are ignored, because the
-    embeddings are what that site actually computed and the re-embedding is a
-    reproduction of them.
+    Schema 2.0's token bundles (`tokens_anchor-<a>.parquet` in
+    `token_level_data_<SITE>`, re-embedded here with the frozen model) are no
+    longer read. The sequences were withdrawn from the contract because they
+    are more disclosive than the embedding derived from them, so a site that
+    still holds a 2.0 bundle has to re-export under 3.0 rather than have this
+    read it -- which the schema check below enforces before it ever gets here.
 
     Concatenated `how="diagonal_relaxed"` so a site that sent a label another
     did not sits alongside it as null rather than failing the concatenation --
@@ -259,16 +247,6 @@ def load_patient_level(
                 f"  {site}: {frame.height} patients at anchor {anchor} "
                 "(embeddings as sent)"
             )
-            continue
-
-        home = tiers.get("token")
-        if home is None:
-            continue
-        frame = _reembed_token_bundle(
-            tiers, manifests, site, anchor, logger, paths, batch_size
-        )
-        if frame is not None:
-            frames.append(frame)
     if not frames:
         raise FileNotFoundError(
             f"no bundle carries patient-level data for anchor {anchor}. Every "
@@ -308,60 +286,6 @@ def _check_rows(frame: pl.DataFrame, manifests, site: str, anchor: str) -> None:
             f"{site} bundle carries site column value(s) "
             f"{frame['site'].unique().to_list()}"
         )
-
-
-def _reembed_token_bundle(
-    tiers, manifests, site: str, anchor: str, logger, paths, batch_size
-) -> pl.DataFrame | None:
-    """
-    the older tier-2 path: turn a received token sequence back into embeddings
-
-    Kept because bundles in that shape exist. Nothing produces one now --
-    02_site_embeddings.py ships the embeddings themselves.
-    """
-    from clifcs import reembed as reembed_module
-
-    if paths is None:
-        raise ValueError(
-            "load_patient_level needs `paths` to re-embed received token "
-            "bundles; pass the Paths object from the calling script"
-        )
-
-    home = tiers["token"]
-    source = home / f"tokens_anchor-{anchor}.parquet"
-    if not source.is_file():
-        logger.warning(f"  {site}: no token file for anchor {anchor}, skipping")
-        return None
-
-    frame = pl.read_parquet(source)
-    contract.validate_token_frame(frame, f"{site} token bundle, anchor {anchor}")
-    _check_rows(frame, manifests, site, anchor)
-
-    cache = (
-            paths.patient_level_home
-            / f"reembedded_anchor-{anchor}_{site}.parquet"
-        )
-    if cache.is_file() and pl.read_parquet_schema(cache) and (
-        pl.scan_parquet(cache).select(pl.len()).collect().item() == frame.height
-    ):
-        logger.info(f"  {site}: reusing {cache.name} ({frame.height} patients)")
-        embeddings = pl.read_parquet(cache)
-    else:
-        embeddings = reembed_module.reembed(
-            paths, frame, site, anchor, logger, batch_size
-        )
-        cache.parent.mkdir(parents=True, exist_ok=True)
-        embeddings.write_parquet(cache)
-        logger.info(f"  {site}: re-embedded -> {cache.name}")
-
-    # the labels travelled beside the sequences; the embeddings are what
-    # was just derived from them
-    labels = frame.drop("tokens_past", "s_elapsed_past")
-    joined = labels.join(embeddings, on="row_key", how="inner")
-    logger.info(
-        f"  {site}: {joined.height} patients at anchor {anchor} (re-embedded)"
-    )
-    return joined
 
 
 def load_counts(
@@ -441,7 +365,7 @@ def token_legend(
     """
     legends = {}
     for site, tiers in sorted(bundles.items()):
-        for home in (tiers.get("aggregate"), tiers.get("token")):
+        for home in (tiers.get("aggregate"),):
             if home is not None and (home / "token_levels.csv").is_file():
                 legends[site] = pl.read_csv(home / "token_levels.csv")
                 break

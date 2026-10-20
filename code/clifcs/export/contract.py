@@ -4,9 +4,20 @@
 what a site is allowed to send, enforced in both directions
 
 The consortium policy is that raw records never move and derived patient-level
-data is limited to **latent embeddings plus a minimal set of ordered tokens** --
-enough to label a point in a projection, not enough to reconstruct a record.
-Aggregate count tables move freely subject to small-cell suppression.
+data is limited to **latent embeddings plus a minimal set of ordered token
+bins** -- enough to label a point in a projection, not enough to reconstruct a
+record. Aggregate count tables move freely subject to small-cell suppression.
+
+Schema 3.0 withdrew the token *sequences*. Earlier versions shipped
+`tokens_past` and `s_elapsed_past` so the coordinating site could re-embed, and
+the argument for it was real: a sequence lets you re-anchor, read another
+layer, or re-run after a model update without asking anyone to re-export. It
+was withdrawn because a sequence is a re-serialisation of the record and is
+strictly more disclosive than the embedding derived from it -- which is a
+lossy projection and cannot be inverted. Sites now compute the embedding
+themselves (`02_site_embeddings.py`) and ship only that. The two sequence
+columns are named in `FORBIDDEN_COLUMNS`, so the old path cannot be revived by
+accident.
 
 This module is the machine-readable form of that policy. Every column that may
 cross a site boundary is named here, with the reason it is permitted. Anything
@@ -38,7 +49,7 @@ import polars as pl
 #: bumped whenever the permitted column set changes in a way that makes an
 #: older bundle non-conformant. The coordinating site compares this against
 #: each bundle's manifest and refuses a mismatch rather than guessing.
-SCHEMA_VERSION = "2.0"
+SCHEMA_VERSION = "3.0"
 
 #: the embedding itself: `emb_0000 .. emb_{dim-1}`.
 #:
@@ -140,6 +151,54 @@ OUTCOMES: tuple[Permitted, ...] = (
 TRIAL_PREFIX = "elig_"
 
 # ---------------------------------------------------------------------------
+# How far outside the trial's published population a patient sits, and which
+# way. Computed site-side by `clifcs.trials.table1_position`, which needs the
+# measured values; these four are statistics *over* those values, not the
+# values themselves.
+#
+# Eligibility alone cannot answer the question the guideline-fit analysis is
+# about. A trial's criteria are thresholds and admit a far wider range than the
+# trial ended up containing, so "would it have enrolled them" and "do they
+# resemble who it enrolled" are different questions with different answers.
+#
+#   t1_absdist_<trial>        mean distance outside the published IQRs, in IQR
+#                             units, over the variables this patient has
+#   t1_severity_gap_<trial>   the same, SIGNED, so positive is sicker or older
+#                             than the trial's median. Direction is the finding:
+#                             among ECLS-SHOCK-eligible patients the ones
+#                             sicker than the trial run 46.6% mortality against
+#                             30.6% for the healthier, and an unsigned distance
+#                             calls both groups "outside"
+#   t1_outside_<trial>        how many variables sit outside their IQR, so
+#                             `== 0` is "inside every published IQR"
+#   t1_frac_compared_<trial>  the share of published variables this patient
+#                             actually has. Travels because without it the
+#                             other three are uninterpretable -- a distance
+#                             over one variable is not a distance over seven
+#
+# Deliberately NOT the whole `t1_` family. `t1_maxdist_` and `t1_n_compared_`
+# add nothing a panel is coloured by, and `t1_n_published_` is a property of
+# the paper rather than of the patient. Every continuous column widens the
+# quasi-identifier the whole row forms, so each one has to earn its place.
+TRIAL_FIT_PREFIXES: tuple[str, ...] = (
+    "t1_absdist_",
+    "t1_severity_gap_",
+    "t1_outside_",
+    "t1_frac_compared_",
+)
+
+# ---------------------------------------------------------------------------
+# Was the treatment the trial recommends actually delivered? One boolean per
+# trial from `clifcs.concordance`, on the same argument as `elig_`: it reads
+# medication and procedure tables the coordinating site does not have.
+#
+# Read it with the trial's own direction in mind. For the negative device
+# trials (IABP-SHOCK II, ECMO-CS, ECLS-SHOCK) "concordant" means the device was
+# WITHHELD, which happens most in patients too well or too sick to cannulate.
+# Confounding by indication is severe throughout and is not adjustable away.
+CONCORDANCE_PREFIX = "concordant_"
+
+# ---------------------------------------------------------------------------
 # Token family counts: ~23 integers per patient, the per-family totals of the
 # token stream the model read.
 #
@@ -172,38 +231,25 @@ LABEL_SUFFIXES = ("__label", "__eligible")
 
 
 # ---------------------------------------------------------------------------
-# TIER 2: the token sequences themselves.
+# WITHDRAWN in schema 3.0: the token sequences.
 #
-# `tokens_past` is the ordered list of token ids the model read before the
-# anchor, and `s_elapsed_past` the seconds elapsed at each one. Together they
-# are the model's entire input for that patient.
+# `tokens_past` (the ordered token ids the model read) and `s_elapsed_past`
+# (seconds elapsed at each one) were together the model's entire input for a
+# patient, and schema 2.0 shipped them so the coordinating site could re-embed.
 #
-# This is the most disclosive thing the pipeline produces -- more so than the
-# embedding derived from it, because the embedding is a lossy projection and
-# this is not. A token stream is a re-serialisation of the record: which labs
-# were drawn, in what order, how often, against what clock. It is not a
-# de-identified summary of a patient and must not be described as one.
+# They are now refused. A token stream is a re-serialisation of the record --
+# which labs were drawn, in what order, how often, against what clock -- and it
+# was the most disclosive artefact this pipeline produced, more so than the
+# embedding derived from it. An embedding is a lossy projection of the stream
+# and cannot be inverted back to it; the stream is not a lossy anything.
 #
-# It travels because the consortium decided it should, and the decision buys
-# something real: with the sequences and the frozen model, a coordinating site
-# can reproduce the embeddings exactly, re-anchor at a different cut point, or
-# probe a different layer, none of which is possible from a fixed embedding. It
-# is the difference between receiving an answer and receiving the input.
+# What that cost, stated plainly, because it was not nothing: re-anchoring at a
+# different cut point, probing a different layer, changing the pooling, and
+# re-running after a model update all now require sites to re-export. Tier 2
+# ships an answer where it used to ship the input.
 #
-# What is still excluded, and is what "not the raw date/value data" means:
-#
-#   * `times` -- the wall-clock timestamp of every event. Present in the same
-#     source file and never exported. `s_elapsed_past` replaces it: seconds
-#     since the start of the record, which is relative and is the same class of
-#     quantity as `hours_admission_to_cs_onset`, already permitted.
-#   * the measured values. A token is a decile bin fitted at training time, so
-#     `LAB-RES//creatinine_Q7` says "seventh decile", never "2.3 mg/dL".
-#   * `subject_id`, age in years, race and ethnicity, all of which sit in the
-#     same source file.
-#
-# Permitted ONLY in a token bundle. `validate_patient_frame` still refuses
-# them, so they cannot reach a tier-1 upload by accident.
-TOKEN_SEQUENCE_COLUMNS: frozenset[str] = frozenset({"tokens_past", "s_elapsed_past"})
+# They are in FORBIDDEN_COLUMNS rather than merely absent from the allowlist,
+# so a frame carrying them is refused by name and the reviewer sees why.
 
 
 def _names(*groups: tuple[Permitted, ...]) -> frozenset[str]:
@@ -246,6 +292,12 @@ FORBIDDEN_COLUMNS: frozenset[str] = frozenset(
         "race_category",
         "ethnicity_category",
         "peak_troponin_ng_l",
+        # withdrawn in schema 3.0 -- see the note above
+        "tokens_past",
+        "s_elapsed_past",
+        # the wall-clock timestamp of every event, which sat in the same source
+        # file as the sequences and was never on the allowlist even then
+        "times",
     }
 )
 
@@ -262,6 +314,8 @@ def is_permitted(column: str) -> bool:
         or bool(EMBEDDING_PATTERN.match(column))
         or column.startswith(TRIAL_PREFIX)
         or column.startswith(FAMILY_PREFIX)
+        or column.startswith(TRIAL_FIT_PREFIXES)
+        or column.startswith(CONCORDANCE_PREFIX)
         or column.endswith(LABEL_SUFFIXES)
     )
 
@@ -298,36 +352,6 @@ def validate_patient_frame(frame: pl.DataFrame, origin: str) -> None:
     if frame.height == 0:
         raise ContractViolation(f"{origin}: no rows")
 
-
-
-def validate_token_frame(frame: pl.DataFrame, origin: str) -> None:
-    """
-    refuse a token bundle that carries anything outside the contract
-
-    The same allowlist as a patient frame, plus the two sequence columns. The
-    separation matters: a tier-1 upload is checked with
-    `validate_patient_frame`, which does not permit them, so the sequences
-    cannot reach the summary bundle through a shared code path.
-    """
-    allowed = lambda c: is_permitted(c) or c in TOKEN_SEQUENCE_COLUMNS
-    offending = sorted(c for c in frame.columns if not allowed(c))
-    if offending:
-        raise ContractViolation(
-            f"{origin}: {len(offending)} column(s) not permitted to leave a "
-            f"site under schema {SCHEMA_VERSION}: {', '.join(offending)}.\n"
-            "Note that `times`, the wall-clock timestamp of each event, sits in "
-            "the same source file as the sequences and is deliberately not on "
-            "the allowlist -- `s_elapsed_past` carries relative time instead."
-        )
-    missing = [c for c in REQUIRED_COLUMNS if c not in frame.columns]
-    if missing:
-        raise ContractViolation(f"{origin}: missing required column(s) {missing}")
-    if not TOKEN_SEQUENCE_COLUMNS & set(frame.columns):
-        raise ContractViolation(
-            f"{origin}: a token bundle with no token sequence in it"
-        )
-    if frame.height == 0:
-        raise ContractViolation(f"{origin}: no rows")
 
 
 def validate_counts_frame(frame: pl.DataFrame, origin: str, min_cell: int) -> None:
@@ -379,7 +403,16 @@ def describe() -> str:
         f"    {'emb_NNNN':<32} the latent embedding; NOT de-identified",
         f"    {TRIAL_PREFIX + '<trial>':<32} per-trial eligibility, computed site-side",
         f"    {FAMILY_PREFIX + '<family>':<32} per-family token counts, for the site-effect model",
+        f"    {'t1_absdist_<trial>':<32} distance outside the published IQRs, in IQR units",
+        f"    {'t1_severity_gap_<trial>':<32} the same, signed: positive is sicker than the trial",
+        f"    {'t1_outside_<trial>':<32} variables outside their IQR; 0 is inside every one",
+        f"    {'t1_frac_compared_<trial>':<32} share of published variables this patient has",
+        f"    {CONCORDANCE_PREFIX + '<trial>':<32} was the recommended treatment delivered",
         f"    {'<task>__label / __eligible':<32} downstream prediction labels, computed site-side",
+        "",
+        "WITHDRAWN in 3.0: tokens_past, s_elapsed_past. Sites embed locally and",
+        "ship the embedding; the sequence is more disclosive than the vector",
+        "derived from it, and is now refused by name.",
         "",
         "everything else is refused at both ends.",
     ]

@@ -60,8 +60,11 @@ python -c "from sys import path; path.insert(0,'code'); from clifcs import load_
 p=load_paths(); print(p.sites, p.model_home, p.tokenizer_yaml)"
 ```
 
-**You need a GPU** -- not only for your own embedding run, but because the
-coordinating role re-embeds every received token bundle.
+**You need a GPU only for your own tier-2 run.** Under schema 3.0 sites ship the
+embeddings, so the pooled role reads them straight through and re-embeds
+nothing. A pure coordinating machine that holds no CLIF data of its own needs no
+GPU at all -- it still needs the tokenizer, to check the bundles were produced
+under the token mapping it is about to interpret the exported ranks against.
 
 ---
 
@@ -70,14 +73,15 @@ coordinating role re-embeds every received token bundle.
 Tier 1, which you would run even if nothing else were permitted:
 
 ```bash
-python code/01_site_aggregate.py --batch-size 8 \
+python code/01_site_tables.py \
     --phenotype-model models/phenotype_model.json \
     --seymour-model   models/seymour_model.json \
     --bhavani-model   models/bhavani_model.json
 ```
 
-Nine stages: `cohort subset derive collate tokenize winnow embed purity export`.
-`derive`, `collate` and `embed` are the slow ones. Resume with
+Nine stages: `cohort subset derive collate tokenize winnow tokencounts trials
+export`. All CPU -- tier 1 never loads the GEM weights. `derive` and `collate`
+are the slow ones. Resume with
 `--from-stage embed` rather than starting over.
 
 **Read `output/cohort/filter_ledger.csv` before running anything expensive.** The
@@ -109,13 +113,13 @@ Send them the repo URL, the branch, and this:
 
 ```bash
 # tier 1 -- everyone
-python code/01_site_aggregate.py --batch-size 8 \
+python code/01_site_tables.py \
     --phenotype-model models/phenotype_model.json \
     --seymour-model   models/seymour_model.json \
     --bhavani-model   models/bhavani_model.json
 
-# tier 2 -- ONLY with the patient-level DUA executed
-python code/02_site_embeddings.py
+# tier 2 -- ONLY with the patient-level DUA executed. Needs a GPU.
+python code/02_site_embeddings.py --batch-size 8
 ```
 
 The three `--*-model` flags are **not optional at a contributing site**. Without
@@ -165,16 +169,19 @@ python code/03_embedding_analysis.py --role pooled --anchor 24h
 run cannot read raw records even by mistake; and it points the loader at
 `output/received/` instead of your local files.
 
-The first pooled run **re-embeds every received token sequence** with the frozen
-model. That is the point of tier 2: you receive the model's input and derive its
-output yourself. Roughly fifteen minutes per anchor for 34,000 patients, then
-cached to `output/patient_level_data/reembedded_anchor-<anchor>_<SITE>.parquet`,
-so every later script is immediate.
+**There is no re-embedding step.** Sites compute the embeddings themselves and
+ship the vectors, so a pooled run reads `patient/embeddings_anchor-*.parquet`
+and starts analysing.
 
-This is exact, not approximate. The model is frozen in eval mode under
-`torch.inference_mode()`, so it is a deterministic function of token ids and
-elapsed times. Checked against embeddings computed directly at the site over 512
-patients: **maximum absolute difference 0.0**, bit for bit.
+Schema 2.0 worked the other way: it shipped the token sequences and had you
+re-embed, which was exact rather than approximate -- the model is frozen in eval
+mode under `torch.inference_mode()`, a deterministic function of token ids and
+elapsed times, checked over 512 patients at a **maximum absolute difference of
+0.0**. That bought re-anchoring and layer probing without asking anyone to
+re-export, and it was withdrawn anyway, because a sequence is a re-serialisation
+of the record and more disclosive than the vector derived from it. If you need a
+different anchor or a different layer now, you have to ask the sites to re-run
+02.
 
 Then the rest, in any order:
 
@@ -279,9 +286,15 @@ UCMC. Seymour and Bhavani shares are reported per site and must never be pooled
 into one percentage. See
 [FEDERATION.md](FEDERATION.md#the-sepsis-phenotypes-and-what-is-wrong-with-them).
 
-**A token sequence is not de-identified.** It is a re-serialisation of the
-record -- which labs were drawn, in what order, how often, against what clock.
-More disclosive than the embedding derived from it, because an embedding is a
-lossy projection and this is not. Hold `token_level_data_*` to the same standard
-as patient-level clinical data, and say so to anyone who asks whether tokens are
-"just summaries".
+**An embedding is not de-identified.** A 1024-d vector is a learned function of
+the patient's entire recorded history, and nobody has shown that such
+representations resist re-identification attack. Record numbers become a salted
+hash, timestamps are dropped and age is reduced to five-year bands, which
+narrows what travels; it does not make the file anonymous. Hold
+`upload_to_box_*/patient/` to the same standard as patient-level clinical data,
+and say so to anyone who asks whether embeddings are "just summaries".
+
+Token sequences are no longer shipped at all. They were the most disclosive
+artefact this pipeline produced and schema 3.0 refuses them by name; if a site
+sends you a schema-2.0 `token_level_data_*` directory, it is not read -- ask
+them to re-export under the current pipeline.

@@ -7,7 +7,9 @@
 #SBATCH --output=logs/slurm-%x-%j.out
 #SBATCH --error=logs/slurm-%x-%j.out
 #
-# Stage 2 of 4: subset -> derive -> collate -> tokenize -> winnow. All CPU.
+# Stage 2 of 3 for TIER 1: subset -> derive -> collate -> tokenize -> winnow.
+# All CPU, and no GEM weights -- `tokenize` loads the frozen TOKENIZER, which
+# is a different file and does not need a GPU.
 #
 # No GPU is requested because nothing here touches one. Running these stages
 # inside the GPU allocation works and wastes most of it.
@@ -27,7 +29,7 @@
 # are resumable and their outputs are on scratch:
 #
 #     sbatch --partition=tier3q --mem=512000M hpc/02_prepare.sbatch
-#     python code/01_site_aggregate.py --from-stage collate
+#     python code/01_site_tables.py --from-stage collate
 #
 # If sbatch refuses this with "Requested node configuration is not
 # available", the per-CPU memory cap on tier2q is lower than 8000 MB. Check
@@ -65,7 +67,7 @@ source "$REPO_HOME/hpc/_common.sh"
 for stage in subset derive collate tokenize winnow; do
     echo ""
     echo "--- stage: $stage  ($(date -Is)) ---"
-    if ! python code/01_site_aggregate.py --stage "$stage"; then
+    if ! python code/01_site_tables.py --stage "$stage"; then
         status=$?
         echo ""
         echo "=================================================================="
@@ -76,7 +78,7 @@ for stage in subset derive collate tokenize winnow; do
         echo "with it, the cap is per CPU) and resume at this stage rather"
         echo "than starting over --"
         echo ""
-        echo "    python code/01_site_aggregate.py --from-stage $stage"
+        echo "    python code/01_site_tables.py --from-stage $stage"
         echo ""
         echo "The earlier stages' outputs are already on scratch."
         echo "=================================================================="
@@ -85,6 +87,6 @@ for stage in subset derive collate tokenize winnow; do
 done
 
 echo ""
-echo "Tokenized and winnowed. Next: hpc/03_embed.sbatch (GPU)."
+echo "Tokenized and winnowed. Next: hpc/03_tier1.sbatch (CPU) completes tier 1."
 echo "If the GPU queue is deep, check the scratch purge policy first --"
 echo "these intermediates have to survive until that job starts."

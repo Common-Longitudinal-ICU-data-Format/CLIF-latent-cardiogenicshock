@@ -7,7 +7,7 @@
 #SBATCH --output=logs/slurm-%x-%j.out
 #SBATCH --error=logs/slurm-%x-%j.out
 #
-# Stage 1 of 4: build the cohort, then STOP.
+# Stage 1 of 3 for TIER 1: build the cohort, then STOP.
 #
 # This is its own job on purpose. A human has to read
 # output/cohort/filter_ledger.csv before anything expensive runs. The two
@@ -37,7 +37,7 @@ if [ ! -f "$REPO_HOME/hpc/_common.sh" ]; then
 fi
 source "$REPO_HOME/hpc/_common.sh"
 
-python code/01_site_aggregate.py --stage cohort "${PHENOTYPE_FLAGS[@]}"
+python code/01_site_tables.py --stage cohort "${PHENOTYPE_FLAGS[@]}"
 
 echo ""
 echo "--------------------------------------------------------------------"

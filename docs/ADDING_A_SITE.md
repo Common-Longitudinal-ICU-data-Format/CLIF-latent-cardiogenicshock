@@ -3,11 +3,12 @@
 Written for: the analyst running this pipeline at a contributing site, and the
 coordinating analyst pooling the results.
 
-Raw CLIF data never leaves the site. The site runs `01_site_aggregate.py`
-against its own data and its own copy of the frozen model, and sends back a
-**bundle** of aggregate tables. If its agreement permits patient-level
-transfer, it also runs `02_site_embeddings.py`, which adds the embeddings to
-that same bundle. The coordinating site pools whichever bundles arrive.
+Raw CLIF data never leaves the site. The site runs `01_site_tables.py` against
+its own data and sends back a **bundle** of aggregate tables — no GPU, and the
+frozen model is never loaded. If its agreement permits patient-level transfer,
+it also runs `02_site_embeddings.py`, which loads the model and adds the
+embeddings to that same bundle. The coordinating site pools whichever bundles
+arrive.
 
 
 ---
@@ -16,11 +17,16 @@ that same bundle. The coordinating site pools whichever bundles arrive.
 
 The pipeline splits what a site sends in two, and the split is the whole point.
 
-**Tier 1 (`01_site_aggregate.py`) is aggregate.** Patient flow, cohort sizes,
-the three phenotype breakdowns, and how coherent each phenotype is in this
-site's embedding space. Every number is a count or an average over at least
-`--min-cell` patients, so it travels under a consortium's ordinary terms. Every
-site runs it.
+**Tier 1 (`01_site_tables.py`) is aggregate.** Patient flow, cohort sizes, the
+phenotype breakdowns, the trial comparison, and per-token prevalence — how
+differently this site charts. Every number is a count or an average over at
+least `--min-cell` patients, so it travels under a consortium's ordinary terms.
+Every site runs it.
+
+**It needs no GPU and never loads the GEM weights.** If your site has no GPU, or
+no patient-level agreement, tier 1 is the whole of your contribution and it is a
+complete one. What you will not contribute is the phenotype-coherence measure,
+which needs the embeddings and so sits in tier 2.
 
 **Tier 2 (`02_site_embeddings.py`) is patient-level, and is not
 de-identified.** It adds `patient/` to the tier-1 bundle, so a site sends
@@ -113,7 +119,7 @@ python -c "from sys import path; path.insert(0,'code'); from clifcs import load_
 ### 3. Cohort — and check the numbers before going further
 
 ```bash
-python code/01_site_aggregate.py --stage cohort     --phenotype-model /path/to/phenotype_model.json     --seymour-model   /path/to/seymour_model.json     --bhavani-model   /path/to/bhavani_model.json
+python code/01_site_tables.py --stage cohort     --phenotype-model /path/to/phenotype_model.json     --seymour-model   /path/to/seymour_model.json     --bhavani-model   /path/to/bhavani_model.json
 ```
 
 The three `--*-model` flags are **required at a contributing site**. Without
@@ -135,25 +141,35 @@ two things that go wrong:
 ### 4. Tier 1 — the rest of what every site sends
 
 ```bash
-python code/01_site_aggregate.py --from-stage subset --batch-size 8
+python code/01_site_tables.py --from-stage subset
 ```
 
-`--batch-size 8` fits an 8 GB card; raise it if you have more. Drop it to 2–4 if
-you hit CUDA OOM — `output_hidden_states` keeps every layer.
+No GPU and no batch size: tier 1 loads the *tokenizer*, which is a different
+file from the weights. The slow stages are `derive` (clifpy) and `collate`
+(cocoa), both CPU and both memory-hungry.
 
-This runs through to `output/upload_to_box_<SITE>/`, holding counts, the three
-phenotype breakdowns, and phenotype coherence in the embedding space. All of it
+This runs through to `output/upload_to_box_<SITE>/`, holding counts, the
+phenotype breakdowns, the trial comparison and the token-prevalence tables. All of it
 is aggregate and small-cell suppressed. **Send this directory.**
 
 ### 5. Tier 2 — only with a patient-level agreement
 
 ```bash
-python code/02_site_embeddings.py
+python code/02_site_embeddings.py --batch-size 8
 ```
 
-Adds `output/upload_to_box_<SITE>/patient/`: one row per patient per anchor,
-holding the 1024-d embedding and the labels needed to colour and stratify it.
-Roughly 45 MB per 10,000 patients.
+**This is the GPU job**, and the first point at which the GEM weights are
+loaded. `--batch-size 8` fits an 8 GB card; raise it if you have more. Drop it
+to 2–4 if you hit CUDA OOM — `output_hidden_states` keeps every layer.
+
+Adds two things to `output/upload_to_box_<SITE>/`:
+
+- `patient/` — one row per patient per anchor, holding the 1024-d embedding and
+  the labels needed to colour and stratify it, including per-trial eligibility,
+  fit against the published interquartile ranges, and treatment concordance.
+  Roughly 45 MB per 10,000 patients.
+- `purity/` — the phenotype-coherence scalars. Aggregate, but it needs the
+  embeddings to compute, so it is gated on the same agreement.
 
 **It adds to the tier-1 bundle rather than making a second directory**, so the
 site still sends exactly one. The unredacted embeddings stay in
@@ -161,8 +177,9 @@ site still sends exactly one. The unredacted embeddings stay in
 
 **Do not run this without the IRB approval and DUA in place.** Tier 1 is a
 complete contribution on its own, and the pooled analysis degrades rather than
-failing: a tier-1-only site appears in every count table and in the
-phenotype-coherence comparison, and in no projection.
+failing: a tier-1-only site appears in every count table, in the whole trial
+analysis, in the token-prevalence comparison the site effect is decomposed
+with — and in no projection.
 
 ### 6. Keep the salt
 

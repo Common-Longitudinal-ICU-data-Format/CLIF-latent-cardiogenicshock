@@ -146,10 +146,15 @@ def build_patient_frame(
     Returns the frame and the per-variable token coverage table. Raises if the
     embeddings for this site and anchor have not been produced yet.
     """
-    source = paths.patient_level_home / f"embeddings_anchor-{anchor}_{site}.parquet"
+    # patient_level_data_<SITE>/<model>/, which is where 02 writes. An earlier
+    # version looked in the flat `patient_level_data/` the pooled scripts use
+    # and could not find a site-side export at all.
+    source = (
+        paths.patient_level_home_for(site) / f"embeddings_anchor-{anchor}.parquet"
+    )
     if not source.is_file():
         raise FileNotFoundError(
-            f"{source} not found; run 01_site_aggregate.py --stage embed for "
+            f"{source} not found; run 02_site_embeddings.py --stage embed for "
             f"{site}/{anchor} first"
         )
     embeddings = pl.read_parquet(source)
@@ -232,45 +237,58 @@ def build_patient_frame(
     return frame, token_coverage
 
 
-def trial_eligibility(paths, cohort: pl.DataFrame, site: str, logger) -> pl.DataFrame:
+def trial_columns(paths, anchor: str, site: str, logger) -> pl.DataFrame:
     """
-    one boolean per trial, computed here because it cannot be computed there
+    per-trial eligibility, fit and concordance, as the trials stage computed them
 
-    The eligibility predicates read `clif_vitals`, `clif_labs`,
-    `clif_medication_admin_*`, `clif_hospital_diagnosis` and
-    `clif_patient_procedures`. The coordinating site has none of those, so this
-    is one of the things the federated split moves site-side: 11 used to call
-    `attach_features(paths.site_data[site], ...)` itself, which a pooled-role run
-    cannot do and should not be able to.
+    Read from `cohort/trial_patient_anchor-<anchor>.parquet` rather than
+    recomputed. The predicates behind these columns read `clif_vitals`,
+    `clif_labs`, `clif_medication_admin_*`, `clif_hospital_diagnosis` and
+    `clif_patient_procedures` -- which only a site can do, and which 01 has
+    already paid a full pass over to produce the aggregate trial tables.
+    Recomputing them here, as an earlier version did, doubled the slowest
+    site-side read for identical numbers.
 
-    Only the booleans travel. The features they were computed from -- pressures,
-    lactate, the per-agent infusion flags -- stay here.
+    Three families travel, each named in the contract:
+
+      elig_<trial>              would the trial have enrolled this patient
+      t1_absdist_/severity_gap_/outside_/frac_compared_<trial>
+                                where they sit against the published IQRs, and
+                                which way
+      concordant_<trial>        was the recommended treatment delivered
+
+    Only the booleans and the four summary statistics. The pressures, lactate
+    and per-agent infusion flags they were computed from stay here.
     """
-    from clifcs.concordance import attach_procedures
-    from clifcs.trials import add_eligibility, attach_features, load_trials
-
-    trial_cfg = OmegaConf.load(CONFIG_HOME / "trials.yaml")
-    cohort_cfg = OmegaConf.load(CONFIG_HOME / "cohort.yaml")
-    trials = load_trials(trial_cfg)
-
-    part = cohort.filter(pl.col("site") == site)
-    if part.height == 0:
+    source = paths.cohort_home / f"trial_patient_anchor-{anchor}.parquet"
+    if not source.is_file():
+        logger.warning(
+            f"  no {source.name}; run 01_site_tables.py --stage trials to add "
+            "trial eligibility, fit and concordance to the export. The pooled "
+            "trial analysis loses those columns rather than recomputing them."
+        )
         return pl.DataFrame({"hospitalization_id": []})
 
-    data_dir = paths.site_data[site]
-    part = attach_features(data_dir, part, cohort_cfg, logger)
-    part = attach_procedures(data_dir, part, logger)
-    part = add_eligibility(part, trials)
+    frame = pl.read_parquet(source).filter(pl.col("site") == site)
+    if frame.height == 0:
+        return pl.DataFrame({"hospitalization_id": []})
 
-    columns = [c for c in part.columns if c.startswith(contract.TRIAL_PREFIX)]
+    wanted = [
+        c
+        for c in frame.columns
+        if c.startswith(contract.TRIAL_PREFIX)
+        or c.startswith(contract.TRIAL_FIT_PREFIXES)
+        or c.startswith(contract.CONCORDANCE_PREFIX)
+    ]
+    eligible = [c for c in wanted if c.startswith(contract.TRIAL_PREFIX)]
     logger.info(
-        f"  trial eligibility: {len(columns)} trials "
+        f"  trial columns: {len(eligible)} trials, {len(wanted)} columns "
         + ", ".join(
-            f"{c.removeprefix(contract.TRIAL_PREFIX)} {int(part[c].sum())}"
-            for c in columns
+            f"{c.removeprefix(contract.TRIAL_PREFIX)} {int(frame[c].sum())}"
+            for c in eligible
         )
     )
-    return part.select("hospitalization_id", *columns)
+    return frame.select("hospitalization_id", *wanted)
 
 
 def write_counts(paths, bundle: pathlib.Path, min_cell: int, logger, site=None) -> None:
@@ -294,6 +312,22 @@ def write_counts(paths, bundle: pathlib.Path, min_cell: int, logger, site=None) 
         if criteria.is_file():
             trial_home.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(criteria, trial_home / "trial_criteria.csv")
+
+        # Per-token and per-family prevalence, which is what 04 draws its
+        # tornado from. Already suppressed by the tokencounts stage; re-checked
+        # here rather than re-suppressed, on the same argument as the trial
+        # tables. These are the reason a site sharing nothing patient-level can
+        # still contribute to decomposing the site effect -- which, at 97%
+        # neighbour purity, is the largest single finding in this pipeline.
+        for pattern in ("token_prevalence", "token_families"):
+            for source in sorted(
+                paths.cohort_home.glob(f"{pattern}_{site}_anchor-*.csv")
+            ):
+                table = pl.read_csv(source)
+                contract.validate_counts_frame(table, source.name, min_cell)
+                name = source.name.replace(f"_{site}", "")
+                table.write_csv(out / name)
+                logger.info(f"  counts/{name} ({table.height} rows)")
 
     for name, count_columns in _COUNT_TABLES.items():
         source = paths.cohort_home / name
@@ -326,14 +360,17 @@ def write_aggregate(
     paths,
     site: str,
     bundle: pathlib.Path,
-    purity: pl.DataFrame | None,
     salt: str,
     min_cell: int,
     embedding_dim: int,
     logger,
 ) -> pathlib.Path:
     """
-    the bundle every site sends: counts, phenotype breakdowns, purity
+    the bundle every site sends: counts, phenotype breakdowns, token prevalence
+
+    No purity. Phenotype coherence in the embedding space needs the embeddings,
+    so it moved to tier 2 with the rest of the GPU work and is written by
+    `write_purity` when 02 runs. Tier 1 no longer loads the model at all.
 
     Writes the manifest with `shares_patient_level: false`. Tier 2 amends it if
     and when it runs, so the presence of patient data is recorded in one place
@@ -343,21 +380,6 @@ def write_aggregate(
 
     logger.info(" counts/")
     write_counts(paths, bundle, min_cell, logger, site=site)
-
-    if purity is not None and purity.height:
-        home = bundle / "purity"
-        home.mkdir(parents=True, exist_ok=True)
-        contract.validate_counts_frame(purity, "phenotype purity", min_cell)
-        purity.write_csv(home / "phenotype_purity.csv")
-        logger.info(
-            f" purity/phenotype_purity.csv: {purity.height} rows "
-            f"({purity['scheme'].n_unique()} schemes)"
-        )
-    else:
-        logger.warning(
-            " purity/ omitted: no embeddings available, so phenotype coherence "
-            "in GEM space could not be measured. Run the embed stage first."
-        )
 
     # the legend, from the tokenizer alone -- no patient data, and identical at
     # every site, so it travels for the reader's convenience
@@ -380,6 +402,38 @@ def write_aggregate(
     )
     logger.info(f" manifest.json written; {site} aggregate bundle complete")
     return bundle
+
+
+def write_purity(
+    bundle: pathlib.Path,
+    purity: pl.DataFrame | None,
+    min_cell: int,
+    logger,
+) -> None:
+    """
+    add purity/ to a bundle tier 1 already wrote
+
+    Tier 2 rather than tier 1 because it needs the embeddings. It is still an
+    aggregate -- one row per scheme per phenotype, holding a neighbour share
+    and the share chance would give -- so it is suppressed and checked like any
+    other count table, and a site sharing nothing patient-level could in
+    principle contribute it if it had a GPU. It does not, under this split,
+    because the stage that computes it is the one gated on the agreement.
+    """
+    if purity is None or not purity.height:
+        logger.warning(
+            " purity/ omitted: no embeddings available, so phenotype coherence "
+            "in GEM space could not be measured. Run --stage embed first."
+        )
+        return
+    home = bundle / "purity"
+    home.mkdir(parents=True, exist_ok=True)
+    contract.validate_counts_frame(purity, "phenotype purity", min_cell)
+    purity.write_csv(home / "phenotype_purity.csv")
+    logger.info(
+        f" purity/phenotype_purity.csv: {purity.height} rows "
+        f"({purity['scheme'].n_unique()} schemes)"
+    )
 
 
 # ============================================================== tier 2: patient
@@ -411,7 +465,7 @@ def write_patient(
         raise FileNotFoundError(
             f"{existing} not found. Tier 1 (the aggregate bundle) has to be "
             "written first -- it is what every site sends, and tier 2 only adds "
-            "patient-level data to it. Run 01_site_aggregate.py."
+            "patient-level data to it. Run 01_site_tables.py."
         )
     prior = manifest.read(bundle)
     if prior.get("salt_fingerprint") != manifest.salt_fingerprint(salt):
@@ -429,15 +483,18 @@ def write_patient(
     patient_home = bundle / "patient"
     patient_home.mkdir(parents=True, exist_ok=True)
 
-    # computed once per site, not once per anchor: eligibility is a property of
-    # the patient, which is the same argument 11 makes for not recomputing it
-    eligibility = (
-        trial_eligibility(paths, cohort, site, logger) if with_eligibility else None
-    )
-
     row_counts: dict[str, int] = {}
     coverages = []
     for anchor in anchors:
+        # Per anchor, not once per site. Eligibility alone is a property of the
+        # patient, but the `t1_` fit statistics are not: they are read off the
+        # physiology at the anchor, so the 24h and onset frames give different
+        # answers. An earlier version hoisted this out of the loop, which under
+        # the old eligibility-only export was correct and is now a bug -- it
+        # would have written the onset fit against the 24h rows.
+        eligibility = (
+            trial_columns(paths, anchor, site, logger) if with_eligibility else None
+        )
         frame, token_coverage = build_patient_frame(
             paths, cohort, site, anchor, salt, logger, eligibility
         )
@@ -490,96 +547,3 @@ _TOKEN_BUNDLE_LABELS = (
     "sex_category",
     "hours_admission_to_cs_onset",
 )
-
-
-def write_tokens(
-    paths,
-    cohort: pl.DataFrame,
-    site: str,
-    anchors: tuple[str, ...],
-    salt: str,
-    logger,
-) -> pathlib.Path:
-    """
-    tier 2: the ordered token sequence per patient
-
-    What this is, stated plainly: the model's entire input for each patient, as
-    the sequence of token ids it read before the anchor plus the elapsed seconds
-    at each one. Not the measured values -- a token is a decile bin fitted at
-    training time -- and not the wall-clock times, which sit in the same source
-    file and are dropped.
-
-    What it buys the coordinating site is the reason to prefer it over shipping
-    embeddings: with the sequences and the frozen model it can reproduce the
-    embeddings exactly, re-anchor at a different cut point, or read a different
-    layer. A fixed embedding answers one question; the sequence answers the ones
-    nobody has asked yet.
-
-    What it costs is that this is the most disclosive artefact the pipeline
-    produces. An embedding is a lossy projection of the record; a token stream
-    is a re-serialisation of it. It must not be described as de-identified, and
-    it moves under a patient-level data use agreement or not at all.
-    """
-    from clifcs.tokens import load_pre_anchor_tokens
-
-    home = paths.token_home(site)
-    home.mkdir(parents=True, exist_ok=True)
-
-    labels = cohort.filter(pl.col("site") == site).select(
-        "hospitalization_id",
-        *[c for c in _TOKEN_BUNDLE_LABELS if c in cohort.columns],
-    )
-
-    row_counts: dict[str, int] = {}
-    for anchor in anchors:
-        tokens = load_pre_anchor_tokens(paths, site, anchor)
-        frame = (
-            tokens.join(labels, on="hospitalization_id", how="left")
-            .with_columns(
-                row_keys(tokens, salt),
-                anchor=pl.lit(anchor),
-            )
-            .drop("hospitalization_id")
-        )
-        # Dropped explicitly and then validated, rather than trusting the
-        # selection: the validation is what catches a column this forgot, and
-        # the source file carries `times`, `race_category`, `ethnicity_category`
-        # and `age_at_admission` right alongside the sequences.
-        frame = frame.select([c for c in frame.columns if contract.is_permitted(c)
-                              or c in contract.TOKEN_SEQUENCE_COLUMNS])
-        contract.validate_token_frame(frame, f"{site}/{anchor} token bundle")
-
-        out = home / f"tokens_anchor-{anchor}.parquet"
-        frame.write_parquet(out)
-        row_counts[anchor] = frame.height
-        lengths = frame["tokens_past"].list.len()
-        logger.info(
-            f"  {out.name}: {frame.height} patients, "
-            f"{int(lengths.sum()):,} tokens "
-            f"(median {int(lengths.median())} per patient, "
-            f"max {int(lengths.max())})"
-        )
-
-    # the vocabulary the ids index into. Model metadata, no patient data, and
-    # the thing without which a bare list of integers is uninterpretable.
-    levels(str(paths.tokenizer_yaml)).write_csv(home / "token_levels.csv")
-
-    manifest.write(
-        manifest.build(
-            site=site,
-            salt=salt,
-            model_key=paths.model_key,
-            model_home=paths.model_home,
-            tokenizer_yaml=paths.tokenizer_yaml,
-            anchors=anchors,
-            row_counts=row_counts,
-            min_cell=0,
-            embedding_dim=0,
-            shares_patient_level=True,
-            notes="tier 2: token sequences, not embeddings. Re-embed with the "
-            "frozen model at the coordinating site.",
-        ),
-        home,
-    )
-    logger.info(f" manifest.json written; {site} token bundle complete")
-    return home

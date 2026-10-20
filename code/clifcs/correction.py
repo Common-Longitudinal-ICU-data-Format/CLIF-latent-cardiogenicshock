@@ -20,6 +20,7 @@ as evidence the representations have been made exchangeable.
 from __future__ import annotations
 
 import dataclasses
+import pathlib
 
 import numpy as np
 
@@ -50,6 +51,62 @@ class AffineCorrection:
                 out[unseen] = x[unseen] - self.centre
             return out
         return (x - self.centre) @ self.transform.T + self.centre
+
+    # ------------------------------------------------------------ persistence
+    #
+    # 09 needs the map, not the corrected anchor embeddings. It embeds every
+    # patient at 26 grid points around onset and has to put all of them through
+    # the SAME correction -- so the map is fitted once, on the anchor rows, and
+    # applied to the grid.
+    #
+    # Fitting on the grid instead would be wrong twice over: each patient
+    # appears up to 26 times, so the fit would be weighted by whose grid is
+    # complete, and the map would change whenever the grid did, which would
+    # make two runs of 09 incomparable for a reason that has nothing to do with
+    # the patients.
+    #
+    # npz rather than json: `transform` is 1024x1024 float64, which is 8 MB of
+    # numbers that json would store as decimal text.
+
+    def save(self, path: pathlib.Path) -> None:
+        """write the fitted map so another script can apply the identical one"""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        arrays: dict[str, np.ndarray] = {"centre": self.centre}
+        if self.transform is not None:
+            arrays["transform"] = self.transform
+        if self.per_site is not None:
+            # one pair of arrays per site, with the site name in the key. The
+            # names are recovered from the keys on load, so a site absent from
+            # the fit stays absent rather than being silently given the pooled
+            # centre by a schema that could not represent it.
+            for site, (mean, scale) in self.per_site.items():
+                arrays[f"per_site::{site}::mean"] = mean
+                arrays[f"per_site::{site}::scale"] = scale
+        np.savez(path, name=np.array(self.name), **arrays)
+
+    @classmethod
+    def load(cls, path: pathlib.Path) -> "AffineCorrection":
+        """read a map written by `save`"""
+        with np.load(path, allow_pickle=False) as data:
+            keys = set(data.files)
+            per_site = None
+            sites = sorted(
+                {k.split("::")[1] for k in keys if k.startswith("per_site::")}
+            )
+            if sites:
+                per_site = {
+                    site: (
+                        data[f"per_site::{site}::mean"],
+                        data[f"per_site::{site}::scale"],
+                    )
+                    for site in sites
+                }
+            return cls(
+                name=str(data["name"]),
+                centre=data["centre"],
+                transform=data["transform"] if "transform" in keys else None,
+                per_site=per_site,
+            )
 
 
 def fit_identity(x: np.ndarray) -> AffineCorrection:

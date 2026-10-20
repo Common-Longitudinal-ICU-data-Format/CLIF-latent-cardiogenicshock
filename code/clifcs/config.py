@@ -182,10 +182,6 @@ class Paths:
     #                               TIER 2 adds patient/ to this SAME
     #                               directory, where the consortium permits
     #                               it, so a site uploads one thing either way.
-    #   token_level_data_<SITE>     the older tier-2 form, token sequences in a
-    #                               directory of their own. Still read by
-    #                               clifcs.export.bundles; nothing writes one.
-    #
     # Each is per site rather than one pooled directory, because a site sends
     # its own and nothing else, and because the person doing the sending should
     # be able to see at a glance which directory is which.
@@ -202,10 +198,6 @@ class Paths:
     def upload_home(self, site: str) -> pathlib.Path:
         """tier 1: the summary bundle a site uploads"""
         return self.output_home / f"upload_to_box_{site}"
-
-    def token_home(self, site: str) -> pathlib.Path:
-        """tier 2: the token-sequence bundle, where an agreement permits it"""
-        return self.output_home / f"token_level_data_{site}"
 
     @property
     def patient_level_home(self) -> pathlib.Path:

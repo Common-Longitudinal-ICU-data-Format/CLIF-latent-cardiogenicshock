@@ -125,20 +125,97 @@ def load_embeddings(paths, anchor: str, logger, batch_size=None) -> pl.DataFrame
 # ============================================================ stage: tokens
 
 
+def _pooled_token_counts(paths, anchor: str, logger) -> pl.DataFrame:
+    """
+    per-token occurrence counts, from the tier-1 bundles
+
+    Returns `token`, `site`, `n` -- the same shape the site role builds from
+    the streams directly, so `plot_token_tornado` needs no second code path.
+
+    This is what changed in schema 3.0. The per-token comparison used to need
+    the token sequences, which travelled under tier 2; the figure therefore
+    existed only for sites that had sent them, and 04 skipped it rather than
+    drawing a degraded version. The counts are now computed site-side by the
+    `tokencounts` stage of 01, suppressed, and shipped in tier 1 -- so the
+    comparison covers every contributing site, including one that shares
+    nothing patient-level at all.
+
+    A token suppressed at ANY site is dropped from the result entirely, at every
+    site. This is the subtle part and it is worth stating, because getting it
+    wrong produces a confident false finding rather than a gap.
+
+    Two different things look alike in an exported table:
+
+      * the token has no row at this site  -- it never appeared in the stream,
+        a genuine structural zero, and `fill_null(0)` downstream is right;
+      * the token has a row holding null   -- between one and `min_cell`
+        patients emitted it and the count was suppressed.
+
+    `plot_token_tornado` pivots and then calls `.fill_null(0)`, which cannot
+    tell those apart, and its `exclusive` mode ranks precisely the tokens one
+    site never emits. So a suppressed token would be promoted to "UCMC emits
+    this and NU never does" -- a structural-zero claim manufactured out of a
+    small cell. Dropping the token everywhere is the only honest option: we do
+    not know its rate at that site, and a rate we do not know cannot be
+    differenced.
+    """
+    from clifcs.export import bundles as bundle_io
+
+    found = bundle_io.discover(paths.received_home, logger)
+    table = bundle_io.load_counts(
+        found, f"token_prevalence_anchor-{anchor}.csv", logger
+    )
+    if table is None or table.height == 0:
+        logger.warning(
+            f"[{anchor}] no token_prevalence table in any bundle, so the "
+            "per-token tornado is skipped. It is written by the tokencounts "
+            "stage of 01_site_tables.py; re-export with the current pipeline."
+        )
+        return pl.DataFrame()
+
+    blanked = (
+        table.filter(pl.col("total_occurrences").is_null())["token_name"]
+        .unique()
+        .to_list()
+    )
+    if blanked:
+        logger.info(
+            f"[{anchor}] {len(blanked)} token(s) were suppressed at at least "
+            "one site and are dropped from the tornado at every site: a "
+            "suppressed cell cannot be distinguished from a structural zero "
+            "once the pivot fills nulls, and the exclusive ranking is built "
+            "out of structural zeros"
+        )
+    return (
+        table.filter(
+            pl.col("total_occurrences").is_not_null()
+            & ~pl.col("token_name").is_in(blanked)
+        )
+        .select(
+            token=pl.col("token_name"),
+            site=pl.col("site"),
+            n=pl.col("total_occurrences"),
+        )
+    )
+
+
 def stage_tokens_pooled(
     paths, frame: pl.DataFrame, anchor: str, sites, logger
 ) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
     """
-    the family mix, from the counts the bundles carry
+    the family mix and the per-token counts, from the tier-1 bundles
 
-    What survives federation is the **family** comparison -- "NU charts 2.1x the
-    assessment tokens UCMC does" -- which is the level the site effect is
-    actually explained at and is what the tornado figure aggregates to anyway.
+    The **family** comparison -- "NU charts 2.1x the assessment tokens UCMC
+    does" -- comes from the `fam_n_*` columns on the patient rows, so it needs
+    tier 2.
 
-    What does not is the **per-token** comparison: which individual token most
-    distinguishes the sites needs the streams, and those do not travel. An
-    empty frame is returned for it and 04 skips the tornado figure, rather than
-    a degraded version being drawn that looks like the real one.
+    The **per-token** comparison now comes from `counts/token_prevalence_*.csv`,
+    which the `tokencounts` stage of 01 writes and every site ships in tier 1.
+    It used to require the token sequences and so existed only for sites that
+    had sent them; a site sharing nothing patient-level now contributes to it
+    too. Since the site effect is the largest single finding here -- 97%
+    neighbour purity -- being able to decompose it into "because they chart
+    differently" should not have been contingent on a data use agreement.
     """
     _, families = vocabulary(str(paths.tokenizer_yaml))
     all_families = sorted(set(families.values()))
@@ -170,6 +247,8 @@ def stage_tokens_pooled(
         .pivot(on="site", index="family", values="share")
         .fill_null(0.0)
     )
+    counts = _pooled_token_counts(paths, anchor, logger)
+
     shown = [s for s in sites if s in family_mix.columns]
     if len(shown) == 2:
         a, b = shown
@@ -183,12 +262,17 @@ def stage_tokens_pooled(
         diff = f"  diff {row['difference']:+.2%}" if "difference" in row else ""
         logger.info(f"    {row['family']:<9} {bits}{diff}")
 
-    logger.warning(
-        f"[{anchor}] per-token discrimination and UNK burden are not available "
-        "under the pooled role: both need the token streams, which do not cross "
-        "a site boundary. Run 04 site-side for those."
+    # The log-odds ranking of individual tokens still needs the streams: it is
+    # a per-patient quantity (how many patients at each site carry the token,
+    # against how many do not), and the prevalence table is marginal. The
+    # tornado does not need it -- it ranks on a per-patient RATE, which is
+    # exactly what the exported counts and the site sizes give.
+    logger.info(
+        f"[{anchor}] per-token tornado from the tier-1 counts; the log-odds "
+        "ranking and the UNK burden still need the streams and are available "
+        "site-side only"
     )
-    return family_mix, pl.DataFrame(), pl.DataFrame()
+    return family_mix, pl.DataFrame(), counts
 
 
 def stage_tokens(paths, anchor: str, sites, logger) -> tuple[pl.DataFrame, pl.DataFrame]:
@@ -774,8 +858,9 @@ def main() -> None:
         "--batch-size",
         type=int,
         default=None,
-        help="batch size for re-embedding received token bundles (default 8; "
-        "raise it if you have more than 8 GB of VRAM, drop to 2-4 on CUDA OOM)",
+        help=argparse.SUPPRESS,  # no longer used: schema 3.0 ships embeddings,
+        # so there is nothing to re-embed. Kept so an existing invocation or
+        # sbatch script that still passes it does not fail at parse time.
     )
     parser.add_argument(
         "--role",
@@ -829,9 +914,10 @@ def main() -> None:
         site_sizes = dict(
             frame.group_by("site").agg(pl.len().alias("n")).iter_rows()
         )
-        # the tornado ranks individual tokens, so it needs the per-token counts
-        # the pooled role does not receive; skipped rather than drawn from the
-        # family aggregate, which would look like the same figure
+        # Drawn under both roles now. The pooled role gets the per-token counts
+        # from the tier-1 bundles rather than from the streams, which is why
+        # this is no longer conditional on the site role -- the guard is only
+        # for a bundle set that predates the tokencounts stage.
         if counts.height:
             for mode, name in (
                 ("difference", "site_token_tornado.png"),

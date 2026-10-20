@@ -8,14 +8,19 @@
 #SBATCH --output=logs/slurm-%x-%j.out
 #SBATCH --error=logs/slurm-%x-%j.out
 #
-# Stage 3 of 4: the only stage in the pipeline that needs a GPU.
+# Stage 1 of 2 for TIER 2: the only stage in the pipeline that needs a GPU.
+#
+# TIER 2 -- DO NOT RUN WITHOUT THE IRB APPROVAL AND DUA IN PLACE. This is where
+# the GEM weights are loaded for the first time; tier 1 (jobs 01-03) never
+# touches them. A site whose agreement does not cover patient-level transfer
+# has no reason to submit this job at all.
 #
 # BATCH SIZE. The pipeline default of 8 is sized for an 8 GB card; this script
 # defaults to 32 for a datacentre GPU. output_hidden_states keeps every layer,
 # so memory scales with batch size and sequence length together and a single
 # long-sequence batch is the usual OOM trigger. Halve it and resubmit:
 #
-#     sbatch --export=ALL,BATCH_SIZE=16 hpc/03_embed.sbatch
+#     sbatch --export=ALL,BATCH_SIZE=16 hpc/04_embed.sbatch
 #
 # WALLTIME. Measured on 34,142 patients across both anchors at batch size 8:
 # 1 h 58 m wall, about 0.11-0.17 s per patient per anchor. Two anchors run, so
@@ -59,8 +64,8 @@ print(f'  vram     {torch.cuda.get_device_properties(0).total_memory/2**30:.1f} 
 print(f'  torch    {torch.__version__}')
 "
 
-python code/01_site_aggregate.py --stage embed --batch-size "${BATCH_SIZE:-32}"
+python code/02_site_embeddings.py --stage embed --batch-size "${BATCH_SIZE:-32}"
 
 echo ""
 echo "Embeddings are in output/patient_level_data/ and STAY LOCAL."
-echo "Next: hpc/04_export.sbatch (CPU)."
+echo "Next: hpc/05_tier2.sbatch (CPU) redacts and exports."

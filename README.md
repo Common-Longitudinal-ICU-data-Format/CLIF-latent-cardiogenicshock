@@ -25,11 +25,12 @@ The pipeline is in three tiers, by what has to cross a site boundary.
 
 | Script | Tier | Does |
 |---|---|---|
-| [code/01_site_aggregate.py](code/01_site_aggregate.py) | **site, always** | Cohort → tokenize → embed → phenotype purity → **aggregate bundle**. Patient flow, cohort sizes, the three phenotype breakdowns, and how coherent each phenotype is in this site's embedding space. Nothing patient-level leaves. |
-| [code/02_site_embeddings.py](code/02_site_embeddings.py) | **site, DUA-gated** | The **GEM embeddings**, added to the tier-1 bundle so a site sends one directory. Pseudonymous row keys, age bands, no timestamps, no measured values. **Not de-identified.** A site may decline to run it. |
+| [code/01_site_tables.py](code/01_site_tables.py) | **site, always** | Cohort → tokenize → winnow → token prevalence → trials → **aggregate bundle**. Patient flow, cohort sizes, the phenotype breakdowns, the trial comparison, and how differently this site charts. **No GPU, and the GEM weights are never loaded.** Nothing patient-level leaves. |
+| [code/02_site_embeddings.py](code/02_site_embeddings.py) | **site, DUA-gated** | The **GEM embeddings** and the phenotype-coherence measure, added to the tier-1 bundle so a site sends one directory. Pseudonymous row keys, age bands, no timestamps, no measured values. **Not de-identified.** A site may decline to run it. |
 | [code/03_embedding_analysis.py](code/03_embedding_analysis.py) | pooled | PCA + UMAP + PaCMAP, and the scatterplots |
 | [code/04_site_effect.py](code/04_site_effect.py) | pooled | Why the sites separate, decomposed against token-family counts |
-| [code/05](code/05_site_correction.py)–[code/11](code/11_trial_alignment.py) | pooled | Site correction, downstream prediction, the report, token space, trajectories, trial alignment |
+| [code/05](code/05_site_correction.py)–[code/11](code/11_trial_alignment.py) | pooled | Site correction, downstream prediction, the report, token space, trial alignment |
+| [code/09_trajectories.py](code/09_trajectories.py) | **co-located** | Latent flow around shock onset, site-corrected. **Not federated**: it needs 26 embeddings per patient and runs where several sites' extracts share a filesystem. |
 | [code/12_trial_fit_outcomes.py](code/12_trial_fit_outcomes.py) | pooled | Mortality, ventilator-free and vasopressor-free days against how far each patient sits from the trial population, splined and severity-adjusted |
 | [code/13_undifferentiated.py](code/13_undifferentiated.py) | pooled | The 54.6% with no coded shock mechanism: what they resemble in the latent space, whether a linear probe assigns them one, and whether treatment matched it |
 
@@ -45,37 +46,47 @@ output/
 ```
 
 The split between 01 and 02 is the consortium's decision point, which is why it
-is two scripts and not a flag. **01 is what every site runs**, and it answers
-the question worth asking before anyone argues about sharing anything
-patient-level: *do the phenotypes correspond to anything the model sees?* It
-measures that locally and returns scalars. **02 is what needs an agreement**,
-and a site that does not have one simply never runs it.
+is two scripts and not a flag. **01 is what every site runs**, it needs no GPU,
+and it never loads the model — a site with neither a GPU nor a patient-level
+agreement still contributes counts, the phenotype breakdowns, the whole trial
+comparison, and the token-prevalence tables the site-effect decomposition reads.
+**02 is what needs an agreement**, and a site that does not have one simply
+never runs it.
 
-**Tier 2 ships the model's input, not its output.** The coordinating site
-re-embeds from the sequences with the frozen model, which reproduces the site's
-own vectors exactly — checked over 512 patients at a maximum absolute difference
-of **0.0**, bit for bit. That is why the embeddings stay local: they are
-derivable from what is sent, and the sequence additionally permits re-anchoring,
-reading a different layer, and re-running after a model update without asking
-anyone to re-export. It is also smaller: 25 MB of tokens against 45 MB of
-embeddings for UCMC.
+The cost of that split is named rather than hidden: phenotype coherence in the
+embedding space moved to 02, so a tier-1-only site no longer reports it.
 
-A token is a decile bin fitted at training time, so the stream says
-`LAB-RES//creatinine_Q7` and never `2.3 mg/dL`, and the wall-clock timestamps
-sit in the same source file and are dropped. It is still **not de-identified** —
-a sequence is a re-serialisation of the record, and is the most disclosive
-artefact here. See [docs/FEDERATION.md](docs/FEDERATION.md).
+**Tier 2 ships the model's output, not its input.** Sites load the GEM weights
+themselves and send the 1024-d vector.
+
+This reverses an earlier decision. Schema 2.0 shipped the token *sequences* and
+had the coordinating site re-embed, which reproduced each site's own vectors bit
+for bit — checked over 512 patients at a maximum absolute difference of **0.0** —
+and bought re-anchoring, reading a different layer, and re-running after a model
+update without asking anyone to re-export. That was given up because a sequence
+is a re-serialisation of the record and is **more disclosive than the embedding
+derived from it**: an embedding is a lossy projection and cannot be inverted,
+and a stream can always be turned back into one. The two sequence columns are
+now refused by name. What it costs is that re-anchoring or a model update means
+asking every site to run 02 again. See [docs/FEDERATION.md](docs/FEDERATION.md).
+
+A token is a decile bin fitted at training time, so where physiology travels at
+all it travels as `tok_map = 3` and never `58 mmHg`. It is still **not
+de-identified** — a 1024-d vector is a learned function of the patient's whole
+recorded history — and it moves under a patient-level DUA or not at all.
 
 ```bash
-# at a contributing site -- tier 1, which everyone runs
-python code/01_site_aggregate.py           # cohort .. embed .. purity .. export
+# at a contributing site -- tier 1, which everyone runs. No GPU.
+python code/01_site_tables.py       # cohort .. tokencounts .. trials .. export
 
-# tier 2, ONLY if your DUA permits patient-level transfer
+# tier 2, ONLY if your DUA permits patient-level transfer. Needs a GPU.
 python code/02_site_embeddings.py
 
 # at the coordinating site: drop the received bundles into output/received/,
-# then re-embed and analyse in one step
+# then analyse. No GPU and no re-embedding -- the vectors arrive ready.
 python code/03_embedding_analysis.py --role pooled
+python code/05_site_correction.py    --role pooled --save-map
+python code/03_embedding_analysis.py --role pooled --corrected leace
 ```
 
 **This pipeline runs federated.** Raw records never move; each site sends a
@@ -90,17 +101,24 @@ are in **[docs/FEDERATION.md](docs/FEDERATION.md)**. Print the contract with:
 python code/clifcs/export/contract.py
 ```
 
-`01` is staged and resumable — `--stage {cohort,subset,derive,collate,tokenize,winnow}`,
+`01` is staged and resumable —
+`--stage {cohort,subset,derive,collate,tokenize,winnow,tokencounts,trials,export}`,
 or `--from-stage <name>`; add `--force` to redo work whose outputs already exist.
-The two slow stages are `derive` (clifpy) and `collate` (cocoa).
+The two slow stages are `derive` (clifpy) and `collate` (cocoa). `02` is staged
+the same way over `{embed,purity,export}`.
 
 ## Phenotype coherence in the embedding space
 
-The measure tier 1 exists to report, and the one that needs no patient-level
-transfer: for each phenotype, the share of a patient's 30 nearest neighbours (in
-that site's own 50-d PCA space) carrying the same phenotype, against the share
-chance would give. Computed per site, reported **per phenotype**, and sent as
-scalars — `output/upload_to_box_<SITE>/purity/phenotype_purity.csv`.
+For each phenotype, the share of a patient's 30 nearest neighbours (in that
+site's own 50-d PCA space) carrying the same phenotype, against the share chance
+would give. Computed per site, reported **per phenotype**, and sent as scalars —
+`output/upload_to_box_<SITE>/purity/phenotype_purity.csv`.
+
+**This is a tier-2 output.** It is an aggregate — a handful of scalars per
+scheme — but it needs the embeddings to compute, so it is gated on the same
+agreement they are. It used to sit in tier 1 and was the reason tier 1 required
+a GPU; moving it is what makes tier 1 runnable anywhere, at the price that a
+tier-1-only site does not report it.
 
 Zweck's phenotypes are genuinely regions of the space, and the ordering
 replicates independently at both sites:
@@ -768,6 +786,14 @@ the PCA panel is there to settle.
 flow figure after whichever projection it drew (`trajectory_flow_pacmap.png`), so
 a field cannot be shown under the wrong axis labels.
 
+`09` also takes `--correction {none,leace,site-standardized}`, defaulting to
+**leace**, and applies the map 05 fitted at the anchor to every grid point
+*before* projecting. Site dominates this geometry at 97% neighbour purity, so an
+uncorrected flow field is substantially a picture of three hospitals charting
+differently. The map is loaded rather than refitted: each patient appears at up
+to 26 grid points, so refitting would weight the fit by whose grid is complete.
+Run `05 --save-map` first.
+
 ## Phenotypes
 
 Three systems are attached: Zweck's cardiogenic shock phenotypes over the whole
@@ -794,11 +820,21 @@ mortality ordering (I < II < III) and warns if it does not hold.
 
 ```
 output/
-  cohort/              cohort.parquet, filter_ledger.csv, phenotype_*.csv, cs_onset.parquet
-  patient_level_data/  embeddings_anchor-{24h,onset}_{SITE}.parquet  <- 1024-d vector per patient
-                       projections_anchor-{24h,onset}.parquet        <- PCA/UMAP coordinates
-  figures/anchor-*/    {pca,umap}_{site,phenotype,mortality,icu_los}.png
-  tables/              model_summary.json, embedding_summary.csv
+  cohort/                    cohort.parquet, filter_ledger.csv, phenotype_*.csv,
+                             cs_onset.parquet, token_prevalence_*.csv,
+                             trial_patient_anchor-*.parquet
+  patient_level_data_<SITE>/ LOCAL ONLY -- embeddings_anchor-{24h,onset}.parquet
+  upload_to_box_<SITE>/      THE ONE DIRECTORY A SITE SENDS
+  patient_level_data/        the coordinating site's own pool:
+                             projections_anchor-*.parquet
+                             corrections/anchor-*_{leace,site-standardized}.npz
+  figures/<model>/anchor-*/  {pca,umap,pacmap}_{site,phenotype,shock_type,
+                             mortality,icu_los,seymour_phenotype,tok_map,
+                             sofa_non_cv,elig,trial_fit,concordance,...}.png
+                 corrected-<method>/   the identical set, site effect removed
+                 trajectory/           09's flow fields
+  tables/<model>/            model_summary.json, phenotype_purity.csv,
+                             neighbourhood_purity_anchor-*.csv, site_*.csv
   logs/
 ```
 
@@ -808,9 +844,11 @@ Box-synced tree — they are large and regenerable.
 
 ## Multiple sites
 
-Each site runs 01 and 02 against its own data and produces one embedding file
-per anchor; 03 globs them, so pooling is a file copy rather than a merge step.
-Raw CLIF data never moves. The full procedure, including what the transfer needs
+Each site runs 01, and 02 if its agreement permits, against its own data; 03
+reads the received bundles, so pooling is a file copy rather than a merge step.
+Raw CLIF data never moves. Three sites are configured (UCMC, NU, RUSH), which
+is exactly `MAX_PLOTTED_SITES` — a fourth needs the scatter panels faceted into
+small multiples first. The full procedure, including what the transfer needs
 by way of IRB/DUA cover, is in [docs/ADDING_A_SITE.md](docs/ADDING_A_SITE.md).
 
 Phenotypes are fit once on the derivation cohort and saved to

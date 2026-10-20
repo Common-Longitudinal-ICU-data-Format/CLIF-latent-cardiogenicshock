@@ -55,6 +55,7 @@ from clifcs.palette import (
     HIGHLIGHT,
     INK_PRIMARY,
     INK_SECONDARY,
+    husl_colors,
     mortality_colors,
     phenotype_colors,
     shock_type_colors,
@@ -62,7 +63,9 @@ from clifcs.palette import (
     site_colors,
     SURFACE,
 )
+from clifcs.export import contract
 from clifcs.phenotype import PHENOTYPES
+from clifcs.sepsis_phenotype import BHAVANI_LABELS, SEYMOUR_LABELS
 from clifcs.shock_type import SHOCK_TYPES
 
 DPI = 500
@@ -370,6 +373,93 @@ def plot_categorical_facets(
     figure.suptitle(title, x=0.01, ha="left", fontsize=9, color=INK_PRIMARY)
     # axes are unlabelled on purpose: the units of a neighbour-graph projection
     # are arbitrary, and six repeated axis labels crowd out the panel titles
+    figure.supxlabel(
+        f"{xlabel} / {ylabel}  -- axes shared, scales arbitrary",
+        x=0.01, ha="left", fontsize=7, color=INK_SECONDARY,
+    )
+    figure.tight_layout(rect=(0, 0, 1, 0.97))
+    save_figure(figure, out_path)
+    plt.close(figure)
+
+
+def plot_boolean_facets(
+    frame: pl.DataFrame,
+    x: str,
+    y: str,
+    columns_to_plot: list[tuple[str, str]],
+    title: str,
+    xlabel: str,
+    ylabel: str,
+    out_path: pathlib.Path,
+    columns: int = 3,
+    colour: str | None = None,
+) -> None:
+    """
+    one panel per boolean COLUMN, rather than per category of one column
+
+    `plot_categorical_facets` facets a single column by its levels. The trial
+    questions are not shaped like that: eligibility, fit and concordance are one
+    boolean per trial, so there are eight or nine columns and each has the same
+    two levels. Faceting by level would give two panels; what is wanted is one
+    panel per trial, with the cohort as grey context behind the patients the
+    flag is true for.
+
+    Each panel reports n and the share, and a column that is entirely null --
+    which happens for trials whose concordance has no table behind it at this
+    site -- gets a panel saying so rather than an empty one that reads as "no
+    patient qualified". Those are different statements and the distinction
+    matters here: "not ascertainable" is a data-availability finding and
+    "nobody qualified" is a result.
+    """
+    present = [(c, label) for c, label in columns_to_plot if c in frame.columns]
+    if not present:
+        return
+    rows = int(np.ceil(len(present) / columns))
+    figure, axes = plt.subplots(
+        rows, columns, figsize=(2.55 * columns, 2.75 * rows), squeeze=False
+    )
+
+    xs = np.asarray(frame[x].to_list())
+    ys = np.asarray(frame[y].to_list())
+    size = _marker_size(frame.height)
+
+    for position, (column, label) in enumerate(present):
+        ax = axes[position // columns][position % columns]
+        series = frame[column]
+        if series.null_count() == frame.height:
+            ax.scatter(
+                xs, ys, s=size * 0.8, c=CONTEXT, linewidths=0,
+                rasterized=True, zorder=1,
+            )
+            ax.set_title(
+                f"{label}\nnot ascertainable here", loc="left", pad=5,
+                fontsize=8, color=INK_SECONDARY,
+            )
+        else:
+            mask = np.asarray(series.fill_null(False).cast(pl.Boolean).to_list())
+            ax.scatter(
+                xs[~mask], ys[~mask], s=size * 0.8, c=CONTEXT, linewidths=0,
+                rasterized=True, zorder=1,
+            )
+            ax.scatter(
+                xs[mask], ys[mask], s=size * 1.6, c=colour or HIGHLIGHT,
+                linewidths=0, alpha=0.85, rasterized=True, zorder=2,
+            )
+            share = mask.sum() / max(len(mask), 1)
+            ax.set_title(
+                f"{label}\nn={int(mask.sum()):,} ({share:.1%})", loc="left",
+                pad=5, fontsize=8,
+            )
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_aspect("equal", adjustable="datalim")
+        for side in ("top", "right", "bottom", "left"):
+            ax.spines[side].set_visible(False)
+
+    for position in range(len(present), rows * columns):
+        axes[position // columns][position % columns].axis("off")
+
+    figure.suptitle(title, x=0.01, ha="left", fontsize=9, color=INK_PRIMARY)
     figure.supxlabel(
         f"{xlabel} / {ylabel}  -- axes shared, scales arbitrary",
         x=0.01, ha="left", fontsize=7, color=INK_SECONDARY,
@@ -798,6 +888,175 @@ def analyse_anchor(paths, anchor: str, args, logger) -> pl.DataFrame:
             log=True,
         )
 
+        # ---------------------------------------------- the sepsis phenotypes
+        #
+        # Restricted to the coded-septic denominator, which is what the two
+        # schemes were assigned on. Drawn against the whole cohort as grey
+        # context so the reader can see how small that denominator is -- it is
+        # 20-27% of the cohort and differs between sites, which is the weakest
+        # part of both schemes and is invisible if only the labelled patients
+        # are plotted.
+        for column, labels, scheme in (
+            ("seymour_phenotype", SEYMOUR_LABELS, "Seymour 2019 alpha/beta/gamma/delta"),
+            ("bhavani_phenotype", BHAVANI_LABELS, "Bhavani 2022 group A-D"),
+        ):
+            if column not in frame.columns:
+                continue
+            if frame[column].null_count() == frame.height:
+                logger.info(f"  {column}: entirely null, no panel drawn")
+                continue
+            plot_categorical_facets(
+                frame,
+                x,
+                y,
+                column,
+                [(label, label) for label in labels],
+                f"{base}\nby sepsis phenotype ({scheme}); grey is the rest of the cohort",
+                xlabel,
+                ylabel,
+                figure_home / f"{key}_{column}.png",
+                columns=4,
+                colors=husl_colors(labels),
+            )
+
+        # ------------------------------------------ the downstream task labels
+        #
+        # `__eligible` matters as much as `__label`. "Did not develop X" and
+        # "was already on X at the anchor, so the question does not arise" are
+        # different, and colouring the second as a negative would make the
+        # sickest patients look like the well ones. Ineligible patients are
+        # dropped to grey context instead.
+        for task, pretty in (
+            ("new_imv_24h", "new invasive ventilation within 24 h"),
+            ("pressor_escalation_24h", "vasopressor escalation within 24 h"),
+        ):
+            label_column = f"{task}__label"
+            eligible_column = f"{task}__eligible"
+            if label_column not in frame.columns:
+                continue
+            usable = frame
+            if eligible_column in frame.columns:
+                usable = frame.filter(pl.col(eligible_column).fill_null(False))
+            if usable.height == 0 or usable[label_column].null_count() == usable.height:
+                logger.info(f"  {label_column}: nothing to plot")
+                continue
+            plot_categorical(
+                usable.filter(pl.col(label_column).is_not_null()),
+                x,
+                y,
+                label_column,
+                mortality_colors(),
+                [(False, "no"), (True, "yes")],
+                f"{base}\ncoloured by {pretty}\n"
+                f"(eligible patients only: n={usable.height:,})",
+                xlabel,
+                ylabel,
+                figure_home / f"{key}_{task}.png",
+                rng,
+            )
+
+        # ------------------------------------------------ physiology and SOFA
+        #
+        # MAP is the ordinal rank of the token bin the model actually read, not
+        # a pressure in mmHg -- the measured value does not cross a site
+        # boundary. The bin edges are the tokenizer's and so are identical at
+        # every site, which is what makes the ranks comparable without anyone
+        # agreeing on anything. Ten steps is also about what a colour ramp can
+        # resolve, so nothing is lost by it being a rank.
+        for column, label, pretty in (
+            ("tok_map", "MAP decile bin (0-9)", "mean arterial pressure, as the model read it"),
+            ("sofa_non_cv", "non-cardiovascular SOFA", "non-cardiovascular SOFA at the anchor"),
+        ):
+            if column not in frame.columns:
+                continue
+            usable = frame.filter(pl.col(column).is_not_null())
+            if usable.height == 0:
+                logger.info(f"  {column}: entirely null, no panel drawn")
+                continue
+            plot_continuous(
+                usable,
+                x,
+                y,
+                column,
+                f"{base}\ncoloured by {pretty}",
+                xlabel,
+                ylabel,
+                label,
+                figure_home / f"{key}_{column}.png",
+                rng,
+            )
+
+        # ------------------------------------------------------- the trials
+        #
+        # Three different questions about the same eight trials, kept apart
+        # because they are easy to conflate:
+        #
+        #   eligible     would the trial have enrolled this patient? A boolean
+        #                from the published criteria, and a SUPERSET -- the
+        #                criteria nobody can evaluate here are dropped rather
+        #                than failed.
+        #   inside IQR   do they sit inside every published interquartile
+        #                range, i.e. do they resemble who it actually enrolled?
+        #                Eligibility is a threshold and admits a far wider
+        #                range than a trial ends up containing, so these two
+        #                panels disagreeing is the finding rather than a bug.
+        #   concordant   was the recommended treatment delivered? Read each
+        #                trial's own direction: for the negative device trials
+        #                "concordant" means the device was WITHHELD.
+        trial_keys = sorted(
+            c.removeprefix(contract.TRIAL_PREFIX)
+            for c in frame.columns
+            if c.startswith(contract.TRIAL_PREFIX)
+        )
+        if trial_keys:
+            families = (
+                (
+                    [(f"{contract.TRIAL_PREFIX}{k}", k) for k in trial_keys],
+                    "elig",
+                    "would this trial have enrolled them (a superset: "
+                    "unevaluable criteria are dropped)",
+                    None,
+                ),
+                (
+                    [(f"fit_inside_{k}", k) for k in trial_keys],
+                    "trial_fit",
+                    "inside EVERY published interquartile range -- do they "
+                    "resemble who it enrolled",
+                    None,
+                ),
+                (
+                    [(f"{contract.CONCORDANCE_PREFIX}{k}", k) for k in trial_keys],
+                    "concordance",
+                    "was the recommended treatment delivered (read each "
+                    "trial's own direction)",
+                    None,
+                ),
+            )
+            # `fit_inside_<trial>` is derived here rather than exported: it is
+            # `t1_outside_<trial> == 0`, and shipping a boolean that is a
+            # threshold on a column already travelling would be a second
+            # chance to disagree about where the threshold is.
+            derived = [
+                (pl.col(f"t1_outside_{k}") == 0).alias(f"fit_inside_{k}")
+                for k in trial_keys
+                if f"t1_outside_{k}" in frame.columns
+            ]
+            trial_frame = frame.with_columns(derived) if derived else frame
+
+            for columns_to_plot, suffix, question, colour in families:
+                plot_boolean_facets(
+                    trial_frame,
+                    x,
+                    y,
+                    columns_to_plot,
+                    f"{base}\n{question}",
+                    xlabel,
+                    ylabel,
+                    figure_home / f"{key}_{suffix}.png",
+                    columns=3,
+                    colour=colour,
+                )
+
     logger.info(f"[{anchor}] wrote 8 figures to {figure_home}")
 
     # the table view the contrast-relief rule asks for, and a record of the
@@ -829,7 +1088,21 @@ def analyse_anchor(paths, anchor: str, args, logger) -> pl.DataFrame:
             "sepsis_cohort",
             "seymour_phenotype",
             "bhavani_phenotype",
+            "sofa_non_cv",
             *sorted(c for c in frame.columns if c.startswith("tok_")),
+            # Everything the Analysis-3 panels colour by, so 07 and 11 can
+            # recolour a saved projection without re-reading a bundle. The
+            # downstream task labels carry their `__eligible` companion: "did
+            # not develop X" and "was already on X at the anchor" are different
+            # statements and pooling them inflates the denominator.
+            *sorted(
+                c
+                for c in frame.columns
+                if c.endswith(contract.LABEL_SUFFIXES)
+                or c.startswith(contract.TRIAL_PREFIX)
+                or c.startswith(contract.CONCORDANCE_PREFIX)
+                or c.startswith(contract.TRIAL_FIT_PREFIXES)
+            ),
         )
         if c in frame.columns
     ]

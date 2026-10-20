@@ -4,45 +4,44 @@
 01 -- site tier 1: everything a site can send without argument
 
 The first of two scripts that run inside a contributing institution, and the
-one every site runs. It builds the cohort, embeds it with the frozen model, and
-writes the **aggregate** bundle: patient flow, cohort sizes, the phenotype
-breakdowns, and how coherent each phenotype is in this site's own embedding
-space.
+one every site runs. It builds the cohort and writes the **aggregate** bundle:
+patient flow, cohort sizes, the phenotype breakdowns, the coded shock types,
+the trial comparison, and how differently this site charts.
 
 Nothing it exports is patient-level. Every number is a count or an average over
 at least `--min-cell` patients, so it travels under a consortium's ordinary
 terms rather than needing a patient-level data use agreement.
 
-**It still needs the GPU.** The phenotype-purity measure is the interesting part
-of tier 1 -- it answers whether the phenotypes correspond to anything the model
-sees -- and that requires the embeddings. They are computed here and stay here;
-`02_site_embeddings.py` is what exports them, and only a site whose DUA permits
-patient-level transfer runs it.
+**It does not need a GPU, and it never loads the GEM weights.** It loads the
+*tokenizer*, because the token-prevalence table is built from the token stream,
+but the model itself is not needed until `02_site_embeddings.py`. A site with no
+GPU, or with no agreement permitting patient-level transfer, runs this and
+stops -- and that is a complete contribution.
 
-Stages, each rerunnable on its own with --stage, which matters because `derive`,
-`collate` and `embed` are the slow ones:
+Stages, each rerunnable on its own with --stage, which matters because `derive`
+and `collate` are the slow ones:
 
-  cohort    identify shock, print the filter ledger, attach outcomes, coded
-            shock type, and the Zweck, Seymour and Bhavani phenotypes
-  subset    cut each site's CLIF tables down to the cohort   -> scratch/data-raw/
-  derive    clifpy: respiratory-support waterfall, dose conversion, SOFA
-  collate   cocoa collate                                   -> scratch/processed/
-  tokenize  cocoa tokenize, under the model's frozen tokenizer
-  winnow    cut each timeline at both anchors (24h, onset)
-  embed     run the frozen model                     -> output/patient_level_data/
-  purity    per-phenotype neighbour purity in GEM space      -> output/tables/
-  export    assemble the aggregate bundle                    -> output/export/
+  cohort       identify shock, print the filter ledger, attach outcomes, coded
+               shock type, and the Zweck, Seymour and Bhavani phenotypes
+  subset       cut each site's CLIF tables down to the cohort -> scratch/data-raw/
+  derive       clifpy: respiratory-support waterfall, dose conversion, SOFA
+  collate      cocoa collate                                  -> scratch/processed/
+  tokenize     cocoa tokenize, under the model's frozen tokenizer
+  winnow       cut each timeline at both anchors (24h, onset)
+  tokencounts  per-token and per-family prevalence            -> output/cohort/
+  trials       eligibility, IQR position and concordance, as aggregates
+  export       assemble the aggregate bundle           -> output/upload_to_box_<SITE>/
 
 Usage
-    python code/01_site_aggregate.py                          # all stages
-    python code/01_site_aggregate.py --stage cohort           # just the cohort
-    python code/01_site_aggregate.py --from-stage embed       # resume at the GPU
-    python code/01_site_aggregate.py --site NU --force        # redo one site
+    python code/01_site_tables.py                          # all stages
+    python code/01_site_tables.py --stage cohort           # just the cohort
+    python code/01_site_tables.py --from-stage tokencounts  # resume
+    python code/01_site_tables.py --site NU --force         # redo one site
 
 At a contributing site the three phenotype models are required, so that a label
 means the same thing everywhere:
 
-    python code/01_site_aggregate.py         --phenotype-model <...>/phenotype_model.json         --seymour-model   <...>/seymour_model.json         --bhavani-model   <...>/bhavani_model.json
+    python code/01_site_tables.py         --phenotype-model <...>/phenotype_model.json         --seymour-model   <...>/seymour_model.json         --bhavani-model   <...>/bhavani_model.json
 """
 
 from __future__ import annotations
@@ -91,11 +90,11 @@ STAGES = (
     "collate",
     "tokenize",
     "winnow",
-    # folded in from the old 02_model_embedding.py and 12_export.py: tier 1
-    # needs the embeddings to measure phenotype coherence, and the aggregate
-    # bundle is what it exists to produce
-    "embed",
-    "purity",
+    # the token stream is tokenizer-only, so the one comparison that needs no
+    # model at all -- how differently the sites chart -- belongs in tier 1.
+    # 04 draws its tornado from this table, which is why that figure now
+    # survives for a site that shares nothing patient-level.
+    "tokencounts",
     "trials",
     "export",
 )
@@ -489,125 +488,139 @@ def stage_winnow(paths, sites, logger, force: bool) -> None:
             )
 
 
-# ============================================== stage: embed, purity, export
+# ==================================================== stage: token prevalence
 
 
-def stage_embed(paths, sites, logger, force: bool, batch_size=None) -> dict:
+def stage_tokencounts(paths, sites, logger, min_cell: int) -> None:
     """
-    run the frozen model over each site x anchor
+    how often each token appears at this site, and in how many patients
 
-    Was `02_model_embedding.py`. The embeddings are written locally and stay
-    local; tier 1 needs them only to measure phenotype coherence.
+    The one cross-site comparison that needs no model: a token is a decile bin
+    fitted at training time, so the bin edges are identical at every site by
+    construction and the counts are directly comparable without anyone agreeing
+    on anything.
+
+    This is what 04's tornado reads. It used to be computed at the coordinating
+    site from the shipped token sequences, which meant the figure existed only
+    for sites that had sent them -- and 04 skipped it rather than drawing a
+    degraded version. Computing it here instead costs one pass over the stream
+    and makes the comparison available for every site, including one that
+    shares nothing patient-level at all. The site effect is the largest single
+    finding in this pipeline (97% neighbour purity), so being able to decompose
+    it into "because they chart differently" should not have been contingent on
+    a data use agreement.
+
+    Two tables per site and anchor:
+
+      token_prevalence  one row per vocabulary entry: how many patients emitted
+                        it at least once, and how many times it occurred in all
+      token_families    the same, aggregated to the ~23 families
+
+    `n_patients` is a patient count and is suppressed. `total_occurrences` is
+    suppressed with it -- it is not a patient count, but a token occurring four
+    times in one patient is as identifying as the patient count that would have
+    been blanked, and publishing it beside a blanked cell would return it.
     """
-    from clifcs import embedding
+    from clifcs.export import contract
+    from clifcs.tokens import load_pre_anchor_tokens, vocabulary
 
-    info = embedding.describe_model(paths, logger)
-    paths.table_home.mkdir(parents=True, exist_ok=True)
-    (paths.table_home / "model_summary.json").write_text(
-        json.dumps(info, indent=2), encoding="utf-8"
-    )
-
-    cohort = pl.read_parquet(paths.cohort_home / "cohort.parquet")
-    # one row per patient: the embedding plus everything needed to colour it
-    covariates = cohort.select(
-        [
-            c
-            for c in (
-                "hospitalization_id", "patient_id", "site", "cs_onset_dttm",
-                "cs_phenotype", "seymour_phenotype", "bhavani_phenotype",
-                "sepsis_cohort", "icu_los_days", "in_hospital_mortality",
-                "cardiac_origin", "shock_type", "age_at_admission",
-                "sex_category", "hours_admission_to_cs_onset",
-            )
-            if c in cohort.columns
-        ]
+    names, families = vocabulary(str(paths.tokenizer_yaml))
+    vocab = pl.DataFrame(
+        {
+            "token_id": pl.Series(list(names), dtype=pl.Int64),
+            "token_name": [names[i] for i in names],
+            "family": [families[i] for i in names],
+        }
     )
 
     for anchor in ANCHORS:
         for site in sites:
-            # patient_level_data_<SITE>/ is LOCAL ONLY -- these never leave
-            local = paths.patient_level_home_for(site)
-            local.mkdir(parents=True, exist_ok=True)
-            out = local / f"embeddings_anchor-{anchor}.parquet"
-            if out.is_file() and not force:
-                logger.info(f"[{anchor}/{site}] {out.name} exists; skipping")
-                continue
-            frame = embedding.to_embedding_frame(
-                embedding.extract_site_anchor(
-                    paths, site, anchor, batch_size, logger
-                ),
-                info["embedding_dim"],
-            )
-            frame = frame.join(
-                covariates,
-                on=["hospitalization_id", "site"],
-                how="inner",
-                validate="1:1",
-            )
-            frame.write_parquet(out)
-            logger.info(
-                f"[{anchor}/{site}] wrote {frame.height} patient embeddings "
-                f"({info['embedding_dim']}-d) -> {out.name}"
-            )
-    return info
-
-
-def stage_purity(paths, sites, logger, min_cell: int) -> pl.DataFrame:
-    """
-    how coherent each phenotype is in this site's embedding space
-
-    The substantive thing tier 1 reports beyond counts, and the reason tier 1
-    needs the GPU: it answers whether the phenotypes correspond to anything the
-    model sees, per phenotype, from this site's own patients -- and it returns
-    scalars, so no embedding has to move to answer it.
-    """
-    from clifcs.purity import phenotype_purity
-
-    # The labels are joined from the cohort table rather than read off the
-    # embedding file. An embedding file carries whichever covariates were
-    # current when it was written, so a scheme added later would be silently
-    # absent from the purity table -- which is exactly what happened when the
-    # two sepsis phenotypes landed: the measure reported three schemes instead
-    # of five and looked complete.
-    cohort = pl.read_parquet(paths.cohort_home / "cohort.parquet")
-    label_columns = [
-        c
-        for c in (
-            "cs_phenotype", "seymour_phenotype", "bhavani_phenotype",
-            "shock_type", "in_hospital_mortality",
-        )
-        if c in cohort.columns
-    ]
-    labels = cohort.select("hospitalization_id", "site", *label_columns)
-
-    frames = []
-    for anchor in ANCHORS:
-        for site in sites:
-            source = (
-                paths.patient_level_home_for(site)
-                / f"embeddings_anchor-{anchor}.parquet"
-            )
-            if not source.is_file():
+            try:
+                tokens = load_pre_anchor_tokens(paths, site, anchor)
+            except FileNotFoundError:
                 logger.warning(
-                    f"[{site}/{anchor}] no embeddings; run --stage embed first"
+                    f"[{site}/{anchor}] no winnowed stream; run --stage winnow first"
                 )
                 continue
-            frame = pl.read_parquet(source).drop(label_columns, strict=False).join(
-                labels, on=["hospitalization_id", "site"], how="left"
-            )
-            table = phenotype_purity(
-                frame, anchor, site, logger, min_cell=min_cell
-            )
-            if table.height:
-                frames.append(table)
+            n_cohort = tokens.height
+            if n_cohort == 0:
+                continue
 
-    if not frames:
-        return pl.DataFrame()
-    purity = pl.concat(frames, how="diagonal_relaxed")
-    paths.table_home.mkdir(parents=True, exist_ok=True)
-    purity.write_csv(paths.table_home / "phenotype_purity.csv")
-    logger.info(f"wrote {paths.table_home / 'phenotype_purity.csv'}")
-    return purity
+            # one row per (patient, token occurrence). ~27M rows for 34k
+            # patients at a median 783 tokens, which polars handles in one pass.
+            exploded = (
+                tokens.select("hospitalization_id", "tokens_past")
+                .explode("tokens_past")
+                .rename({"tokens_past": "token_id"})
+                .drop_nulls("token_id")
+                .with_columns(pl.col("token_id").cast(pl.Int64))
+            )
+
+            per_token = (
+                exploded.group_by("token_id")
+                .agg(
+                    n_patients=pl.col("hospitalization_id").n_unique(),
+                    total_occurrences=pl.len(),
+                )
+                .join(vocab, on="token_id", how="left")
+                .with_columns(
+                    token_name=pl.col("token_name").fill_null(
+                        pl.lit("<not in vocabulary>")
+                    ),
+                    family=pl.col("family").fill_null(pl.lit("UNKNOWN")),
+                )
+            )
+            per_family = (
+                exploded.join(vocab, on="token_id", how="left")
+                .with_columns(family=pl.col("family").fill_null(pl.lit("UNKNOWN")))
+                .group_by("family")
+                .agg(
+                    # a patient is counted once per family however many of its
+                    # tokens they emitted, so this cannot be summed from above
+                    n_patients=pl.col("hospitalization_id").n_unique(),
+                    total_occurrences=pl.len(),
+                    # NOT `n_tokens_in_family`: the `n_*` convention in this
+                    # pipeline means "a count of patients" and the suppression
+                    # check keys on it. This counts vocabulary entries, which
+                    # is a property of the tokenizer and of what this site
+                    # charts, not of any patient -- blanking it at n<11 would
+                    # hide that a family is thinly used here, which is the
+                    # finding rather than a disclosure.
+                    distinct_tokens=pl.col("token_id").n_unique(),
+                )
+                .sort("family")
+            )
+
+            for name, table in (
+                ("token_prevalence", per_token),
+                ("token_families", per_family),
+            ):
+                table = table.with_columns(
+                    n_cohort=pl.lit(n_cohort, dtype=pl.Int64),
+                    site=pl.lit(site),
+                    anchor=pl.lit(anchor),
+                )
+                # primary suppression, and `total_occurrences` goes with it
+                blank = (pl.col("n_patients") > 0) & (pl.col("n_patients") < min_cell)
+                table = table.with_columns(
+                    n_patients=pl.when(blank).then(None).otherwise(pl.col("n_patients")),
+                    total_occurrences=pl.when(blank)
+                    .then(None)
+                    .otherwise(pl.col("total_occurrences")),
+                ).with_columns(prevalence=pl.col("n_patients") / pl.col("n_cohort"))
+                suppressed = int(table.select(pl.col("n_patients").is_null().sum()).item())
+                contract.validate_counts_frame(table, name, min_cell)
+                out = paths.cohort_home / f"{name}_{site}_anchor-{anchor}.csv"
+                table.sort(
+                    "total_occurrences", descending=True, nulls_last=True
+                ).write_csv(out)
+                logger.info(
+                    f"[{site}/{anchor}] {out.name}: {table.height} rows, "
+                    f"{suppressed} suppressed below n={min_cell}"
+                )
+
+
+# ===================================================== stage: trials, export
 
 
 def stage_trials(paths, sites, logger, min_cell: int) -> None:
@@ -624,6 +637,7 @@ def stage_trials(paths, sites, logger, min_cell: int) -> None:
     """
     from clifcs import trial_aggregate
     from clifcs.concordance import add_concordance, attach_procedures, attach_severity
+    from clifcs.export import contract
     from clifcs.trials import (
         add_eligibility,
         attach_features,
@@ -670,6 +684,34 @@ def stage_trials(paths, sites, logger, min_cell: int) -> None:
         frame = attach_severity(paths, frame, logger)
         frame = add_concordance(frame, trials, logger)
 
+        # The per-patient columns, kept for 02 to export under the contract.
+        # Written here rather than recomputed there because the predicates read
+        # raw CLIF and this stage has already paid for that pass -- an earlier
+        # version had `writer.trial_eligibility` do the whole join again, which
+        # doubled the slowest site-side read for the same numbers.
+        #
+        # Only the four `t1_` statistics the contract names travel, plus
+        # eligibility and concordance. `t1_maxdist_` and the two `n_` columns
+        # stay here: nothing is coloured by them, and every continuous column
+        # widens the quasi-identifier the exported row forms.
+        per_patient = frame.select(
+            "hospitalization_id",
+            "site",
+            *[
+                c
+                for c in frame.columns
+                if c.startswith(contract.TRIAL_PREFIX)
+                or c.startswith(contract.TRIAL_FIT_PREFIXES)
+                or c.startswith(contract.CONCORDANCE_PREFIX)
+            ],
+        )
+        out = paths.cohort_home / f"trial_patient_anchor-{anchor}.parquet"
+        per_patient.write_parquet(out)
+        logger.info(
+            f"  wrote {out.name}: {per_patient.height} patients x "
+            f"{per_patient.width - 2} trial columns, for 02 to export"
+        )
+
         for site in sites:
             part = frame.filter(pl.col("site") == site)
             if part.height == 0:
@@ -689,8 +731,16 @@ def stage_trials(paths, sites, logger, min_cell: int) -> None:
         criteria.write_csv(paths.cohort_home / "trial_criteria.csv")
 
 
-def stage_export(paths, sites, logger, min_cell: int, purity) -> None:
-    """assemble the aggregate bundle each site sends"""
+def stage_export(paths, sites, logger, min_cell: int) -> None:
+    """
+    assemble the aggregate bundle each site sends
+
+    No purity here any more. Phenotype coherence in the embedding space needs
+    the embeddings, so it moved to 02 along with the rest of the GPU work --
+    which means a tier-1-only site no longer reports it. That is a real loss:
+    it was the one substantive thing tier 1 said beyond counts. It is the price
+    of tier 1 being runnable without a GPU and without an agreement.
+    """
     from clifcs.export import contract, writer
 
     logger.info(contract.describe())
@@ -709,22 +759,15 @@ def stage_export(paths, sites, logger, min_cell: int, purity) -> None:
             shutil.rmtree(bundle)
         logger.info(f"=== {site} -> {bundle}")
         writer.write_aggregate(
-            paths,
-            site,
-            bundle,
-            purity.filter(pl.col("site") == site) if purity.height else purity,
-            salt,
-            min_cell,
-            embedding_dim,
-            logger,
+            paths, site, bundle, salt, min_cell, embedding_dim, logger
         )
 
     logger.info(
         "01 done. output/upload_to_box_<SITE>/ holds summary tables only -- "
-        "aggregate, suppressed, and safe to upload. The embeddings stay in "
-        "output/patient_level_data_<SITE>/ and are never shared. Run "
-        "02_site_embeddings.py only if your consortium permits patient-level "
-        "transfer."
+        "aggregate, suppressed, and safe to upload. No GPU was needed and the "
+        "GEM weights were never loaded. Run 02_site_embeddings.py only if your "
+        "consortium permits patient-level transfer; without it this bundle is "
+        "already a complete contribution."
     )
 
 
@@ -779,13 +822,6 @@ def main() -> None:
         "cohort stage without the three --*-model flags",
     )
     parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=None,
-        help="embedding batch size; 8 fits an 8 GB card, drop to 2-4 on CUDA "
-        "OOM (output_hidden_states keeps every layer)",
-    )
-    parser.add_argument(
         "--min-cell",
         type=int,
         default=11,
@@ -806,7 +842,7 @@ def main() -> None:
         )
         if path
     }
-    logger = get_logger("01_site_aggregate", paths.log_home / "01_site_aggregate.log")
+    logger = get_logger("01_site_tables", paths.log_home / "01_site_tables.log")
 
     # ------------------------------------------------------------------
     # Refusing to refit by accident.
@@ -892,18 +928,12 @@ def main() -> None:
         stage_tokenize(paths, sites, logger, args.force)
     if "winnow" in todo:
         stage_winnow(paths, sites, logger, args.force)
-    if "embed" in todo:
-        stage_embed(paths, sites, logger, args.force, args.batch_size)
-
-    # purity feeds the export, so it is recomputed when either stage runs rather
-    # than read back from disk -- a stale table would be exported silently
-    purity = pl.DataFrame()
-    if "purity" in todo or "export" in todo:
-        purity = stage_purity(paths, sites, logger, args.min_cell)
+    if "tokencounts" in todo:
+        stage_tokencounts(paths, sites, logger, args.min_cell)
     if "trials" in todo:
         stage_trials(paths, sites, logger, args.min_cell)
     if "export" in todo:
-        stage_export(paths, sites, logger, args.min_cell, purity)
+        stage_export(paths, sites, logger, args.min_cell)
     else:
         logger.info("01 done")
 

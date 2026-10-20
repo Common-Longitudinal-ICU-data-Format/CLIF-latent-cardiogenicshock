@@ -50,7 +50,7 @@ from scipy.ndimage import gaussian_filter
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
-from clifcs import get_logger, load_paths
+from clifcs import ANCHORS, get_logger, load_paths
 from clifcs.config import CONFIG_HOME
 from clifcs.grid_winnower import GridWinnower
 from clifcs.figures import key_string, quantile_colour, save_figure
@@ -419,6 +419,176 @@ def cell_coherence(frame: pl.DataFrame, x: str, y: str, bins: int = 26) -> float
     return float(
         np.median(np.hypot(sum_x[ok], sum_y[ok]) / np.maximum(sum_speed[ok], 1e-9))
     )
+
+
+def apply_correction(paths, frame: pl.DataFrame, method: str, anchor: str, logger):
+    """
+    put every grid point through the affine map 05 fitted on the anchor rows
+
+    The site effect dominates this geometry -- 97% of a patient's neighbours in
+    the anchor space carry their own site -- so a flow field drawn on raw
+    embeddings is substantially a picture of three hospitals charting
+    differently, with the motion of interest underneath it. Correcting first is
+    what makes the remaining displacement readable as physiology.
+
+    THE ORDER MATTERS AND IS EASY TO GET WRONG. The map is affine on the
+    1024-d embedding, so it has to be applied before the projection: correcting
+    PaCMAP coordinates instead would be applying a linear map to a non-linear
+    embedding of the thing that actually needed correcting, which is
+    meaningless. PCA is therefore refit downstream, on corrected vectors.
+
+    The map is LOADED, not refitted. 05 fits it on one row per patient at the
+    anchor; refitting here would fit it on up to 26 rows per patient and weight
+    the result by whose grid is complete, and the map would then change with
+    every change to the grid.
+
+    Read the result with 04 in mind. The sites separate because each emits
+    token types the others never do, so an affine map closes the linear channel
+    rather than making the representations exchangeable -- 05 reports a
+    non-linear probe that still recovers site after LEACE has driven the linear
+    one to chance. "Site effect removed" means removed to first order.
+    """
+    if method == "none":
+        return frame
+
+    from clifcs.correction import AffineCorrection
+
+    source = (
+        paths.patient_level_home / "corrections" / f"anchor-{anchor}_{method}.npz"
+    )
+    if not source.is_file():
+        raise FileNotFoundError(
+            f"{source} not found. Fit and save it first:\n"
+            f"    python code/05_site_correction.py --anchor {anchor} --save-map\n"
+            "09 deliberately does not fit its own: the map has to be the one "
+            "measured at the anchor, or the correction is not the one 05 "
+            "reports numbers for."
+        )
+    correction = AffineCorrection.load(source)
+    columns = sorted(c for c in frame.columns if c.startswith("emb_"))
+    x = frame.select(columns).to_numpy().astype(np.float64)
+    sites = np.asarray(frame["site"].to_list())
+    corrected = correction.apply(x, sites)
+    logger.info(
+        f"applied the {correction.name} map from {source.name} to "
+        f"{frame.height:,} grid points ({len(columns)}-d)"
+    )
+    return pl.concat(
+        [
+            frame.select([c for c in frame.columns if not c.startswith("emb_")]),
+            pl.from_numpy(
+                corrected.astype(np.float32),
+                schema=[f"emb_{i:04d}" for i in range(corrected.shape[1])],
+            ),
+        ],
+        how="horizontal",
+    )
+
+
+#: the two readings of "cardiogenic shock", drawn side by side
+#:
+#: They disagree, and which one is right is the question rather than a detail.
+#: The coded label is what a clinician concluded; `cardiac_origin` is what was
+#: done to the patient -- an inotrope, a mechanical support device, or a
+#: troponin over 500 ng/L near onset. The repository prefers measurement to
+#: coding everywhere else, and the coded cardiogenic rate differs 2.5x between
+#: UCMC and NU, so a figure drawn on the code alone is partly a figure about
+#: documentation habit.
+#:
+#: Drawn with identical bins and an identical low-count mask so the two panels
+#: are comparable. They also overlap heavily, so the intersection is reported:
+#: these are not two independent pieces of evidence.
+CS_DEFINITIONS = (
+    (
+        "coded",
+        "ICD-coded cardiogenic shock (R57.0)",
+        # exactly "cardiogenic", so `mixed` is excluded. A mixed patient does
+        # carry a cardiogenic code, but their trajectory may be driven by the
+        # other mechanism, and mixed is the deadliest group at 43.3% -- folding
+        # it in would move the field for a reason that is not cardiogenic.
+        pl.col("shock_type") == "cardiogenic",
+    ),
+    (
+        "cardiac_origin",
+        "cardiac origin by treatment or troponin",
+        pl.col("cardiac_origin").fill_null(False),
+    ),
+)
+
+
+def plot_cardiogenic_flow(frame, px, py, home, paths, args, logger) -> None:
+    """
+    the headline figure: latent flow for cardiogenic shock, by Zweck phenotype
+
+    One flow field per definition of cardiogenic shock, over a scatter coloured
+    by Zweck phenotype. The field is pooled over all cardiogenic patients
+    rather than drawn once per phenotype: at 26x26 bins a per-phenotype field
+    would hold roughly a third as many displacement vectors per cell, and the
+    tails of the cloud would be mostly empty cells rather than mostly arrows.
+    Colouring the scatter answers where the phenotypes sit; a faceted field
+    would answer whether they move differently, and does not have the sample
+    size to.
+    """
+    available = [
+        (key, label, expression)
+        for key, label, expression in CS_DEFINITIONS
+        if set(expression.meta.root_names()) <= set(frame.columns)
+    ]
+    if not available:
+        logger.warning("no cardiogenic definition is computable here")
+        return
+
+    selected = {}
+    for key, label, expression in available:
+        part = frame.filter(expression)
+        n_patients = part["hospitalization_id"].n_unique()
+        selected[key] = set(part["hospitalization_id"].unique().to_list())
+        if n_patients < 200:
+            logger.warning(
+                f"  {key}: only {n_patients} patients, too few for a flow field"
+            )
+            continue
+        logger.info(
+            f"  {key}: {n_patients:,} patients, {part.height:,} patient-timepoints"
+        )
+        plot_flow(
+            part,
+            px,
+            py,
+            home / f"trajectory_flow_cardiogenic_{key}.png",
+            f"{paths.model_key}: latent flow, {label}",
+            f"{n_patients:,} patients, mean observed displacement between "
+            f"consecutive {args.step_hours:g}h timepoints; cells with <5 "
+            "vectors blank",
+            logger,
+            labels=proj_labels(),
+        )
+        phenotyped = part.filter(pl.col("cs_phenotype").is_not_null())
+        if phenotyped.height:
+            plot_scatter(
+                phenotyped,
+                px,
+                py,
+                "cs_phenotype",
+                phenotype_colors(),
+                list(PHENOTYPES),
+                f"{paths.model_key}: {label}, by Zweck phenotype",
+                "",
+                home / f"trajectory_cardiogenic_{key}_phenotype.png",
+                logger,
+            )
+
+    # The two definitions are not independent evidence; say how much they share
+    if len(selected) == 2:
+        a, b = list(selected)
+        overlap = selected[a] & selected[b]
+        union = selected[a] | selected[b]
+        logger.info(
+            f"  the two definitions overlap on {len(overlap):,} patients "
+            f"({len(overlap) / max(len(union), 1):.1%} of their union): "
+            f"{a} {len(selected[a]):,}, {b} {len(selected[b]):,}. They are two "
+            "readings of one cohort, not two independent findings."
+        )
 
 
 def attach_state(paths, frame: pl.DataFrame, logger) -> pl.DataFrame:
@@ -901,6 +1071,23 @@ def main() -> None:
         help="which projection the figures are drawn in; all are computed and "
         "saved regardless",
     )
+    parser.add_argument(
+        "--correction",
+        choices=("none", "leace", "site-standardized"),
+        default="leace",
+        help="apply an affine site correction to every grid point before "
+        "projecting. Defaults to leace: site dominates this geometry at 97%% "
+        "neighbour purity, so an uncorrected flow field is substantially a "
+        "picture of the hospitals. The map is loaded from the one 05 fitted "
+        "at the anchor -- run 05 --save-map first. `none` draws the raw field.",
+    )
+    parser.add_argument(
+        "--correction-anchor",
+        choices=ANCHORS,
+        default="onset",
+        help="which anchor's fitted map to apply; onset matches the grid, "
+        "which is centred on cs_onset_dttm",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
@@ -926,8 +1113,12 @@ def main() -> None:
 
     frame = load_grid(paths, args, logger)
     cohort = pl.read_parquet(paths.cohort_home / "cohort.parquet").select(
+        # shock_type and cardiac_origin are the two readings of "cardiogenic
+        # shock" the headline figure is drawn for; without them it silently
+        # had nothing to filter on
         "hospitalization_id", "cs_phenotype", "in_hospital_mortality",
         "icu_los_days", "admission_dttm", "cs_onset_dttm",
+        "shock_type", "cardiac_origin",
     )
     frame = frame.join(cohort, on="hospitalization_id", how="inner")
 
@@ -941,9 +1132,16 @@ def main() -> None:
         )
         + pl.col("offset_hours")
     )
+    frame = apply_correction(
+        paths, frame, args.correction, args.correction_anchor, logger
+    )
     frame = project(frame, args.seed, logger)
 
+    # Corrected runs write beside the raw ones rather than over them, so the
+    # pair can be compared. Same reasoning as 03's corrected-<method>/.
     home = paths.figure_home / "trajectory"
+    if args.correction != "none":
+        home = home / f"corrected-{args.correction}"
     home.mkdir(parents=True, exist_ok=True)
 
     px, py = proj_cols()
@@ -971,6 +1169,10 @@ def main() -> None:
               "the same field in a linear space, where distances are metric — "
               f"a cross-check on the {proj_labels()[0].rsplit('-', 1)[0]} field",
               logger, labels=("PC1", "PC2"))
+
+    # The figure this analysis exists for
+    logger.info("cardiogenic shock flow, both definitions:")
+    plot_cardiogenic_flow(frame, px, py, home, paths, args, logger)
 
     for survived, name in ((False, "died"), (True, "survived")):
         part = frame.filter(pl.col("in_hospital_mortality") != survived)

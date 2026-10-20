@@ -15,31 +15,31 @@ Job scripts referenced here are in [`hpc/`](../hpc/).
 
 ---
 
-## Only one stage needs a GPU
+## The GPU is tier 2 only
 
-`01_site_aggregate.py` runs ten stages. Exactly one of them, `embed`, touches
-the GPU:
+**Tier 1 never loads the GEM weights.** `01_site_tables.py` runs nine stages,
+all CPU. It loads the frozen *tokenizer*, which is a different file. Only
+`02_site_embeddings.py` touches the GPU, and only a site with a patient-level
+agreement runs it at all.
 
-| stage | resource | what it does |
-|---|---|---|
-| `cohort` | CPU | reads raw CLIF, applies the shock definition, applies the phenotype models |
-| `subset` | CPU, I/O | writes cohort-restricted CLIF to scratch |
-| `derive` | CPU, **RAM** | clifpy: respiratory waterfall, dose conversion, SOFA. pandas-based, so the memory high-water mark of the whole pipeline |
-| `collate` | CPU, I/O | cocoa collate |
-| `tokenize` | CPU | cocoa tokenize under the frozen tokenizer |
-| `winnow` | CPU | cut each timeline at both anchors |
-| **`embed`** | **GPU** | the frozen model |
-| `purity` | CPU | neighbour purity in GEM space |
-| `trials` | CPU | trial eligibility — reads raw CLIF again |
-| `export` | CPU | assemble the bundle |
+| script | stage | resource | what it does |
+|---|---|---|---|
+| 01 | `cohort` | CPU | reads raw CLIF, applies the shock definition and the phenotype models |
+| 01 | `subset` | CPU, I/O | writes cohort-restricted CLIF to scratch |
+| 01 | `derive` | CPU, **RAM** | clifpy: respiratory waterfall, dose conversion, SOFA. pandas-based, so the memory high-water mark of the whole pipeline |
+| 01 | `collate` | CPU, I/O | cocoa collate |
+| 01 | `tokenize` | CPU | cocoa tokenize under the frozen tokenizer |
+| 01 | `winnow` | CPU | cut each timeline at both anchors |
+| 01 | `tokencounts` | CPU | per-token and per-family prevalence — the tornado's data |
+| 01 | `trials` | CPU | eligibility, IQR fit, concordance — reads raw CLIF again |
+| 01 | `export` | CPU | assemble the tier-1 bundle |
+| 02 | **`embed`** | **GPU** | the frozen model |
+| 02 | `purity` | CPU | neighbour purity in GEM space |
+| 02 | `export` | CPU | redact to the contract, add `patient/` and `purity/` |
 
-Running the whole thing in one GPU allocation works and wastes most of it.
-The split in `hpc/` is four jobs: CPU up to `winnow`, GPU for `embed`, CPU
-from `purity` on, and a last tiny CPU job for tier 2.
-
-`02_site_embeddings.py` needs **no GPU and almost no time** — it imports no
-torch, and on the 34,142-patient UCMC+NU cohort it completed in three
-seconds. It reads the tokenized sequences the `winnow` stage already wrote.
+The split in `hpc/` follows that line exactly: jobs 01–03 are tier 1 and ask for
+no GPU, jobs 04–05 are tier 2. A site that stops after job 03 has made a
+complete contribution.
 
 ---
 
@@ -341,7 +341,7 @@ preflight names each one and what it costs:
 
 ---
 
-## The run, in four jobs
+## The run, in five jobs plus one
 
 ### Job 1 — cohort, then STOP
 
@@ -378,11 +378,31 @@ The `derive` stage is the memory peak — clifpy is pandas-based. If it is
 OOM-killed, raise `--mem` before anything else; the stages are resumable, so
 `--from-stage derive` picks up where it stopped.
 
-### Job 3 — embed (GPU)
+### Job 3 — tier 1: token counts, trials, export (CPU)
 
 ```bash
-sbatch hpc/03_embed.sbatch
+sbatch hpc/03_tier1.sbatch
 ```
+
+Produces `output/upload_to_box_RUSH/`. Aggregate, small-cell suppressed at
+`--min-cell 11`. **This is the tier 1 deliverable — send this directory.**
+No GPU was used and the GEM weights were never loaded.
+
+The `tokencounts` stage is new: it counts how often each token appears here,
+which is what `04_site_effect.py` draws its tornado from. That comparison used
+to need the token sequences and so existed only for sites that shared them.
+
+If Rush is also sending tier 2, jobs 4 and 5 add `purity/` and `patient/` to
+this same directory rather than making a second one.
+
+### Job 4 — embed (GPU, TIER 2)
+
+```bash
+sbatch hpc/04_embed.sbatch
+```
+
+**This is the first point at which the GEM weights are loaded.** Do not submit
+it unless the IRB approval and DUA cover patient-level transfer.
 
 **Raise the batch size.** The default `--batch-size 8` is sized for an 8 GB
 card. On a 40 GB A100 start at 32 and drop if you see CUDA OOM —
@@ -399,29 +419,62 @@ Sequence lengths from the same run, for context on truncation: median 234
 tokens, p90 920, max 18,711, with 1.1% of patients exceeding the 4,096 limit
 and truncated keeping the most recent tokens.
 
-### Job 4 — purity, trials, export (CPU)
+### Job 5 — purity and export (CPU, TIER 2)
 
 ```bash
-sbatch hpc/04_export.sbatch
+sbatch --export=ALL,I_HAVE_CONFIRMED_THE_DUA=yes hpc/05_tier2.sbatch
 ```
 
-Produces `output/upload_to_box_RUSH/`. Aggregate, small-cell suppressed at
-`--min-cell 11`. **This is the tier 1 deliverable — send this directory.** If
-Rush is also sending tier 2, job 5 adds `patient/` to this same directory
-rather than making a second one.
+Adds `purity/` and `patient/` to `output/upload_to_box_RUSH/`, roughly 45 MB
+per 10,000 patients. **That one directory is then the whole deliverable** --
+tier 1 and tier 2 together, nothing else leaves.
 
-### Job 5 — tier 2, only if the DUA is in place
-
-```bash
-sbatch --export=ALL,I_HAVE_CONFIRMED_THE_DUA=yes hpc/05_embeddings.sbatch
-```
-
-Adds `patient/` to `output/upload_to_box_RUSH/`, roughly 45 MB per 10,000
-patients. **That one directory is then the whole deliverable** -- tier 1 and
-tier 2 together, nothing else leaves.
+`purity` is the phenotype-coherence measure. It used to sit in tier 1 and was
+the reason tier 1 needed a GPU; it is here now, which is why a tier-1-only site
+does not report it.
 
 Not de-identified. Move it under the same approval you would use to share
 patient-level clinical data.
+
+### Job 6 — trajectories (GPU), only where sites are co-located
+
+```bash
+python code/05_site_correction.py --anchor onset --save-map
+sbatch hpc/06_trajectories.sbatch
+```
+
+**Not part of the federated tiers.** This runs only where several sites' CLIF
+extracts sit on the same filesystem; it pools them directly and sends nothing,
+so no export contract applies to it.
+
+It embeds every patient at 26 grid points around shock onset -- roughly 26x the
+work of job 4, which is why the walltime is 24 h and why it is resumable: the
+extract stage skips grid points whose output already exists, so a job that runs
+out of time can simply be resubmitted. The grid embeddings are the largest thing
+this pipeline writes and go to `scratch_home`, not to `output/`.
+
+05 must run with `--save-map` first. 09 applies that map to every grid point
+*before* projecting -- the map is affine on the 1024-d embedding, so correcting
+PaCMAP coordinates instead would be meaningless -- and it deliberately does not
+fit its own, because refitting on the grid would weight the fit by whose grid is
+complete.
+
+The figures it exists for are the two readings of cardiogenic shock side by
+side, with the PaCMAP scatter coloured by Zweck phenotype:
+
+```
+output/figures/<model>/trajectory/corrected-leace/
+  trajectory_flow_cardiogenic_coded.png              ICD R57.0
+  trajectory_flow_cardiogenic_cardiac_origin.png     inotrope / MCS / troponin
+  trajectory_cardiogenic_coded_phenotype.png
+  trajectory_cardiogenic_cardiac_origin_phenotype.png
+```
+
+Both panels use identical bins and the same low-count mask, so they are
+comparable; the log reports how far the two definitions overlap, because they
+are two readings of one cohort rather than two independent findings. Add
+`--export=ALL,CORRECTION=none` for the uncorrected field, which lands in a
+different directory and does not overwrite it.
 
 ---
 
@@ -429,9 +482,17 @@ patient-level clinical data.
 
 ```bash
 python code/03_embedding_analysis.py --role pooled
-python code/11_trial_alignment.py   --role pooled
+python code/04_site_effect.py        --role pooled   # the tornado, from counts/
+python code/05_site_correction.py    --role pooled --save-map
+python code/03_embedding_analysis.py --role pooled --corrected leace
+python code/11_trial_alignment.py    --role pooled
 python code/12_trial_fit_outcomes.py                 # fit-score outcomes
 ```
+
+No GPU and no re-embedding: sites ship the vectors. Running 03 twice is
+deliberate — the second pass redraws the identical panel set from 05's affine
+output into `figures/<model>/anchor-<a>/corrected-leace/`, so every colouring
+can be read raw and corrected side by side.
 
 Two things to check the moment Rush is in, both of which can invalidate the
 pooled picture rather than merely complicate it:
