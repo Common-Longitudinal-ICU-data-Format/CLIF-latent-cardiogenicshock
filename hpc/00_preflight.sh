@@ -22,7 +22,10 @@ cd "$(dirname "$0")/.."
 # which is the wrong thing to do to a login shell you are only using to
 # check config. Activate the venv if it is where _common.sh expects it,
 # otherwise fall back to whatever python is on PATH.
-VENV_HOME="${VENV_HOME:-$HOME/venvs/clif-cs}"
+# Keep this in step with hpc/_common.sh. It is duplicated rather than
+# sourced because _common.sh does a module purge, which is the wrong
+# thing to do to a login shell.
+VENV_HOME="${VENV_HOME:-/gpfs/data/pearson-lab/PERSONAL/hhieromnimon/venvs/clif-cs}"
 if [ -f "$VENV_HOME/bin/activate" ]; then
     # shellcheck disable=SC1091
     source "$VENV_HOME/bin/activate"
