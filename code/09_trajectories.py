@@ -31,6 +31,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import os
 import pathlib
 import shutil
 import sys
@@ -140,6 +141,39 @@ def grid_home(paths, site: str, offset: float, subset: str = "all") -> pathlib.P
 # =============================================================== extraction
 
 
+def _clear_datasets_cache(logger) -> None:
+    """
+    drop the HuggingFace `datasets` cache for the grid point just finished
+
+    Safe because nothing reads it. The transform cotorra maps is a closure, so
+    the fingerprint changes every call and `datasets` rebuilds from scratch
+    regardless of what is on disk -- the cache is write-only by construction.
+
+    Failures are logged and swallowed: a cache that could not be cleared is a
+    disk-space problem for the next grid point, not a reason to lose the
+    embeddings this one just produced.
+    """
+    cache = os.environ.get("HF_DATASETS_CACHE")
+    if not cache:
+        return
+    home = pathlib.Path(cache)
+    if not home.is_dir():
+        return
+    freed = 0
+    for child in home.iterdir():
+        try:
+            if child.is_dir():
+                freed += sum(f.stat().st_size for f in child.rglob("*") if f.is_file())
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                freed += child.stat().st_size
+                child.unlink()
+        except OSError as exc:
+            logger.warning(f"could not clear {child.name} from the datasets cache: {exc}")
+    if freed:
+        logger.info(f"  cleared {freed / 2**30:.1f} GiB of datasets cache")
+
+
 def extract_grid(paths, args, logger) -> None:
     """winnow and embed every patient at every grid point"""
     from clifcs.tokens import SPLITS as TOKEN_SPLITS  # noqa: F401
@@ -238,6 +272,22 @@ def extract_grid(paths, args, logger) -> None:
             # the raw shards are large and fully regenerable
             for f in destination.glob("features-*.parquet"):
                 f.unlink()
+
+            # AND the datasets cache, which is the thing that actually fills the
+            # disk. cotorra maps a closure, so `datasets` cannot fingerprint the
+            # transform, warns that it "will consider it to be different from
+            # the previous calls and recompute everything", and writes a fresh
+            # build every single time. The cache is therefore never once read
+            # back -- every lookup misses by construction -- and it accumulates
+            # about a gigabyte per grid point.
+            #
+            # clifcs.config already redirects it out of the home directory into
+            # scratch, which fixed where it lands and not how much of it there
+            # is: 119 GB over four days killed an earlier run at grid point 23
+            # of 26, and this one died at 28 shards of 78 with 28.6 GB of cache
+            # against 0.68 GB of actual output. Bounding it to one grid point is
+            # what makes 09 runnable on a normal disk.
+            _clear_datasets_cache(logger)
     logger.info(f"extraction done (embedding dim {info['embedding_dim']})")
 
 
