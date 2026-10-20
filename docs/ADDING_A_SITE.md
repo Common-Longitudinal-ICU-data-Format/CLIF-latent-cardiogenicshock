@@ -84,8 +84,15 @@ to run if its vocabulary size does not match the model's.
 
 ```bash
 git clone <repo> && cd CLIF-latent-cardiogenicshock
-python -m venv ~/venvs/clif-cs              # NOT on a synced or networked drive
+# Python 3.11+ is required. `python` is 3.6 on many clusters, and `venv` will
+# build a 3.6 environment silently -- then the install fails on
+# cocoa-tokenizer (requires_python >=3.11) with an error that says nothing
+# about versions. Check first; if it is too old, `uv python install 3.11`
+# gives you one without root.
+python3 --version
+python3 -m venv ~/venvs/clif-cs             # NOT on a synced or networked drive
 source ~/venvs/clif-cs/bin/activate         # Windows: ~/venvs/clif-cs/Scripts/activate
+python --version                            # must say 3.11 or newer
 
 # TIER 1 -- about 200 MB. No torch, no CUDA, no GPU. If your site is
 # sending tier 1 only, this is the whole install and you are done.

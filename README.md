@@ -172,8 +172,28 @@ line of `cotorra` pulls torch, transformers, datasets, lightgbm, optuna,
 xgboost and wandb, which is where the 15 GB comes from — and tier 1 never loads
 the model, so it is in `requirements-embed.txt` and nowhere else.
 
+**Check your interpreter first.** `python` on a cluster is often 3.6, and
+`python -m venv` will build a 3.6 venv without complaint — then the install
+fails on `cocoa-tokenizer` (`requires_python >=3.11`) and leaves you an empty
+venv whose error says nothing about versions:
+
 ```bash
-python -m venv .venv            # NOT in $HOME on a cluster: tier 2 needs 10-15 GB
+python3 --version                     # need 3.11 or newer
+```
+
+If it is too old, get one without root using [uv](https://astral.sh/uv):
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+uv python install 3.11
+PY=$(uv python find 3.11)             # an absolute path to a 3.11 interpreter
+```
+
+Then build the venv **from that interpreter** and check it before installing:
+
+```bash
+"${PY:-python3}" -m venv .venv        # NOT in $HOME on a cluster if you need tier 2
+.venv/bin/python --version            # must say 3.11+ -- stop here if it does not
 .venv/bin/pip install -r requirements-site.txt
 ```
 
