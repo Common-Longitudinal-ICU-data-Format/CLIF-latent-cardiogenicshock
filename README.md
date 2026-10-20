@@ -16,8 +16,11 @@ the coordinating site pools whichever bundles arrive.
   data. Frozen, eval mode, under `torch.inference_mode()`.
 - **Representation** — the final hidden state at the last token before the
   anchor. One 1024-d vector per patient per anchor (`24h`, `onset`).
-- **Sites** — configured in `code/config/paths.yaml`. Adding one needs no code
-  change; see [docs/ADDING_A_SITE.md](docs/ADDING_A_SITE.md).
+- **Sites** — three contribute: UCMC, NU and Rush. **Each builds its own
+  cohort** from its own records using the identical definition; nothing is
+  pooled until the coordinating site combines the bundles. Configured in
+  `code/config/paths.yaml`; adding one needs no code change, see
+  [docs/ADDING_A_SITE.md](docs/ADDING_A_SITE.md).
 
 ## The three analyses
 

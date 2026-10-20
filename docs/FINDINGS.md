@@ -3,10 +3,16 @@
 Written for: the analyst or reviewer reading the output, and anyone deciding
 what to believe from it.
 
-The substantive results, with their caveats. Numbers are from the UCMC + NU
-two-site run (34,142 patients) unless stated otherwise; Rush was not yet
-included. How the cohort and labels are defined is in [COHORT.md](COHORT.md),
-how to run it in the [README](../README.md).
+The substantive results, with their caveats. How the cohort and labels are
+defined is in [COHORT.md](COHORT.md), how to run it in the
+[README](../README.md).
+
+**Which sites these numbers cover.** Each site builds its own cohort and
+nothing is pooled until the coordinating site combines the bundles — so every
+number below belongs to a particular set of sites. Unless stated otherwise,
+these are from a pooled run over **UCMC (9,135) and NU (25,007)**. Rush's
+cohort (5,677) is built and has not been pooled into them, so none of the
+figures here include it yet.
 
 **Read the site effect first.** It conditions everything below it.
 

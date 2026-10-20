@@ -8,6 +8,31 @@ embeddings are anchored, and the plotting conventions. The *results* are in
 [FINDINGS.md](FINDINGS.md); how to run any of it is in the
 [README](../README.md).
 
+## There is no single cohort
+
+**Each site builds its own**, from its own records, using the identical
+definition below. Nothing is pooled until the coordinating site combines the
+bundles, and a site that sends tier 1 only is never pooled at all.
+
+Three sites contribute:
+
+| site | cohort | notes |
+|---|---:|---|
+| UCMC | 9,135 | |
+| NU | 25,007 | |
+| RUSH | 5,677 | from a 26,435-patient base cohort |
+
+So "the cohort" in any table below means whichever sites that table was
+computed over, and it is worth checking which. The tables in this file and in
+[FINDINGS.md](FINDINGS.md) come from a pooled **UCMC + NU** run of 34,142
+patients; Rush's cohort is built and not yet pooled into them.
+
+That distinction is not pedantic. Composition differs substantially between
+sites -- cardiogenic shock is coded on 13.5% of UCMC's cohort, 9.6% of Rush's
+and 5.3% of NU's -- so a pooled percentage is a weighted average over three
+different documentation practices, weighted by nothing more principled than how
+many patients each hospital happens to contribute.
+
 ---
 
 ## Cohort definition

@@ -794,9 +794,9 @@ def main() -> None:
     parser.add_argument(
         "--phenotype-model",
         default=None,
-        help="apply a phenotype model fitted elsewhere (cohort/phenotype_model.json) "
-        "instead of refitting; required at a site that cannot pool its labs with "
-        "the derivation cohort",
+        help="apply a phenotype model fitted elsewhere instead of the one in "
+        "models/. Rarely needed: models/phenotype_model.json is applied by "
+        "default, which is what a contributing site wants",
     )
     # The sepsis phenotype systems transfer the same way, and for the same
     # reason: a site that refits gets its own four clusters and "beta" stops
@@ -859,12 +859,44 @@ def main() -> None:
     # So refitting is now something you ask for. The derivation site passes
     # --refit-phenotypes and means it; everyone else gets an error naming the
     # files they should be passing instead.
-    needs_cohort = args.stage in ("all", "cohort") or args.from_stage == "cohort"
+    # Whether the COHORT STAGE will actually run, which is not the same as what
+    # --stage says. `--from-stage` overrides `--stage`, but `--stage` keeps its
+    # default of "all" -- so the old test (`args.stage in ("all", "cohort")`)
+    # was true for every --from-stage invocation and refused
+    # `--from-stage subset` for missing phenotype flags that stage never reads.
+    if args.from_stage:
+        needs_cohort = "cohort" in STAGES[STAGES.index(args.from_stage):]
+    else:
+        needs_cohort = args.stage in ("all", "cohort")
     transferred = (
         args.phenotype_model or args.seymour_model or args.bhavani_model
     )
+    # The shipped models are the default. They are in git, under models/, and
+    # applying them is what every contributing site should do -- so making the
+    # three flags mandatory bought nothing except an invocation long enough to
+    # get mangled, which is exactly what happened at Rush: a shell ate the
+    # flags, the cohort stage refit its own clusters, and the only sign was the
+    # word "refit" in one log line among warnings that looked like findings.
+    #
+    # Defaulting to them is strictly safer than erroring. Refitting is still
+    # something you have to ask for with --refit-phenotypes.
+    models_home = pathlib.Path(__file__).resolve().parent.parent / "models"
     if needs_cohort and not transferred and not args.refit_phenotypes:
-        models_home = pathlib.Path(__file__).resolve().parent.parent / "models"
+        shipped = {
+            "phenotype_model": models_home / "phenotype_model.json",
+            "seymour_model": models_home / "seymour_model.json",
+            "bhavani_model": models_home / "bhavani_model.json",
+        }
+        missing = [str(p) for p in shipped.values() if not p.is_file()]
+        if not missing:
+            for attr, path in shipped.items():
+                setattr(args, attr, str(path))
+            transferred = True
+            logger.info(
+                "applying the phenotype models shipped in models/ -- pass "
+                "--refit-phenotypes to fit new ones on this cohort instead"
+            )
+    if needs_cohort and not transferred and not args.refit_phenotypes:
         parser.error(
             "the cohort stage would REFIT the phenotype models on this "
             "cohort, which is only correct at the derivation site. Refitting "
