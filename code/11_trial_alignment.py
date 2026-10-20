@@ -518,10 +518,27 @@ def plot_trajectory_distance(paths, frame, trials, regions, cfg, out_path,
     the figure would otherwise be drawn from a different set of patients than
     everything else here.
     """
-    path = paths.patient_level_home / "trajectory_projections.parquet"
-    if not path.is_file():
+    # 09 suffixes its output on a corrected run, and corrected is its default,
+    # so look for both. The raw file is preferred when both exist because the
+    # rest of this script works in the uncorrected space and mixing the two in
+    # one figure set would be the kind of difference nobody notices.
+    candidates = [
+        paths.patient_level_home / "trajectory_projections.parquet",
+        *sorted(
+            paths.patient_level_home.glob(
+                "trajectory_projections_corrected-*.parquet"
+            )
+        ),
+    ]
+    path = next((c for c in candidates if c.is_file()), None)
+    if path is None:
         logger.info("  09 has not been run; skipping the trajectory figure")
         return False
+    if "corrected-" in path.name:
+        logger.info(
+            f"  using {path.name}: 09 was run with a site correction, so this "
+            "figure is in the corrected space while the rest of 11 is not"
+        )
 
     trajectory = pl.read_parquet(path)
     cohort_ids = set(frame["hospitalization_id"].to_list())

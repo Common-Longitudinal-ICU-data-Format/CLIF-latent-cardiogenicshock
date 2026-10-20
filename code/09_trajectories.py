@@ -1232,7 +1232,18 @@ def main() -> None:
         "hospitalization_id", "site", "offset_hours", "last_valid",
         "cs_phenotype", "in_hospital_mortality",
         "umap_1", "umap_2", "pacmap_1", "pacmap_2", "pca_1", "pca_2",
-    ).write_parquet(paths.patient_level_home / "trajectory_projections.parquet")
+    # Suffixed on a corrected run, so it never overwrites the raw one. 11 reads
+    # the unsuffixed file for its trajectory figure; a corrected run silently
+    # replacing it would re-draw that figure in a different space without
+    # anything in 11 saying so. Same reasoning as 03's corrected-<method>/.
+    ).write_parquet(
+        paths.patient_level_home
+        / (
+            f"trajectory_projections_corrected-{args.correction}.parquet"
+            if args.correction != "none"
+            else "trajectory_projections.parquet"
+        )
+    )
     logger.info("09 done")
 
 
