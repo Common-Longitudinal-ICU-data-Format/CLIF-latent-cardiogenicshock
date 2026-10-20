@@ -159,48 +159,94 @@ source "$VENV_HOME/bin/activate"
 
 python -m pip install --upgrade pip
 
-# Order matters. cotorra depends on torch/torchvision/torchaudio WITHOUT
-# pins, so installing requirements.txt after the CUDA wheels would quietly
-# pull CPU-only builds from PyPI over the top of them. Requirements first,
-# CUDA torch second, and never the other way round.
-python -m pip install -r requirements.txt
-python -m pip install \
-    torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 \
-    --index-url https://download.pytorch.org/whl/cu121
+# WHICH TIER. Default is `site`, which is the 200 MB CPU-only set every
+# contributing site needs and nothing more. Only pass `embed` or `all` if this
+# machine is actually running 02_site_embeddings.py -- that is where the 10-15
+# GB and the GPU requirement come from, because one line of cotorra pulls
+# torch, transformers, datasets, lightgbm, optuna, xgboost and wandb.
+#
+#   sbatch --export=ALL,TIER=embed  hpc/00_setup_env.sbatch
+#
+#   site    tier 1 only. No torch, no CUDA, no GPU.          requirements-site.txt
+#   embed   tier 1 + tier 2. Needs a GPU to be useful.       requirements-embed.txt
+#   pooled  the coordinating analysis. No torch.             requirements-pooled.txt
+#   all     every role on one machine.                       requirements.txt
+TIER="${TIER:-site}"
+case "$TIER" in
+    site)   REQUIREMENTS=requirements-site.txt   ; NEEDS_TORCH=0 ;;
+    embed)  REQUIREMENTS=requirements-embed.txt  ; NEEDS_TORCH=1 ;;
+    pooled) REQUIREMENTS=requirements-pooled.txt ; NEEDS_TORCH=0 ;;
+    all)    REQUIREMENTS=requirements.txt        ; NEEDS_TORCH=1 ;;
+    *)      echo "TIER must be one of: site embed pooled all (got '$TIER')" >&2
+            exit 1 ;;
+esac
+echo " tier     $TIER  ->  $REQUIREMENTS"
+
+python -m pip install -r "$REQUIREMENTS"
+
+# Order matters for the torch tiers. cotorra depends on
+# torch/torchvision/torchaudio WITHOUT pins, so installing the requirements
+# after the CUDA wheels would quietly pull CPU-only builds over the top of
+# them. Requirements first, CUDA torch second, and never the other way round.
+if [ "$NEEDS_TORCH" = "1" ]; then
+    python -m pip install \
+        torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 \
+        --index-url https://download.pytorch.org/whl/cu121
+fi
 
 echo
 echo "--- verification ---"
-python - <<'PY'
+TIER="$TIER" python - <<'PY'
+import importlib
+import os
 import sys
-import torch
 
-print(f"  torch              {torch.__version__}")
-print(f"  cuda available     {torch.cuda.is_available()}")
-
+tier = os.environ.get("TIER", "site")
 problems = []
-if "+cu" not in torch.__version__:
-    problems.append(
-        f"torch {torch.__version__} is a CPU build. Something reinstalled it "
-        "over the cu121 wheels -- rerun the two pip install lines in order."
-    )
-if not torch.cuda.is_available():
-    # NOT a failure here. This job runs on a CPU partition by design, so no
-    # device is the expected answer and says nothing about the install. The
-    # assertion lives at the top of 04_embed.sbatch, which is the only job
-    # that needs a card -- and a site running tier 1 only never needs one.
-    print("  (no CUDA device -- expected on a CPU node; 04_embed asserts it)")
-else:
-    print(f"  gpu                {torch.cuda.get_device_name(0)}")
-    print(f"  vram               "
-          f"{torch.cuda.get_device_properties(0).total_memory / 2**30:.1f} GiB")
 
-# the pinned stack, which is what makes embeddings comparable between sites
-for name in ("cocoa_tokenizer", "cotorra", "transformers", "polars", "clifpy"):
+# --- always: what tier 1 cannot run without
+BASE = ("cocoa_tokenizer", "clifpy", "polars", "duckdb", "omegaconf", "sklearn")
+EXTRA = {
+    "site":   (),
+    "embed":  ("cotorra", "transformers", "accelerate"),
+    "pooled": ("matplotlib", "umap", "pacmap", "statsmodels"),
+    "all":    ("cotorra", "transformers", "accelerate",
+               "matplotlib", "umap", "pacmap", "statsmodels"),
+}[tier]
+
+for name in BASE + EXTRA:
     try:
-        module = __import__(name)
+        module = importlib.import_module(name)
         print(f"  {name:<18} {getattr(module, '__version__', 'ok')}")
     except ImportError as exc:
         problems.append(f"{name} did not import: {exc}")
+
+# --- torch, only for the tiers that installed it
+if tier in ("embed", "all"):
+    try:
+        import torch
+    except ImportError as exc:
+        problems.append(f"torch did not import: {exc}")
+    else:
+        print(f"  torch              {torch.__version__}")
+        print(f"  cuda available     {torch.cuda.is_available()}")
+        if "+cu" not in torch.__version__:
+            problems.append(
+                f"torch {torch.__version__} is a CPU build. Something "
+                "reinstalled it over the cu121 wheels -- rerun the two pip "
+                "install lines in order."
+            )
+        if torch.cuda.is_available():
+            print(f"  gpu                {torch.cuda.get_device_name(0)}")
+            print("  vram               "
+                  f"{torch.cuda.get_device_properties(0).total_memory / 2**30:.1f} GiB")
+        else:
+            # NOT a failure: this job runs on a CPU partition by design. The
+            # assertion lives at the top of 04_embed.sbatch, the only job
+            # that needs a card.
+            print("  (no CUDA device -- expected on a CPU node; 04_embed asserts it)")
+else:
+    print(f"  torch              not installed (tier {tier!r} does not need it)")
 
 if problems:
     print()
@@ -208,10 +254,8 @@ if problems:
         print(f"  FAIL  {problem}")
     sys.exit(1)
 print()
-print("  environment ok")
+print(f"  environment ok for tier {tier!r}")
 PY
-
-echo
 echo "Next:  bash hpc/00_preflight.sh      (login node, checks paths.yaml)"
 echo "Then:  sbatch hpc/01_cohort.sbatch"
 echo

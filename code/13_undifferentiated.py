@@ -66,7 +66,7 @@ import polars as pl
 from omegaconf import OmegaConf
 
 from clifcs import ANCHORS, get_logger, load_cohort_cfg, load_paths
-from clifcs.embedding import site_embedding_files
+from clifcs import site_embedding_files
 from clifcs.concordance import attach_severity
 from clifcs.config import CONFIG_HOME
 from clifcs.figures import save_figure, style

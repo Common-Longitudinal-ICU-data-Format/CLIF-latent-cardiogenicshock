@@ -10,6 +10,7 @@ from clifcs.config import (
     get_logger,
     load_cohort_cfg,
     load_paths,
+    site_embedding_files,
 )
 
 # Runs on `import clifcs`, which happens at the top of every entry point.
@@ -30,4 +31,5 @@ __all__ = [
     "get_logger",
     "load_cohort_cfg",
     "load_paths",
+    "site_embedding_files",
 ]

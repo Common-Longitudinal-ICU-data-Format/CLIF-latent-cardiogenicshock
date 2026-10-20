@@ -49,7 +49,7 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
 from clifcs import ANCHORS, get_logger, load_cohort_cfg, load_paths
-from clifcs.embedding import site_embedding_files
+from clifcs import site_embedding_files
 from clifcs.correction import METHODS, fit
 from clifcs.labels import TASKS, anchor_times, baseline_features
 

@@ -34,9 +34,15 @@ cd CLIF-latent-cardiogenicshock
 python -m venv ~/venvs/clif-cs          # NOT on a synced drive
 source ~/venvs/clif-cs/Scripts/activate
 
-pip install -r requirements.txt
-pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 \
-    --index-url https://download.pytorch.org/whl/cu121
+# The pooled analysis needs NO torch: sites ship the embeddings, so
+# nothing here re-embeds. About 500 MB.
+pip install -r requirements-pooled.txt
+
+# Only if this machine ALSO contributes its own data at tier 2 -- that is
+# the 10-15 GB install, and the CUDA wheels go LAST:
+#   pip install -r requirements-embed.txt
+#   pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 \
+#       --index-url https://download.pytorch.org/whl/cu121
 
 python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 # expect: 2.5.1+cu121 True

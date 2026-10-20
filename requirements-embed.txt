@@ -1,0 +1,30 @@
+# TIER 2 -- added by a site whose agreement permits patient-level transfer.
+#
+#   pip install -r requirements-embed.txt
+#   pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 \
+#       --index-url https://download.pytorch.org/whl/cu121
+#
+# THIS IS THE BIG ONE: roughly 10-15 GB and a GPU. Install it only if you are
+# running code/02_site_embeddings.py. Tier 1 is a complete contribution and
+# needs none of it.
+#
+# INSTALL ORDER MATTERS AND IS NOT COSMETIC. cotorra depends on
+# torch/torchvision/torchaudio WITHOUT pins, so it resolves whatever is latest
+# -- currently a CUDA 13 build. Installing the cu121 wheels FIRST and this file
+# second would let cotorra pull CPU-only or mismatched builds over the top.
+# This file first, the pinned CUDA wheels second, and never the other way
+# round. Verify afterwards:
+#
+#   python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+#   # 2.5.1+cu121 True
+#
+# A bare 2.5.1 with no +cu121 means the CPU wheels won the final resolve. The
+# embedding stage will then run about twenty times slower and say nothing.
+
+-r requirements-site.txt
+
+# the extractor that runs the frozen model. Brings torch, transformers,
+# accelerate, datasets, lightgbm, optuna, xgboost and wandb with it.
+cotorra==26.6.3
+transformers==4.45.2
+accelerate==0.34.2

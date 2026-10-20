@@ -1,0 +1,24 @@
+# COORDINATING SITE -- pooling the received bundles.
+#
+#   pip install -r requirements-pooled.txt
+#
+# No torch. Under schema 3.0 sites ship the embeddings themselves, so nothing
+# here re-embeds and nothing here needs a GPU. (Schema 2.0 shipped token
+# sequences and had the coordinating site re-embed them, which is why this
+# used to require the full tier-2 stack.)
+#
+# clifpy arrives via requirements-site.txt and is not strictly needed on a
+# machine that holds no CLIF data -- it is kept so one base file serves every
+# role, which is cheaper than a fourth file.
+
+-r requirements-site.txt
+
+# --- projections and figures -------------------------------------------------
+matplotlib
+umap-learn
+pacmap
+
+# --- 12_trial_fit_outcomes.py only -------------------------------------------
+# restricted cubic splines and the adjusted models. Nothing in 01-11 imports
+# it, so a site running only the site-side stages does not need it.
+statsmodels

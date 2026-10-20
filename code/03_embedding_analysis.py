@@ -47,7 +47,7 @@ from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
 from clifcs import ANCHORS, get_logger, load_paths
-from clifcs.embedding import site_embedding_files
+from clifcs import site_embedding_files
 from clifcs.figures import key_string, save_figure
 from clifcs.palette import (
     CONTEXT,

@@ -1,71 +1,17 @@
-# Python 3.11 or newer. cotorra and cocoa-tokenizer both declare
-# requires_python >=3.11, so 3.10 is not an option; 3.12 is fine.
-#
-# Install order matters. `cotorra` depends on torch/torchvision/torchaudio
-# without pins, so a plain install pulls CPU-only PyPI wheels over a CUDA build.
-# Install this file first, then the CUDA torch stack from the pytorch index:
+# A machine doing EVERY role -- its own tier 1 and 2, plus the pooled
+# analysis. This is the coordinating institution that also contributes data,
+# and it is the only case that needs all of it.
 #
 #   pip install -r requirements.txt
 #   pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 \
 #       --index-url https://download.pytorch.org/whl/cu121
 #
-# then verify:  python -c "import torch; print(torch.cuda.is_available())"
-
-# --- the coreopsis stack, pinned to what GEM*-all was built with -------------
-cocoa-tokenizer==26.6.2
-cotorra==26.6.3
-transformers==4.45.2
-accelerate==0.34.2
-# Upstream, from PyPI. This was previously pinned to a fork
-# (burkh4rt/clifpy @ utc-fix) which NO LONGER EXISTS -- the repository 404s,
-# so that line could not be installed at a new site at all.
+# If you are a contributing site, you almost certainly want
+# requirements-site.txt instead -- about 200 MB against 10-15 GB here.
 #
-# Diffing the last installed copy of the fork against upstream v0.5.0 showed
-# it carried exactly three changes, and only one of them touched data:
-#
-#   utils/unit_converter.py   SET TimeZone = 'UTC' on the default DuckDB
-#                             connection. THE LOAD-BEARING ONE -- see
-#                             clifcs/clif.py, which now does this itself.
-#   utils/validator.py        populate atomic counts before returning on an
-#                             empty table, so DQA scoring does not choke on
-#                             None. Robustness, no effect on output.
-#   schemas/3.0/adt_schema.yaml  make room_id required. Irrelevant here and
-#                             unwanted: this pipeline reads CLIF 2.1.
-#
-# Pinned exactly, not >=. clifpy computes the respiratory-support waterfall,
-# dose conversion and SOFA -- all of which feed tokenization, and therefore
-# the embeddings. A site on a different clifpy produces derived tables that
-# differ systematically from every other site's, and that difference lands in
-# the embedding space as a site effect indistinguishable from real case mix.
-clifpy==0.5.0
+#   requirements-site.txt     tier 1. Every site. No torch, no GPU.
+#   requirements-embed.txt    tier 2. Adds cotorra and the model stack.
+#   requirements-pooled.txt   the coordinating analysis. No torch.
 
-# called directly by clifcs/clif.py for the timezone setting above; also a
-# clifpy dependency, pinned here only so the import is declared where it is used
-duckdb
-
-# --- dataframes --------------------------------------------------------------
-# polars <2: cocoa/cotorra accept 2.x but the reference implementation was
-# written against 1.x and the major version changes behaviour.
-polars>=1.36,<2
-# pandas <3: clifpy is pandas-based and not yet 3.x-clean.
-pandas>=2.2,<3
-pyarrow
-
-# --- analysis and plotting ---------------------------------------------------
-scikit-learn
-
-# 12_trial_fit_outcomes.py only: restricted cubic splines (patsy cr()) and the
-# logistic / least-squares fits of outcome against trial-fit score. Nothing
-# earlier in the pipeline imports it, so a site that only runs 01-11 does not
-# need it.
-statsmodels
-umap-learn
-# PaCMAP is what the report's 2-d panels use; umap-learn is kept so the
-# two projections can be compared. Pulls faiss-cpu for neighbour search.
-pacmap
-matplotlib
-numpy
-
-# --- config ------------------------------------------------------------------
-omegaconf
-pyyaml
+-r requirements-embed.txt
+-r requirements-pooled.txt

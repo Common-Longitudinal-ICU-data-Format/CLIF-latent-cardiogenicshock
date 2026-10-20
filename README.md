@@ -50,15 +50,18 @@ python code/clifcs/export/contract.py
 
 ## Running it
 
-Set up the environment, then copy `code/config/paths.example.yaml` to
-`paths.yaml` and fill in this machine's data directories, model and scratch
-paths.
+No cluster required. Tier 1 is a plain Python program on one machine — install
+`requirements-site.txt`, copy `code/config/paths.example.yaml` to `paths.yaml`,
+fill in this machine's data directories and scratch path, and run it.
 
-**At a contributing site:**
+**At a contributing site** — this is the whole of it:
 
 ```bash
 # tier 1 -- everyone. No GPU.
-python code/01_site_tables.py     --phenotype-model models/phenotype_model.json     --seymour-model   models/seymour_model.json     --bhavani-model   models/bhavani_model.json
+python code/01_site_tables.py \
+    --phenotype-model models/phenotype_model.json \
+    --seymour-model   models/seymour_model.json \
+    --bhavani-model   models/bhavani_model.json
 
 # tier 2 -- ONLY with a patient-level DUA in place. Needs a GPU.
 python code/02_site_embeddings.py --batch-size 8
@@ -91,19 +94,27 @@ side by side.
 Under `--role pooled`, `paths.site_data` **raises**, so a pooled run cannot read
 raw records even by mistake.
 
-**On an HPC cluster**, use the job scripts instead — jobs 01–03 are tier 1 and
-ask for no GPU, 04–05 are tier 2:
+### If you have Slurm
+
+`hpc/` holds job scripts that wrap the same commands — useful for a large
+cohort, and **optional**. They are written against one cluster's partition
+names and memory-per-CPU rules, so treat them as a worked example rather than
+something that runs unedited:
 
 ```bash
-sbatch hpc/00_setup_env.sbatch     # once
-bash   hpc/00_preflight.sh         # login node: checks paths.yaml
+bash   hpc/00_preflight.sh         # login node: checks paths.yaml resolves
 sbatch hpc/01_cohort.sbatch        # then READ output/cohort/filter_ledger.csv
-sbatch hpc/02_prepare.sbatch
-sbatch hpc/03_tier1.sbatch
+sbatch hpc/02_prepare.sbatch       # the long one: derive and collate
+sbatch hpc/03_tier1.sbatch         # finishes tier 1
 ```
 
-See [docs/RUNNING_ON_HPC.md](docs/RUNNING_ON_HPC.md) — storage layout, the
-memory-per-CPU trap, and what to check at each gate.
+Jobs 01–03 are tier 1 and ask for no GPU; 04–05 are tier 2. See
+[docs/RUNNING_ON_HPC.md](docs/RUNNING_ON_HPC.md) for the partition and storage
+notes, including the `--mem` trap.
+
+`00_preflight.sh` is worth running even without Slurm: it checks that every
+path in `paths.yaml` resolves and that each site has the 14 tables the
+pipeline reads, which is the cheapest way to catch a misconfiguration.
 
 ### Trajectories
 
@@ -143,27 +154,43 @@ drive.
 
 ## Setup
 
-Python 3.11. The pinned combination matters: `cotorra` pulls unpinned
-`torch`/`torchvision`/`torchaudio`, which will silently replace a CUDA build
-with CPU wheels.
+Python 3.11 or newer. **Install only the tier you are running** — this is the
+difference between a 200 MB install and a 15 GB one:
+
+| | install | size | needs a GPU |
+|---|---|---|---|
+| tier 1, every site | `pip install -r requirements-site.txt` | ~200 MB | no |
+| tier 2, with a DUA | `pip install -r requirements-embed.txt` | ~10–15 GB | yes |
+| coordinating site | `pip install -r requirements-pooled.txt` | ~500 MB | no |
+| all three roles | `pip install -r requirements.txt` | ~15 GB | yes |
+
+A contributing site running tier 1 needs **no torch, no CUDA and no GPU**. One
+line of `cotorra` pulls torch, transformers, datasets, lightgbm, optuna,
+xgboost and wandb, which is where the 15 GB comes from — and tier 1 never loads
+the model, so it is in `requirements-embed.txt` and nowhere else.
 
 ```bash
-python -m venv <venv>            # NOT in $HOME: this needs 10-15 GB
-<venv>/bin/python -m pip install -r requirements.txt
-<venv>/bin/python -m pip install torch==2.5.1 torchvision==0.20.1     torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu121
+python -m venv .venv            # NOT in $HOME on a cluster: tier 2 needs 10-15 GB
+.venv/bin/pip install -r requirements-site.txt
 ```
 
-Install the CUDA torch **last**, then verify it reports `2.5.1+cu121` and
-`True`:
+For tier 2, install the CUDA wheels **last** — `cotorra` leaves
+`torch`/`torchvision`/`torchaudio` unpinned, so installing them first lets it
+resolve CPU-only or mismatched builds over the top:
 
 ```bash
-<venv>/bin/python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+.venv/bin/pip install -r requirements-embed.txt
+.venv/bin/pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1     --index-url https://download.pytorch.org/whl/cu121
+.venv/bin/python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+# 2.5.1+cu121 True   <- a bare 2.5.1 means the CPU wheels won; embedding will
+#                       then be ~20x slower and say nothing
 ```
 
-The tokenizer at `GEM-weights-FL-manuscript/tokenizer.yaml` is **required** and
-must be the training-time one: the embedding table is only meaningful under that
-exact token-to-id mapping, and the decile bin edges have to be the ones the
-values were binned with during training.
+The tokenizer at `GEM-weights-FL-manuscript/tokenizer.yaml` is **required** for
+tier 1 as well as tier 2, and must be the training-time one: the embedding
+table is only meaningful under that exact token-to-id mapping, and the decile
+bin edges have to be the ones the values were binned with during training. The
+model *weights* are needed only for tier 2.
 
 ## Documentation
 

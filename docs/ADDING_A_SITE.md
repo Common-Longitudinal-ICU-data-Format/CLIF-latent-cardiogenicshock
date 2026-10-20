@@ -87,11 +87,9 @@ git clone <repo> && cd CLIF-latent-cardiogenicshock
 python -m venv ~/venvs/clif-cs              # NOT on a synced or networked drive
 source ~/venvs/clif-cs/bin/activate         # Windows: ~/venvs/clif-cs/Scripts/activate
 
-pip install -r requirements.txt
-# install CUDA torch LAST: cotorra depends on torch/torchvision/torchaudio
-# unpinned, so a plain install silently replaces a CUDA build with CPU wheels
-pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 \
-    --index-url https://download.pytorch.org/whl/cu121
+# TIER 1 -- about 200 MB. No torch, no CUDA, no GPU. If your site is
+# sending tier 1 only, this is the whole install and you are done.
+pip install -r requirements-site.txt
 
 python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 # expect: 2.5.1+cu121 True
@@ -119,7 +117,10 @@ python -c "from sys import path; path.insert(0,'code'); from clifcs import load_
 ### 3. Cohort — and check the numbers before going further
 
 ```bash
-python code/01_site_tables.py --stage cohort     --phenotype-model /path/to/phenotype_model.json     --seymour-model   /path/to/seymour_model.json     --bhavani-model   /path/to/bhavani_model.json
+python code/01_site_tables.py --stage cohort \
+    --phenotype-model /path/to/phenotype_model.json \
+    --seymour-model   /path/to/seymour_model.json \
+    --bhavani-model   /path/to/bhavani_model.json
 ```
 
 The three `--*-model` flags are **required at a contributing site**. Without

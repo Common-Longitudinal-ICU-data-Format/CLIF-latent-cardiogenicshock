@@ -45,7 +45,7 @@ from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import StandardScaler
 
 from clifcs import ANCHORS, get_logger, load_paths
-from clifcs.embedding import site_embedding_files
+from clifcs import site_embedding_files
 from clifcs.figures import save_figure
 from clifcs.palette import GRID, INK_PRIMARY, INK_SECONDARY, SURFACE, site_colors
 from clifcs.tokens import (

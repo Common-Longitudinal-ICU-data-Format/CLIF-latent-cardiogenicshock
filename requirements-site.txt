@@ -1,0 +1,51 @@
+# TIER 1 -- what every contributing site installs.
+#
+#   pip install -r requirements-site.txt
+#
+# About 200 MB. No torch, no CUDA, no GPU. This is everything
+# code/01_site_tables.py needs, and a site that will never share
+# patient-level data needs nothing else ever.
+#
+# What is deliberately NOT here is `cotorra`. One line of it pulls torch,
+# transformers, accelerate, datasets, lightgbm, optuna, xgboost and wandb --
+# 10-15 GB, two CUDA runtimes, and a GPU partition to verify. Tier 1 never
+# loads the model, so it never needs any of that. cotorra lives in
+# requirements-embed.txt, which only a site running tier 2 installs.
+#
+# Pinned exactly, not >=. clifpy computes the respiratory-support waterfall,
+# dose conversion and SOFA; cocoa tokenizes. Both feed the embeddings, so a
+# site on a different version produces derived tables that differ
+# systematically from every other site's -- and that difference lands in the
+# latent space as a site effect indistinguishable from real case mix.
+
+# the tokenizer the model was trained with. Depends on numpy, omegaconf,
+# polars, pyyaml, rich, typer -- and nothing heavier.
+cocoa-tokenizer==26.6.2
+
+# CLIF table handling and the derived tables. The UTC fix this used to need a
+# fork for is carried in clifcs/clif.py instead; see the note there.
+clifpy==0.5.0
+
+# called directly by clifcs/clif.py for the timezone setting, and a clifpy
+# dependency -- pinned here so the import is declared where it is used
+duckdb
+
+# --- dataframes --------------------------------------------------------------
+# polars <2: cocoa accepts 2.x but the reference implementation was written
+# against 1.x and the major version changes behaviour.
+polars>=1.36,<2
+# pandas <3: clifpy is pandas-based and not yet 3.x-clean.
+pandas>=2.2,<3
+pyarrow
+numpy
+
+# --- the phenotype models ----------------------------------------------------
+# k-means for the Zweck and sepsis phenotypes, and the statistics behind the
+# trial comparison. Modest -- scipy arrives as a scikit-learn dependency and is
+# listed because the code imports it directly.
+scikit-learn
+scipy
+
+# --- config ------------------------------------------------------------------
+omegaconf
+pyyaml

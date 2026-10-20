@@ -93,11 +93,21 @@ Four locations, and conflating them is the mistake that costs a rerun.
 | `VENV_HOME` | project storage — **not `$HOME`** | 10–15 GB; see below. Not scratch either: a purge mid-project is a silent breakage |
 | `PIP_CACHE_DIR` | beside the venv | several GB of wheels, and `~/.cache/pip` is the other half of the home-quota problem |
 
-### The venv does not fit in a home directory
+### The venv does not fit in a home directory -- unless you only need tier 1
 
-`pip install -r requirements.txt` pulls torch and a complete NVIDIA runtime,
-then the `cu121` line installs a second CUDA stack over the top of it. Peak
-usage is **10–15 GB**, plus several more in pip's wheel cache. A typical home
+**Install the tier you are running**, which for most sites is tier 1:
+
+```bash
+sbatch hpc/00_setup_env.sbatch                              # TIER=site, ~200 MB
+sbatch --export=ALL,TIER=embed hpc/00_setup_env.sbatch      # ~10-15 GB, needs a GPU
+```
+
+Tier 1 is CPU-only and about **200 MB** — it will fit anywhere, including a
+home directory. The size problem belongs entirely to tier 2: one line of
+`cotorra` in `requirements-embed.txt` pulls torch, transformers, datasets,
+lightgbm, optuna, xgboost and wandb, and the `cu121` line then installs a
+second CUDA stack over the top of the first. Peak usage is **10–15 GB**, plus
+several more in pip's wheel cache. A typical home
 quota is smaller than that, and the failure is nasty rather than clean: pip
 gets most of the way through, dies with `[Errno 122] Disk quota exceeded`, and
 leaves a venv that activates fine and imports about half of what it needs. A
@@ -238,13 +248,17 @@ that happens; `python --version` inside the venv is the tell.
 ### Install order is load-bearing
 
 `cotorra` depends on `torch`, `torchvision` and `torchaudio` without version
-pins, so installing `requirements.txt` after the CUDA wheels silently pulls
+pins, so installing `requirements-embed.txt` after the CUDA wheels silently pulls
 CPU-only builds over the top of them. Requirements first, CUDA torch second:
 
 ```bash
-pip install -r requirements.txt
-pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1     --index-url https://download.pytorch.org/whl/cu121
+pip install -r requirements-embed.txt
+pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 \
+    --index-url https://download.pytorch.org/whl/cu121
 ```
+
+This applies to tier 2 only. `requirements-site.txt` contains no torch,
+so the ordering question does not arise for a site running tier 1.
 
 The failure is quiet: a CPU-only torch runs `embed` perfectly correctly and
 about twenty times slower, with nothing to say so beyond `torch.__version__`
@@ -255,8 +269,8 @@ Match the CUDA wheel to the module. If the cluster has CUDA 12.4 and no
 backward-compatible within a major version -- but prefer the matching index
 (`cu124`) when one exists.
 
-`statsmodels` is in `requirements.txt` for `12_trial_fit_outcomes.py`, a
-pooled-side script. A site running only `01` and `02` does not need it.
+`statsmodels` is in `requirements-pooled.txt` for `12_trial_fit_outcomes.py`.
+A site running only `01` and `02` never installs it.
 
 ### Configure
 
