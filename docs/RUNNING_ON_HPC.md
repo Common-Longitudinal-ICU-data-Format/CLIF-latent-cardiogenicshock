@@ -84,13 +84,38 @@ alone is a complete contribution.
 
 ## Storage: the part HPC gets wrong
 
-Three locations, and conflating them is the mistake that costs a rerun.
+Four locations, and conflating them is the mistake that costs a rerun.
 
 | | where | why |
 |---|---|---|
 | `scratch_home` | fast parallel scratch | ~40× the raw table size, fully regenerable, **purgeable** |
 | `output_home` | project/persistent storage | the bundle, the logs, and the salt. **Never on purgeable scratch** |
-| the venv | home or project | not on scratch — a purge mid-project is a silent breakage |
+| `VENV_HOME` | project storage — **not `$HOME`** | 10–15 GB; see below. Not scratch either: a purge mid-project is a silent breakage |
+| `PIP_CACHE_DIR` | beside the venv | several GB of wheels, and `~/.cache/pip` is the other half of the home-quota problem |
+
+### The venv does not fit in a home directory
+
+`pip install -r requirements.txt` pulls torch and a complete NVIDIA runtime,
+then the `cu121` line installs a second CUDA stack over the top of it. Peak
+usage is **10–15 GB**, plus several more in pip's wheel cache. A typical home
+quota is smaller than that, and the failure is nasty rather than clean: pip
+gets most of the way through, dies with `[Errno 122] Disk quota exceeded`, and
+leaves a venv that activates fine and imports about half of what it needs. A
+later run then reports `Requirement already satisfied` for broken packages.
+
+`VENV_HOME` and `PIP_CACHE_DIR` both default to project storage in
+[`hpc/_common.sh`](../hpc/_common.sh). If you move the venv, **delete the
+failed one first** — reusing a half-populated venv is how the breakage
+survives a rebuild:
+
+```bash
+rm -rf ~/venvs/clif-cs ~/.cache/pip
+quota -s                      # or: lfs quota -h $HOME
+```
+
+The HuggingFace `datasets` cache is already redirected to `scratch_home` by
+[`clifcs/config.py`](../code/clifcs/config.py), so that one is not a third
+place to remember.
 
 ### The salt is the one unrecoverable file
 

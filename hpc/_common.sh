@@ -35,8 +35,13 @@
 # Normally already resolved by the job script, from SLURM_SUBMIT_DIR,
 # before it sourced this file. The default below is only for sourcing
 # _common.sh by hand in an interactive shell.
-REPO_HOME="${REPO_HOME:-$HOME/CLIF-latent-cardiogenicshock}"
-VENV_HOME="${VENV_HOME:-$HOME/venvs/clif-cs}"
+REPO_HOME="${REPO_HOME:-/gpfs/data/pearson-lab/PERSONAL/hhieromnimon/CLIF-latent-cardiogenicshock}"
+# NOT $HOME. The dependency set is 10-15 GB -- torch, a full NVIDIA runtime,
+# and the cu121 wheels that replace it -- which exceeds a normal home quota.
+# Installing there fails as [Errno 122] Disk quota exceeded somewhere in the
+# middle of pip, leaving a venv that looks built and imports about half of
+# what it needs.
+VENV_HOME="${VENV_HOME:-/gpfs/data/pearson-lab/PERSONAL/hhieromnimon/venvs/clif-cs}"
 # PYTHON_MODULE is EMPTY BY DEFAULT, and on Rush CRI it should stay that
 # way. The cluster has python/3.10.5 and python/3.12.3, and Lmod answers
 # "exist but cannot be loaded as requested" for both -- they sit behind a

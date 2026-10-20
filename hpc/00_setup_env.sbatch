@@ -59,7 +59,13 @@ set -euo pipefail
 PYTHON_MODULE="${PYTHON_MODULE:-}"
 # The interpreter the venv is created FROM. Must be 3.11 or newer.
 BOOTSTRAP_PYTHON="${BOOTSTRAP_PYTHON:-python3}"
-VENV_HOME="${VENV_HOME:-$HOME/venvs/clif-cs}"
+VENV_HOME="${VENV_HOME:-/gpfs/data/pearson-lab/PERSONAL/hhieromnimon/venvs/clif-cs}"
+# Where pip keeps downloaded wheels. Defaults NEXT TO THE VENV rather than to
+# ~/.cache/pip, because the two together are what exhaust a home quota: this
+# install is torch plus a full NVIDIA stack, and it lands twice (see the
+# install-order note below), so the cache alone runs to several GB.
+PIP_CACHE_DIR="${PIP_CACHE_DIR:-$(dirname "$VENV_HOME")/pip-cache}"
+export PIP_CACHE_DIR
 # ------------------------------------------------------------------------
 
 # `$(dirname "$0")` DOES NOT WORK IN A BATCH JOB. Slurm copies the script
@@ -93,6 +99,7 @@ echo "=============================================================="
 echo " node     $(hostname)"
 echo " python   $(command -v "$BOOTSTRAP_PYTHON")  $("$BOOTSTRAP_PYTHON" --version 2>&1)"
 echo " venv     $VENV_HOME"
+echo " pip cache $PIP_CACHE_DIR"
 echo "=============================================================="
 
 "$BOOTSTRAP_PYTHON" - <<'PY'
@@ -112,9 +119,38 @@ if sys.version_info < (3, 11):
 print(f"  python version ok ({sys.version.split()[0]})")
 PY
 
+# A home directory is the wrong place for this and the failure is ugly: pip
+# installs most of a 10+ GB dependency set, hits [Errno 122] Disk quota
+# exceeded somewhere in the middle, and leaves a venv that looks built and
+# imports about half of what it needs.
+case "$VENV_HOME" in
+    "$HOME"/*)
+        echo "=================================================================="
+        echo "WARNING: the venv is going into your HOME directory."
+        echo "  $VENV_HOME"
+        echo ""
+        echo "This install needs roughly 10-15 GB: torch, a full NVIDIA runtime,"
+        echo "and the cu121 wheels that replace it. Home quotas are usually far"
+        echo "smaller than that, and the failure mode is [Errno 122] Disk quota"
+        echo "exceeded part-way through, leaving a venv that looks built and"
+        echo "imports about half of what it needs."
+        echo ""
+        echo "Put it on project or scratch storage instead -- set VENV_HOME in"
+        echo "hpc/_common.sh, or pass it per job:"
+        echo ""
+        echo "  sbatch --export=ALL,VENV_HOME=/project/path/venvs/clif-cs hpc/00_setup_env.sbatch"
+        echo ""
+        echo "Check what you have:  quota -s     (or: lfs quota -h \$HOME)"
+        echo "=================================================================="
+        ;;
+esac
+
 if [ -d "$VENV_HOME" ]; then
     echo "note: $VENV_HOME already exists; reusing it."
     echo "      delete it first if you want a clean build."
+    echo "      REUSING A VENV THAT FAILED PART-WAY IS NOT SAFE -- a quota or"
+    echo "      network failure leaves it half-populated, and pip will report"
+    echo "      'Requirement already satisfied' for packages that are broken."
 else
     "$BOOTSTRAP_PYTHON" -m venv "$VENV_HOME"
 fi
