@@ -293,8 +293,33 @@ def site_embedding_files(patient_level_home, anchor: str) -> list:
     collaborating site rather than from this machine. 03 already did this; the
     other four scripts dropped share-safe files unconditionally and so would
     have ignored a remote site that could only ship the redacted form.
+
+    TWO LAYOUTS ARE SEARCHED, because the pipeline writes one and the pooling
+    scripts were written against the other:
+
+      patient_level_data/<model>/embeddings_anchor-<a>_<SITE>.parquet
+          the flat pool. How a received bundle is staged, and what every
+          pooling script globbed for.
+
+      patient_level_data_<SITE>/<model>/embeddings_anchor-<a>.parquet
+          where 02_site_embeddings.py actually writes, one directory per site
+          so that what may leave the institution is obvious from the name.
+
+    Searching only the first meant that on a machine which had just run 02 --
+    a contributing site that also pools, which is the normal case for the
+    coordinating institution -- 03 found nothing, warned, and returned an empty
+    frame. An empty frame reads exactly like "no site has contributed yet".
     """
     import pathlib
+
+    home = pathlib.Path(patient_level_home)
+    # `output/patient_level_data/<model>` -> `output/` and `<model>`
+    output_home, model_key = home.parent.parent, home.name
+    per_site = sorted(
+        output_home.glob(
+            f"patient_level_data_*/{model_key}/embeddings_anchor-{anchor}.parquet"
+        )
+    )
 
     found = sorted(
         pathlib.Path(patient_level_home).glob(
@@ -317,11 +342,26 @@ def site_embedding_files(patient_level_home, anchor: str) -> list:
             "102,426."
         )
     unredacted = {p.name for p in found if "_share-safe" not in p.name}
-    return [
+    flat = [
         p
         for p in found
         if "_share-safe" not in p.name
         or p.name.replace("_share-safe", "") not in unredacted
+    ]
+
+    # A site present in both layouts is the same site twice. The flat copy wins:
+    # it is how a received bundle is staged, so if both exist the flat one is
+    # the deliberate act and the per-site one is this machine's own working
+    # copy of the same patients.
+    flat_sites = {
+        p.stem.split(f"embeddings_anchor-{anchor}_", 1)[-1].replace("_share-safe", "")
+        for p in flat
+    }
+    return flat + [
+        p
+        for p in per_site
+        # patient_level_data_<SITE> -> <SITE>
+        if p.parent.parent.name.split("patient_level_data_", 1)[-1] not in flat_sites
     ]
 
 

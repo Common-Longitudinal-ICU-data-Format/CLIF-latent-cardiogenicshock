@@ -634,12 +634,48 @@ def _load_anchor_local(paths, anchor: str, logger) -> pl.DataFrame:
         )
         return pl.DataFrame()
 
+    # `tok_*`, `fam_n_*`, the trial columns and the downstream labels are joined
+    # on at export time, not written by 02's embed stage -- so a local
+    # embedding file carries none of them, and every panel coloured by MAP,
+    # SOFA, trial eligibility, trial fit or concordance was silently skipped
+    # because the guards test for column presence. `attach_labels` is the
+    # assembly half of the export, reused here so a local run colours by the
+    # same things a pooled one does. Redaction is NOT reused: this machine's
+    # own analysis wants the real age and the real record number.
+    cohort_for_labels = None
+    cohort_file = paths.cohort_home / "cohort.parquet"
+    if cohort_file.is_file():
+        cohort_for_labels = pl.read_parquet(cohort_file)
+
     frames = []
     for source in sources:
         part = pl.read_parquet(source)
         missing = [c for c in REQUIRED_COVARIATES if c not in part.columns]
         if missing:
             raise KeyError(f"{source.name} is missing required columns {missing}")
+
+        site = str(part["site"].unique().to_list()[0])
+        if cohort_for_labels is not None and site in paths.sites:
+            try:
+                from clifcs.export import writer
+
+                enriched, _ = writer.attach_labels(
+                    paths,
+                    cohort_for_labels,
+                    site,
+                    anchor,
+                    logger,
+                    eligibility=writer.trial_columns(paths, anchor, site, logger),
+                )
+                gained = len(set(enriched.columns) - set(part.columns))
+                part = enriched
+                logger.info(f"[{anchor}/{site}] attached {gained} label column(s)")
+            except (FileNotFoundError, KeyError) as exc:
+                logger.warning(
+                    f"[{anchor}/{site}] could not attach the export labels "
+                    f"({exc}); panels coloured by them will be skipped"
+                )
+
         logger.info(
             f"[{anchor}] {part.height:>6} patients from {source.name} "
             f"({part['site'].unique().to_list()})"

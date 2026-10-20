@@ -131,17 +131,26 @@ def age_bands(frame: pl.DataFrame) -> pl.Expr:
     )
 
 
-def build_patient_frame(
+def attach_labels(
     paths,
     cohort: pl.DataFrame,
     site: str,
     anchor: str,
-    salt: str,
     logger,
     eligibility: pl.DataFrame | None = None,
 ) -> tuple[pl.DataFrame, pl.DataFrame]:
     """
     one row per patient: embedding, ordered token bins, labels and outcomes
+
+    **No redaction.** This is the assembly half of the export, factored out
+    because the pooled scripts need the same columns and were not getting them.
+
+    `tok_*`, `fam_n_*`, the trial columns and the downstream labels are all
+    joined on here rather than written by 02's embed stage, so a locally
+    produced `patient_level_data_<SITE>/embeddings_anchor-*.parquet` does not
+    carry any of them. That meant 03 under `--role site` silently skipped every
+    panel coloured by MAP, SOFA, trial eligibility, trial fit or concordance --
+    the guards are on column presence, so the figures just did not appear.
 
     Returns the frame and the per-variable token coverage table. Raises if the
     embeddings for this site and anchor have not been produced yet.
@@ -195,7 +204,6 @@ def build_patient_frame(
             on=["hospitalization_id", "site"],
             how="left",
         )
-        .with_columns(age_bands(embeddings), row_keys(embeddings, salt))
     )
     if eligibility is not None and eligibility.height:
         frame = frame.join(eligibility, on="hospitalization_id", how="left")
@@ -227,6 +235,34 @@ def build_patient_frame(
             f"  no {label_file.name}; run 06_downstream_tasks.py site-side "
             "first if the pooled analysis needs the prediction labels"
         )
+
+    return frame, token_coverage
+
+
+def build_patient_frame(
+    paths,
+    cohort: pl.DataFrame,
+    site: str,
+    anchor: str,
+    salt: str,
+    logger,
+    eligibility: pl.DataFrame | None = None,
+) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """
+    the redacted, contract-conformant copy that travels
+
+    `attach_labels` assembles; this redacts. The two are separate so that a
+    pooled script can have the labels without also having to pseudonymise and
+    then un-pseudonymise its own data.
+
+    Age becomes a five-year band and the record number becomes a salted hash
+    here, not in `attach_labels` -- a local analysis wants the real values, and
+    only the copy that leaves must not have them.
+    """
+    frame, token_coverage = attach_labels(
+        paths, cohort, site, anchor, logger, eligibility
+    )
+    frame = frame.with_columns(age_bands(frame), row_keys(frame, salt))
 
     # Drop everything the contract does not name. Done explicitly and then
     # validated, rather than relying on the selection being right: the
