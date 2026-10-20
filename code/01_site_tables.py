@@ -697,6 +697,18 @@ def stage_trials(paths, sites, logger, min_cell: int) -> None:
         per_patient = frame.select(
             "hospitalization_id",
             "site",
+            # `sofa_non_cv` rides along because this is the only frame that has
+            # it. attach_severity computes it here, from the clif_sofa parquet
+            # the derive stage wrote, and it is NOT on the cohort table -- so
+            # omitting it from this select, as the first version did, dropped it
+            # for good. The contract names it, 07 reports severity-adjusted
+            # results against it, and 12 uses it as an adjuster, so losing it
+            # silently turned every adjusted comparison into an unadjusted one.
+            *[
+                c
+                for c in ("sofa_non_cv",)
+                if c in frame.columns
+            ],
             *[
                 c
                 for c in frame.columns
