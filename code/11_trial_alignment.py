@@ -82,6 +82,7 @@ from clifcs.trials import (
     table1_to_verify,
     inside_all_null,
     assign_guideline,
+    specificity_order,
     rank_and_orphans,
     table1_comparison,
     table1_position,
@@ -845,7 +846,11 @@ def analyse(paths, anchor: str, cohort_cfg, trial_cfg, args, logger) -> None:
                 "shifts above for where they actually differ"
             )
 
-    frame = assign_guideline(frame, trials, logger)
+    # the same committed ordering 01 applies site-side, so the pooled
+    # assignment and the per-site ones are the same assignment
+    frame = assign_guideline(
+        frame, trials, logger, order=specificity_order(trial_cfg, logger)
+    )
     outcomes = outcomes_by_position(frame, trials, logger)
     if outcomes.height:
         outcomes.write_csv(paths.table_home / f"trial_outcomes_{anchor}.csv")

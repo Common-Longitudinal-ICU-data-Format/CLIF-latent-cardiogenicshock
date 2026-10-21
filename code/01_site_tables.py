@@ -695,10 +695,15 @@ def stage_trials(paths, sites, logger, min_cell: int) -> None:
     from clifcs.concordance import add_concordance, attach_procedures, attach_severity
     from clifcs.export import contract
     from clifcs.trials import (
+        Region,
         add_eligibility,
+        assign_guideline,
         attach_features,
         criteria_frame,
         load_trials,
+        rank_and_orphans,
+        specificity_from_frame,
+        specificity_order,
         table1_position,
     )
 
@@ -739,6 +744,56 @@ def stage_trials(paths, sites, logger, min_cell: int) -> None:
             frame = table1_position(frame, trial, logger)
         frame = attach_severity(paths, frame, logger)
         frame = add_concordance(frame, trials, logger)
+
+        # ----------------------------------------------- coverage and guideline
+        # Both were computed at the coordinating site by 11 until now, which
+        # meant a site sharing nothing patient-level reported neither -- even
+        # though neither reads an embedding. `rank_and_orphans` wants Regions
+        # rather than Trials, so it gets unfitted ones: every `inside_*` and
+        # `lift_*` column is then absent, `n_regions_inside` is 0 and
+        # `evidence_orphan` collapses to `criteria_orphan`, which is exactly
+        # the criteria-only reading. 11 still recomputes all of it against the
+        # fitted regions when the embeddings are pooled.
+        regions = tuple(
+            Region(
+                key=t.key,
+                label=t.label,
+                n_eligible=int(frame[f"elig_{t.key}"].sum()),
+                fitted=False,
+                applies_to=t.applies_to,
+            )
+            for t in trials
+        )
+        frame = rank_and_orphans(frame, regions)
+        frame = assign_guideline(
+            frame, trials, logger, order=specificity_order(trial_cfg, logger)
+        )
+
+        # What the ordering WOULD be if ranked on this cohort, logged next to
+        # the assignment that used the committed one. At the derivation site
+        # this is the line you copy into `specificity_order`; everywhere else
+        # it is the check that says how far this site's eligible shares have
+        # drifted from the ordering being applied to it.
+        local = specificity_from_frame(frame, trials)
+        committed = specificity_order(trial_cfg) or []
+        logger.info(
+            f"[{anchor}] specificity ranked on THIS cohort, most specific "
+            "first (the derivation site commits this to "
+            "`specificity_order` in trials.yaml):"
+        )
+        logger.info("  " + " ".join(local))
+        if committed and committed != local:
+            moved = [
+                f"{k}({committed.index(k)}->{local.index(k)})"
+                for k in local
+                if k in committed and committed.index(k) != local.index(k)
+            ]
+            logger.info(
+                f"  differs from the committed order at {len(moved)} of "
+                f"{len(local)} positions: {' '.join(moved)}. The committed "
+                "order is the one that was applied, which is what makes this "
+                f"site's assignment comparable with every other site's."
+            )
 
         # The per-patient columns, kept for 02 to export under the contract.
         # Written here rather than recomputed there because the predicates read

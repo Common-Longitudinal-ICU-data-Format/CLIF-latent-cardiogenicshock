@@ -71,7 +71,8 @@ output/
     counts/                    attrition, phenotype breakdowns, availability,
                                token_prevalence_anchor-*.csv (the tornado)
                                token_families_anchor-*.csv
-    trials/                    eligibility, IQR position, concordance
+    trials/                    eligibility, IQR position, concordance,
+                               guideline assignment, coverage
     token_levels.csv           the rank -> value-range legend
     purity/                    TIER 2 -- phenotype coherence in GEM space.
       phenotype_purity.csv
@@ -318,7 +319,27 @@ tier 1:
   above Q3, with our median beside theirs;
 - treated in line with the guideline — share, with mortality split by whether
   the recommended treatment was delivered;
-- mortality and median ICU length of stay among the eligible.
+- mortality and median ICU length of stay among the eligible;
+- **which single guideline covers each patient**, and whether they also sit
+  inside the population it was tested on (`trial_guideline_assignment_*`);
+- **how many trials' criteria each patient meets at all**, against outcome
+  (`trial_coverage_*`).
+
+The last two moved out of 11 and into tier 1. Neither reads an embedding —
+`assign_guideline` reads `elig_*` and the `t1_*` IQR positions and nothing else —
+so they had been gated behind a patient-level transfer for no reason except
+where the code happened to live. They are also the two that answer the clinical
+question most directly: "is there a recommendation for this person, and was it
+tested on anyone like them".
+
+Assigning one guideline needs a **specificity order** — where a patient
+qualifies for several trials the most specific one wins. That ordering is now
+`specificity_order` in `code/config/trials.yaml` and is **transferred, not
+recomputed**, on exactly the argument the phenotype models are. Derived locally
+it reorders between sites — at Rush, 15 of 18 positions differ from the pooled
+order — so the same patient profile would be assigned a different guideline
+depending on which hospital scored it. 01 logs both orders so the drift is
+visible without being acted on.
 
 All of it broken down by **Zweck, Seymour and Bhavani phenotype and by coded
 shock type**, because a trial's evidence is about a population and the question

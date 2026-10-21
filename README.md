@@ -47,6 +47,15 @@ trial populations and subphenotypes look the same at each hospital. It is also
 the input the site effect is decomposed with — and site, at 97% neighbour
 purity, is the largest single finding here so far.
 
+**The whole trial and guideline analysis is in tier 1.** Eighteen trials across
+the cardiogenic, septic and hypovolaemic literatures — including IABP-SHOCK II,
+ECLS-SHOCK and DanGer Shock — scored for eligibility, position against each
+published interquartile range, treatment concordance, which single guideline
+covers each patient, and how many trials cover them at all. None of it reads an
+embedding, so none of it needs a patient-level agreement. Every table is broken
+down by Zweck phenotype, both sepsis phenotype systems, and coded shock type as
+well as overall.
+
 Sites are configured in `code/config/paths.yaml`; adding one needs no code
 change.
 
@@ -168,8 +177,16 @@ output/
       token_families_anchor-*    the same, rolled up to token family
     trials/
       trial_criteria.csv         the criteria as encoded. No patient data
-      trial_iqr_position_*       where this site sits against published IQRs
-      trial_outcomes_*           outcomes among eligible patients, per trial
+      trial_iqr_position_*       where this site sits against published IQRs,
+                                 per trial per variable
+      trial_outcomes_*           per trial: who qualifies, how they did, whether
+                                 the recommended treatment was delivered, and the
+                                 share inside every published IQR
+      trial_guideline_assignment_*  the single most relevant guideline per
+                                 patient, and whether they were also inside the
+                                 population it was tested on
+      trial_coverage_*           how many trials' criteria each patient meets,
+                                 against outcome
 
   patient_level_data_<SITE>/   LOCAL ONLY -- unredacted. Never shared.
   cohort/  logs/               local working output. Not sent.

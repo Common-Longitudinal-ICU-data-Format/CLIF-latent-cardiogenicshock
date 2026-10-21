@@ -64,6 +64,51 @@
 # midpoint of two near-identical arms is a good approximation and a poor one
 # would be visible as a wide gap between the arms.
 
+# SPECIFICITY ORDER, for assigning the single most relevant guideline per
+# patient. Where a patient meets several trials, the most *specific* one wins --
+# specificity being the trial that enrolled the smallest share of a shock
+# cohort. SOAP II would otherwise take almost everyone by covering 89% of them,
+# and a recommendation that applies to nearly all shock is the least informative
+# thing one could say about any particular patient.
+#
+# TRANSFERRED, NOT RECOMPUTED, for the same reason the phenotype models in
+# models/ are. `assign_guideline` used to derive this ordering from whatever
+# frame it was handed, which was fine while it only ever ran once on the pooled
+# cohort. Run site-side it is not: the eligible shares genuinely reorder between
+# sites -- 65 trial 15.6% vs OptimaCC 10.8% at NU, against 11.8% vs 28.3% at
+# Rush -- so the same patient profile would be assigned a different guideline
+# depending on which hospital scored it, and the pooled breakdown would not mean
+# anything. Three trials also tie exactly at 15.5% (SHOCK, IABP-SHOCK II,
+# CULPRIT-SHOCK) and four of the septic trials tie at 24.2%, which a local sort
+# would break arbitrarily.
+#
+# Most specific first. Derived from the 39,819-patient pooled cohort at the
+# 24h anchor. The trials stage logs the ordering it would derive from whatever
+# cohort it is run on, so to regenerate: run 01 at the derivation site, take the
+# "specificity ranked on THIS cohort" line out of the log, and commit it -- so
+# the ordering and the code that reads it move together. Every site logs the
+# same line, which is also how far its own eligible shares have drifted from the
+# order being applied to it.
+specificity_order:
+  - crash_2            # 0.0%  -- trauma haemorrhage, essentially disjoint here
+  - danger_shock       # 1.2%
+  - villanueva         # 1.7%
+  - ecls_shock         # 3.7%
+  - adrenal            # 10.0%
+  - sixtyfive          # 13.5%
+  - optimacc           # 14.1%
+  - shock              # 15.5%  tie
+  - iabp_shock_ii      # 15.5%  tie -- same ACS-with-CS gate as SHOCK
+  - culprit_shock      # 15.5%  tie
+  - vasst              # 20.3%
+  - ecmo_cs            # 22.6%
+  - sepsispam          # 24.2%  tie
+  - smart              # 24.2%  tie
+  - aprocchss          # 24.2%  tie
+  - classic            # 24.2%  tie
+  - clovers            # 25.3%
+  - soap_ii            # 89.0%  -- excluded from the assignment entirely
+
 trials:
 
   # -------------------------------------------------------------- SHOCK 1999

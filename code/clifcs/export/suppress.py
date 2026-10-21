@@ -42,6 +42,30 @@ DEFAULT_MIN_CELL = 11
 #: columns that are a count of patients, by this pipeline's naming convention
 COUNT_PREFIX = "n"
 
+#: `n_`-prefixed columns that count something OTHER than patients, and so must
+#: not be suppressed at the cell threshold.
+#:
+#: `n_variables_compared` counts published IQRs, not people. Its value is 4 to 8
+#: for every trial -- always below `min_cell` -- so the convention blanked it in
+#: every row of every `trial_outcomes` table ever exported, taking with it the
+#: denominator a reader needs to interpret `share_inside_all_iqrs` (which falls
+#: as 0.5^k whether or not the cohort differs at all). The suppression also
+#: protected nothing: `null_inside_all_iqrs` publishes 0.5^k beside it, so k was
+#: recoverable by anyone who took a log.
+#:
+#: The others are per-patient counts of *trials*, used as grouping keys in the
+#: coverage tables. A patient eligible for three trials is not a cell of three
+#: patients.
+NOT_PATIENT_COUNTS = frozenset(
+    {
+        "n_variables_compared",
+        "n_eligible_trials",
+        "n_specific_trials",
+        "n_trials_in_type",
+        "n_specific_trials_in_type",
+    }
+)
+
 
 def count_columns(frame: pl.DataFrame) -> list[str]:
     """the integer columns that hold a patient count"""
@@ -49,6 +73,7 @@ def count_columns(frame: pl.DataFrame) -> list[str]:
         c
         for c in frame.columns
         if (c == COUNT_PREFIX or c.startswith("n_"))
+        and c not in NOT_PATIENT_COUNTS
         and frame.schema[c]
         in (pl.Int8, pl.Int16, pl.Int32, pl.Int64, pl.UInt8, pl.UInt16, pl.UInt32, pl.UInt64)
     ]

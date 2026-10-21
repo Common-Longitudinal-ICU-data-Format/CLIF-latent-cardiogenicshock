@@ -46,6 +46,8 @@ import re
 
 import polars as pl
 
+from clifcs.export import suppress
+
 #: bumped whenever the permitted column set changes in a way that makes an
 #: older bundle non-conformant. The coordinating site compares this against
 #: each bundle's manifest and refuses a mismatch rather than guessing.
@@ -364,10 +366,16 @@ def validate_counts_frame(frame: pl.DataFrame, origin: str, min_cell: int) -> No
     table; this checks the result, so a table assembled by hand cannot skip it.
 
     Only columns named `n` or `n_*` are checked, which is the naming convention
-    every count table in this pipeline already follows.
+    every count table in this pipeline already follows -- minus the handful of
+    `n_*` columns that count something other than patients, which
+    `suppress.NOT_PATIENT_COUNTS` names and which this has to skip for the same
+    reason `suppress_counts` does. Checking them here while exempting them there
+    would make every fit table unexportable.
     """
     for column in frame.columns:
         if column != "n" and not column.startswith("n_"):
+            continue
+        if column in suppress.NOT_PATIENT_COUNTS:
             continue
         if frame.schema[column] not in _INT_DTYPES:
             continue

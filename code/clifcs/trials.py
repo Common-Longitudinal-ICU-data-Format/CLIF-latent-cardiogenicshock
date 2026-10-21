@@ -1204,6 +1204,13 @@ def rank_and_orphans(frame: pl.DataFrame, regions) -> pl.DataFrame:
                            eligible for it.
       `evidence_orphan`    no specific trial's criteria AND resembling no
                            trial's population.
+
+    With **unfitted** regions -- which is how 01 calls it, having no embeddings
+    site-side -- there is no population side: `n_regions_inside` and
+    `n_specific_inside` are 0, `nearest_trial` is null, and `evidence_orphan`
+    collapses to `criteria_orphan`. That is the criteria-only reading, and it is
+    the honest one for a tier-1 bundle rather than a degraded one. 11 recomputes
+    all of it against fitted regions once the embeddings are pooled.
     """
     fitted = [r for r in regions if r.fitted]
     elig_cols = [f"elig_{r.key}" for r in regions]
@@ -1221,9 +1228,16 @@ def rank_and_orphans(frame: pl.DataFrame, regions) -> pl.DataFrame:
         n_specific_trials=pl.sum_horizontal(
             *(pl.col(c).cast(pl.Int32) for c in specific_cols)
         ),
+        # literal 0 when nothing was fitted, because `sum_horizontal` over an
+        # empty column list raises rather than returning zero -- it cannot know
+        # how many rows to produce. That is the tier-1 path: 01 passes unfitted
+        # regions so the criteria-only columns can be computed site-side, and
+        # before this guard that call died on an empty fold.
         n_regions_inside=pl.sum_horizontal(
             *(pl.col(c).cast(pl.Int32) for c in inside_cols)
-        ),
+        )
+        if inside_cols
+        else pl.lit(0, dtype=pl.Int32),
     )
 
     if lift_cols:
@@ -1249,6 +1263,8 @@ def rank_and_orphans(frame: pl.DataFrame, regions) -> pl.DataFrame:
         n_specific_inside=pl.sum_horizontal(
             *(pl.col(c).cast(pl.Int32) for c in specific_inside)
         )
+        if specific_inside
+        else pl.lit(0, dtype=pl.Int32)
     ).with_columns(
         evidence_orphan=(pl.col("n_specific_trials") == 0)
         & (pl.col("n_specific_inside") == 0),
@@ -1974,7 +1990,42 @@ def table1_comparison(frame: pl.DataFrame, trial, logger) -> pl.DataFrame:
 # ------------------------------------------------- assigning one guideline
 
 
-def assign_guideline(frame: pl.DataFrame, trials, logger) -> pl.DataFrame:
+def specificity_order(cfg, logger=None) -> list[str] | None:
+    """
+    the committed most-specific-first trial ordering from trials.yaml
+
+    Returns None when the key is absent, which makes `assign_guideline` fall
+    back to ranking on the local cohort and say so. None rather than an empty
+    list, so "not configured" cannot be confused with "configured as empty".
+    """
+    order = cfg.get("specificity_order")
+    if not order:
+        if logger is not None:
+            logger.warning(
+                "trials.yaml has no `specificity_order`, so the guideline "
+                "assignment will be ranked on this cohort. Add the committed "
+                "ordering if this is a contributing site."
+            )
+        return None
+    return [str(k) for k in order]
+
+
+def specificity_from_frame(frame: pl.DataFrame, trials) -> list[str]:
+    """
+    the trial keys ordered most-specific-first by eligible share of `frame`
+
+    Only correct on the derivation cohort. `assign_guideline` takes the
+    committed ordering instead -- see `order` there for why.
+    """
+    return [
+        t.key
+        for t in sorted(trials, key=lambda t: float(frame[f"elig_{t.key}"].mean()))
+    ]
+
+
+def assign_guideline(
+    frame: pl.DataFrame, trials, logger, order: list[str] | None = None
+) -> pl.DataFrame:
     """
     the single guideline most relevant to each patient, and how well it fits
 
@@ -1988,26 +2039,73 @@ def assign_guideline(frame: pl.DataFrame, trials, logger) -> pl.DataFrame:
       no guideline fits        meets no specific trial's criteria
 
     Where a patient qualifies for several trials the most *specific* one wins,
-    specificity being the trial with the smallest eligible share of this cohort.
-    SOAP II would otherwise take almost everyone by covering 89% of them, and a
-    recommendation that applies to nearly all shock is the least informative
-    thing one could say about any particular patient.
+    specificity being the trial that enrolled the smallest share of a shock
+    cohort. SOAP II would otherwise take almost everyone by covering 89% of
+    them, and a recommendation that applies to nearly all shock is the least
+    informative thing one could say about any particular patient.
+
+    `order` is that ranking, most specific first, and it is **transferred, not
+    recomputed** -- `specificity_order` in trials.yaml, on the same argument as
+    the phenotype models in models/. Deriving it from `frame` was fine while
+    this only ran once on the pooled cohort; run site-side it is not, because
+    the eligible shares reorder between sites and the same patient profile
+    would then be assigned a different guideline depending on who scored it.
+    Omitting it falls back to the local sort with a warning.
+
+    Reads only `elig_*` and the `t1_*` IQR positions, so it needs no embeddings
+    and belongs in tier 1.
     """
-    specificity = sorted(
-        (t for t in trials if t.key != "soap_ii"),
-        key=lambda t: float(frame[f"elig_{t.key}"].mean()),
-    )
+    if order:
+        rank = {key: i for i, key in enumerate(order)}
+        unknown = [t.key for t in trials if t.key not in rank]
+        if unknown:
+            raise ValueError(
+                f"specificity_order does not name {unknown}. Every trial has to "
+                "appear in it, or the assignment silently depends on the order "
+                "trials happen to be defined in. Add them to "
+                "`specificity_order` in trials.yaml, most specific first."
+            )
+        specificity = sorted(
+            (t for t in trials if t.key != "soap_ii"), key=lambda t: rank[t.key]
+        )
+    else:
+        logger.warning(
+            "no specificity_order given, so the guideline assignment is being "
+            "ranked on THIS cohort's eligible shares. Only correct at the "
+            "derivation site -- elsewhere the assignment is not comparable "
+            "with any other site's."
+        )
+        specificity = sorted(
+            (t for t in trials if t.key != "soap_ii"),
+            key=lambda t: float(frame[f"elig_{t.key}"].mean()),
+        )
 
     # inside every checkable IQR: zero variables outside, and at least one
-    # variable was actually comparable
+    # variable was actually comparable.
+    #
+    # "At least one comparable" is read from `t1_n_compared_` when it is there
+    # and `t1_frac_compared_` otherwise, because the two live in different
+    # places: the raw count exists only in the site-side frame, while the
+    # contract exports the fraction and not the count. The old code tested
+    # `t1_outside_` for presence and then used `t1_n_compared_` regardless, so
+    # it raised ColumnNotFound on any frame that had been through the export --
+    # which is every frame the coordinating site ever sees.
     for trial in trials:
         outside = f"t1_outside_{trial.key}"
-        compared = f"t1_n_compared_{trial.key}"
-        if outside in frame.columns:
+        count = f"t1_n_compared_{trial.key}"
+        frac = f"t1_frac_compared_{trial.key}"
+        comparable = (
+            pl.col(count) > 0
+            if count in frame.columns
+            else pl.col(frac) > 0
+            if frac in frame.columns
+            else None
+        )
+        if outside in frame.columns and comparable is not None:
             frame = frame.with_columns(
                 **{
                     f"inside_t1_{trial.key}": (
-                        (pl.col(outside) == 0) & (pl.col(compared) > 0)
+                        (pl.col(outside) == 0) & comparable
                     ).fill_null(False)
                 }
             )

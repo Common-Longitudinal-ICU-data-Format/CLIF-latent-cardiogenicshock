@@ -171,7 +171,17 @@ def _inside_all(eligible: pl.DataFrame, key: str) -> dict:
     """
     outside = f"t1_outside_{key}"
     compared = f"t1_n_compared_{key}"
-    if outside not in eligible.columns or eligible.height == 0:
+    # both columns, not just `outside`: `t1_n_compared_` exists only in the
+    # site-side frame -- the contract exports `t1_frac_compared_` instead -- and
+    # testing one while using the other raised ColumnNotFound on any frame that
+    # had been through the export. `k` is a count of variables and cannot be
+    # recovered from the fraction without the published denominator, so this
+    # returns the null row rather than guessing.
+    if (
+        outside not in eligible.columns
+        or compared not in eligible.columns
+        or eligible.height == 0
+    ):
         return {
             "n_comparable": 0,
             "n_variables_compared": None,
@@ -308,6 +318,131 @@ def _report_shift(table: pl.DataFrame, site: str, anchor: str, logger) -> None:
         )
 
 
+def guideline_assignment_table(
+    frame: pl.DataFrame, site: str, anchor: str, logger
+) -> pl.DataFrame:
+    """
+    per stratum: which single guideline each patient falls under, and how well
+
+    The one summary that answers "is there a recommendation for this person"
+    rather than "would trial X have enrolled them". `assigned_guideline` is the
+    most specific trial whose criteria the patient meets; `guideline_fit` says
+    whether they also sit inside every published IQR that could be checked, so
+    the three levels separate "tested on people like this" from "nominally
+    covered" from "covered by nothing".
+
+    Criteria and IQR positions only -- no embeddings -- which is why this runs
+    site-side in tier 1 rather than at the coordinating site.
+    """
+    needed = {"assigned_guideline", "guideline_fit"}
+    if not needed <= set(frame.columns):
+        logger.warning(
+            f"[{site}/{anchor}] guideline assignment: "
+            f"missing {sorted(needed - set(frame.columns))}; table skipped"
+        )
+        return pl.DataFrame()
+
+    rows = []
+    for scheme, level, subset in _strata_frames(frame):
+        if subset.height == 0:
+            continue
+        grouped = subset.group_by("assigned_guideline", "guideline_fit").agg(
+            n=pl.len(),
+            mortality=pl.col("in_hospital_mortality").mean(),
+            median_icu_los_days=pl.col("icu_los_days").median(),
+        )
+        for row in grouped.iter_rows(named=True):
+            rows.append(
+                {
+                    "site": site,
+                    "anchor": anchor,
+                    "scheme": scheme,
+                    "level": level,
+                    # null means no specific trial's criteria were met; named so
+                    # a reader does not have to guess what an empty cell is
+                    "assigned_guideline": row["assigned_guideline"] or "(none)",
+                    "guideline_fit": row["guideline_fit"],
+                    "n_stratum": subset.height,
+                    "n": row["n"],
+                    "share_of_stratum": row["n"] / subset.height,
+                    "mortality": row["mortality"],
+                    "median_icu_los_days": row["median_icu_los_days"],
+                }
+            )
+    if not rows:
+        return pl.DataFrame()
+    # sorted, because `group_by` does not promise an order and these tables are
+    # diffed between sites -- an unordered CSV makes every re-export look like
+    # a change
+    return pl.DataFrame(rows).sort(
+        "scheme", "level", "assigned_guideline", "guideline_fit"
+    )
+
+
+def coverage_table(
+    frame: pl.DataFrame, site: str, anchor: str, logger
+) -> pl.DataFrame:
+    """
+    per stratum: how many trials' criteria each patient meets, against outcome
+
+    The criteria-only half of 11's coverage figure. `n_specific_trials` excludes
+    SOAP II, which asked only for a vasopressor and so covers most of the
+    cohort; counting it would put almost everyone in the "covered" column and
+    hide the question.
+
+    `n_specific_trials` and `n_trials_in_type` are grouping keys here, not cell
+    counts -- a patient eligible for three trials is not a cell of three
+    patients -- so they are exempt from suppression; see
+    `suppress.NOT_PATIENT_COUNTS`.
+    """
+    if "n_specific_trials" not in frame.columns:
+        logger.warning(
+            f"[{site}/{anchor}] coverage: no n_specific_trials column; "
+            "table skipped"
+        )
+        return pl.DataFrame()
+
+    rows = []
+    for scheme, level, subset in _strata_frames(frame):
+        if subset.height == 0:
+            continue
+        aggs = {
+            "n": pl.len(),
+            "mortality": pl.col("in_hospital_mortality").mean(),
+            "median_icu_los_days": pl.col("icu_los_days").median(),
+            "median_age": pl.col("age_at_admission").median(),
+            "share_female": (pl.col("sex_category") == "Female").mean(),
+        }
+        # the in-type denominator, reported rather than assumed: a patient whose
+        # shock is coded `none coded` matches no trial's literature at all, and
+        # "no trial applied" is a different statement from "no trial covered
+        # them"
+        if "n_trials_in_type" in subset.columns:
+            aggs["median_trials_in_type"] = pl.col("n_trials_in_type").median()
+        grouped = subset.group_by("n_specific_trials").agg(**aggs)
+        for row in grouped.iter_rows(named=True):
+            rows.append(
+                {
+                    "site": site,
+                    "anchor": anchor,
+                    "scheme": scheme,
+                    "level": level,
+                    "n_specific_trials": row["n_specific_trials"],
+                    "n_stratum": subset.height,
+                    "n": row["n"],
+                    "share_of_stratum": row["n"] / subset.height,
+                    "mortality": row["mortality"],
+                    "median_icu_los_days": row["median_icu_los_days"],
+                    "median_age": row["median_age"],
+                    "share_female": row["share_female"],
+                    "median_trials_in_type": row.get("median_trials_in_type"),
+                }
+            )
+    if not rows:
+        return pl.DataFrame()
+    return pl.DataFrame(rows).sort("scheme", "level", "n_specific_trials")
+
+
 #: statistics suppressed wherever the count they are computed over is
 _DERIVED_OUTCOMES = (
     "share_eligible",
@@ -327,6 +462,34 @@ _DERIVED_IQR = (
     "share_inside_iqr",
     "share_above_q3",
 )
+#: the two criteria-only tables moved out of 11. Both are grouped per patient
+#: rather than per trial, so their statistics hang off `n` -- the size of the
+#: assignment or coverage cell -- not off an eligible count.
+_DERIVED_ASSIGNMENT = (
+    "share_of_stratum",
+    "mortality",
+    "median_icu_los_days",
+)
+_DERIVED_COVERAGE = _DERIVED_ASSIGNMENT + (
+    "median_age",
+    "share_female",
+    "median_trials_in_type",
+)
+
+#: which count each table's statistics are computed over, and so which count
+#: has to fall below `min_cell` for them to be blanked
+_COUNT_FOR = {
+    "trial_outcomes": "n_eligible",
+    "trial_iqr_position": "n_compared",
+    "trial_guideline_assignment": "n",
+    "trial_coverage": "n",
+}
+_DERIVED_FOR = {
+    "trial_outcomes": _DERIVED_OUTCOMES,
+    "trial_iqr_position": _DERIVED_IQR,
+    "trial_guideline_assignment": _DERIVED_ASSIGNMENT,
+    "trial_coverage": _DERIVED_COVERAGE,
+}
 
 
 def build(
@@ -342,6 +505,15 @@ def build(
     tables = {
         "trial_outcomes": outcomes_table(frame, trials, site, anchor, logger),
         "trial_iqr_position": iqr_position_table(frame, trials, site, anchor, logger),
+        # the two criteria-only tables that used to be computed at the
+        # coordinating site by 11. Neither reads an embedding, so neither had
+        # any business being gated behind a patient-level transfer -- a site
+        # that shares nothing now reports which guideline covers its patients
+        # and how many trials cover each of them.
+        "trial_guideline_assignment": guideline_assignment_table(
+            frame, site, anchor, logger
+        ),
+        "trial_coverage": coverage_table(frame, site, anchor, logger),
     }
 
     suppressed = {}
@@ -349,11 +521,11 @@ def build(
         if table.height == 0:
             logger.warning(f"[{site}/{anchor}] {name}: no rows")
             continue
-        derived = _DERIVED_OUTCOMES if name == "trial_outcomes" else _DERIVED_IQR
+        derived = _DERIVED_FOR[name]
         # Suppression keyed on the count each statistic is computed over, which
-        # differs between the two tables: eligibility shares are over
-        # `n_eligible`, IQR shares over `n_compared`.
-        count = "n_eligible" if name == "trial_outcomes" else "n_compared"
+        # differs between the tables: eligibility shares are over `n_eligible`,
+        # IQR shares over `n_compared`, and the two per-patient tables over `n`.
+        count = _COUNT_FOR[name]
         table = table.with_columns(
             [
                 pl.when(pl.col(count) < min_cell)

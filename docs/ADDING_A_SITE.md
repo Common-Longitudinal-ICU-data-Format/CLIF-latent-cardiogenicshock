@@ -21,8 +21,26 @@ Written for: the analyst running this pipeline at a contributing site.
 ## What tier 1 contributes
 
 Patient flow, cohort sizes, the phenotype breakdowns, baseline characteristics
-by coded mechanism, the trial comparison, and per-token prevalence — how
-differently this site charts.
+by coded mechanism, the whole trial and guideline analysis, and per-token
+prevalence — how differently this site charts.
+
+The trial half is the substantive one. Eighteen randomised trials across the
+cardiogenic, septic and hypovolaemic literatures — SHOCK, IABP-SHOCK II,
+CULPRIT-SHOCK, ECMO-CS, ECLS-SHOCK, DanGer Shock, OptimaCC, SOAP II, and the
+sepsis and haemorrhage trials — are scored four ways:
+
+| table | what it answers |
+|---|---|
+| `trial_outcomes_*` | who qualifies, how they did, whether the recommended treatment was delivered, and what share sit inside every published IQR |
+| `trial_iqr_position_*` | per trial per variable: our median against the published median and quartiles, and the share below Q1 / inside / above Q3 |
+| `trial_guideline_assignment_*` | the single most relevant guideline per patient, and whether they were also inside the population it was tested on |
+| `trial_coverage_*` | how many trials' criteria each patient meets, against outcome |
+
+**None of it reads an embedding.** The eligibility predicates and the baseline
+variables read raw CLIF, which is why it runs site-side; everything that leaves
+is a share or a median. The guideline assignment and the coverage table used to
+be computed at the coordinating site, which meant a site sharing nothing
+patient-level reported neither, for no reason other than where the code lived.
 
 **It needs no GPU and never loads the GEM weights.** If your site has no GPU, or
 no patient-level agreement, tier 1 is the whole of your contribution and it is a
@@ -161,9 +179,17 @@ file from the weights. The slow stages are `derive` (clifpy) and `collate`
 to redo one.
 
 This runs through to `output/upload_to_box_<SITE>/`, holding counts, the
-phenotype breakdowns, baseline characteristics by shock type, the trial
-comparison and the token-prevalence tables. All of it is aggregate and
-small-cell suppressed.
+phenotype breakdowns, baseline characteristics by shock type, the four trial
+tables and the token-prevalence tables. All of it is aggregate and small-cell
+suppressed.
+
+The log for the `trials` stage is worth reading. It prints the guideline
+assignment for your cohort, and a line comparing the trial **specificity order**
+derived from your eligible shares against the committed one in
+`code/config/trials.yaml`. Large drift there is expected and is not an error --
+the committed order is the one that was applied, which is what makes your
+assignment comparable with every other site's -- but it is a useful signal about
+how your population differs.
 
 ### 5. Send it
 
