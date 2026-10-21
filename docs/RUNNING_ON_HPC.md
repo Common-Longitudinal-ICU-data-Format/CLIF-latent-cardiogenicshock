@@ -17,8 +17,10 @@ Job scripts referenced here are in [`hpc/`](../hpc/).
 
 ## The GPU is tier 2 only
 
-**Tier 1 never loads the GEM weights.** `01_site_tables.py` runs nine stages,
-all CPU. It loads the frozen *tokenizer*, which is a different file. Only
+**Tier 1 never loads the GEM weights**, and does not need them on disk.
+`01_site_tables.py` runs ten stages, all CPU. It loads the frozen *tokenizer*,
+which is a different file. `models.<key>.home_glob` in `paths.yaml` is resolved
+on access, so for a tier-1 run it may point at nothing. Only
 `02_site_embeddings.py` touches the GPU, and only a site with a patient-level
 agreement runs it at all.
 
@@ -45,14 +47,17 @@ complete contribution.
 
 ## What to settle before submitting anything
 
-### Three files have to reach Rush out of band
+### What has to reach a new site out of band
 
 The phenotype models are in git, at [`models/`](../models/) — cloning the repo
 is enough. These are not, and must be copied in by whatever route the
 consortium uses:
 
+- `tokenizer.yaml` — **the one the model was trained with**. Required for tier
+  1 as well as tier 2
 - the checkpoint directory `mdl-cotorra/` (`config.json`, `model.safetensors`)
-- `tokenizer.yaml` — **the one the model was trained with**
+  — **tier 2 only**. A site asked for the aggregate tables alone does not need
+  it, and tier 1 runs without it
 
 Shipping a locally-fitted tokenizer is the classic failure. The embedding
 table has one row per token id and the bin edges are baked into the token
@@ -357,11 +362,15 @@ the copy.
 bash hpc/00_preflight.sh
 ```
 
-Resolves every path, counts the `clif_*` tables it found, checks the
+Resolves every path, checks the required `clif_*` tables by name, checks the
 checkpoint and tokenizer, and probes that `output_home` and `scratch_home`
 are writable. Safe on a login node: it opens no CLIF table. If the model glob
 fails it lists what is actually on disk with the codepoints spelled out, which
 is the fastest way to see a mangled square.
+
+**The checkpoint line cannot fail the preflight** -- it is reported as `[--  ]`
+when unresolved, because tier 1 does not read it. The tokenizer line can fail
+it, and should.
 
 Expected output:
 
@@ -416,9 +425,11 @@ check:
   that is implausibly large or implausibly zero is the signal.
 
 Also confirm the phenotype counts in the log are the *applied* models and not a
-refit — the three `--*-model` flags are in the job script and are required. If
-Rush refits its own clusters, "phenotype II" stops meaning the same thing at
-each site and every pooled breakdown becomes uninterpretable.
+refit. 01 applies the shared models in `models/` by default and will only refit
+when asked with `--refit-phenotypes`, which logs a warning — so look for that
+warning rather than assuming. A site that refits its own clusters makes
+"phenotype II" stop meaning the same thing at each site, and every pooled
+breakdown becomes uninterpretable.
 
 Do not submit job 2 until the ledger looks right.
 

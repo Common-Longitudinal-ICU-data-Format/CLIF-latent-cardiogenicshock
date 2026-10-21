@@ -443,7 +443,13 @@ def write_aggregate(
             site=site,
             salt=salt,
             model_key=paths.model_key,
-            model_home=paths.model_home,
+            # tier 1 reads the tokenizer, never the weights, so a site asked
+            # only for the aggregate tables may legitimately hold no
+            # checkpoint. `model_home_or_none` records a null config hash in
+            # that case rather than refusing to write the bundle; the
+            # tokenizer hash, which is the one the token counts depend on,
+            # still travels.
+            model_home=paths.model_home_or_none,
             tokenizer_yaml=paths.tokenizer_yaml,
             anchors=tuple(),
             row_counts={},
@@ -573,6 +579,17 @@ def write_patient(
     amended["anchors"] = list(anchors)
     amended["row_counts"] = row_counts
     amended["model"]["embedding_dim"] = embedding_dim
+    # Tier 1 may have written a null config hash, which is correct there -- it
+    # never loads the weights. Tier 2 did load them, so fill the hashes in now.
+    # Without this a bundle carrying embeddings would travel with nothing for
+    # `check_agreement` to compare, and pooling two checkpoints' vectors is the
+    # exact failure that check exists to prevent.
+    amended["model"]["config_sha256"] = manifest.file_digest(
+        paths.model_home / "config.json"
+    )
+    weights = paths.model_home / "model.safetensors"
+    if weights.is_file():
+        amended["model"]["weights_sha256"] = manifest.file_digest(weights)
     manifest.write(amended, bundle)
     logger.info(f" manifest.json amended; {site} patient bundle complete")
     return bundle

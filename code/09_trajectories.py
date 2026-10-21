@@ -174,7 +174,16 @@ def _clear_datasets_cache(logger) -> None:
             else:
                 freed += child.stat().st_size
                 child.unlink()
-        except OSError as exc:
+        except Exception as exc:
+            # Exception, not OSError. Two runs sharing this cache will fight
+            # over it -- one deletes an arrow file the other has open and
+            # Windows raises PermissionError from inside shutil, past
+            # ignore_errors. A cache that will not clear is a disk-space
+            # problem for the next grid point, never a reason to lose the
+            # embeddings this one just produced.
+            #
+            # The real fix is not to run two extracts at once; this only stops
+            # that mistake from destroying hours of work.
             logger.warning(f"could not clear {child.name} from the datasets cache: {exc}")
     if freed:
         logger.info(f"  cleared {freed / 2**30:.1f} GiB of datasets cache")
@@ -308,6 +317,155 @@ def extract_grid(paths, args, logger) -> None:
 
 
 # ================================================================ projection
+
+
+def counterfactual_home(paths, site: str, variant: str) -> pathlib.Path:
+    """working directory for one site and one hypothetical next token"""
+    return paths.scratch_home / "counterfactual" / paths.model_key / site / variant
+
+
+def extract_counterfactuals(paths, args, patients, logger) -> pl.DataFrame:
+    """
+    embed each chosen patient prefix with one extra hypothetical token on it
+
+    Only the patients being plotted are embedded. The grid extract pays for
+    every patient at every timepoint because the field needs them; this needs
+    one timepoint and a handful of patients, so it is a few dozen sequences
+    rather than a hundred thousand and takes seconds rather than hours.
+
+    The baseline variant is the unmodified prefix, re-embedded here rather than
+    taken from the grid. That is deliberate: it is the control the hypotheticals
+    are measured against, and reading it from a different code path would make
+    any difference between them partly a difference in how they were produced.
+    """
+    from clifcs import embedding as embedding_module
+    from clifcs.counterfactual import INTERVENTIONS, append_token
+    from clifcs.tokens import SPLITS as TOKEN_SPLITS  # noqa: F401
+    from clifcs.tokens import vocabulary
+
+    names, _ = vocabulary(str(paths.tokenizer_yaml))
+    wanted = {str(p) for p in patients}
+    extraction_cfg = OmegaConf.load(CONFIG_HOME / "extraction.yaml")
+    extraction_cfg.extract.batch_size = int(args.batch_size)
+    shared = ("tokenizer.yaml", "subject_splits.parquet", "tokens_times.parquet")
+
+    variants = [("baseline", "Actual prefix (no extra token)", None)]
+    variants += [(k, label, res) for k, label, res in INTERVENTIONS]
+
+    collected = []
+    for site in paths.sites:
+        source = paths.processed(site)
+        if not (source / "tokens_times.parquet").is_file():
+            continue
+
+        # winnow this site once, at the hour the branch leaves from
+        staging = counterfactual_home(paths, site, "_staging")
+        staging.mkdir(parents=True, exist_ok=True)
+        for name in shared:
+            shutil.copy2(source / name, staging / name)
+        GridWinnower(
+            winnowing_cfg=CONFIG_HOME / "winnowing_onset.yaml",
+            processed_data_home=staging,
+            onset_parquet=paths.cohort_home / "cs_onset.parquet",
+            offset_hours=float(args.cf_hours),
+            min_tokens_past=args.min_tokens,
+        ).save_all()
+
+        base = {}
+        for split in SPLITS:
+            path = staging / f"{split}_for_inference.parquet"
+            if not path.is_file():
+                continue
+            frame = pl.read_parquet(path)
+            frame = frame.filter(pl.col("subject_id").cast(pl.String).is_in(list(wanted)))
+            if frame.height:
+                base[split] = frame
+        if not base:
+            logger.info(f"[{site}] none of the chosen patients reach +{args.cf_hours:g}h")
+            continue
+        logger.info(
+            f"[{site}] {sum(f.height for f in base.values())} chosen patient(s) "
+            f"at +{args.cf_hours:g}h"
+        )
+
+        for key, label, resolver in variants:
+            home = counterfactual_home(paths, site, key)
+            home.mkdir(parents=True, exist_ok=True)
+            for name in shared:
+                shutil.copy2(source / name, home / name)
+
+            wrote = 0
+            for split, frame in base.items():
+                if resolver is None:
+                    out = frame
+                else:
+                    modified = append_token(frame, names, resolver)
+                    if not modified.height:
+                        continue
+                    # keep every column the extractor expects, overriding only
+                    # the three the hypothetical changes
+                    out = (
+                        frame.drop(
+                            [c for c in ("tokens_past", "s_elapsed_past", "last_valid")
+                             if c in frame.columns]
+                        )
+                        .join(
+                            modified.drop("from_quantile", "to_quantile"),
+                            on="subject_id",
+                            how="inner",
+                        )
+                    )
+                if not out.height:
+                    continue
+                out.write_parquet(home / f"{split}_for_inference.parquet")
+                wrote += out.height
+            if wrote == 0:
+                logger.info(f"  {key}: does not apply to any chosen patient")
+                continue
+
+            cfg_path = home / "extraction-resolved.yaml"
+            OmegaConf.save(extraction_cfg, cfg_path)
+            extractor = embedding_module.build_extractor(
+                paths, home, home, cfg_path, keep="last"
+            )
+            extractor.extract()
+
+            for split in SPLITS:
+                features = sorted(
+                    home.glob(f"features-{split}*-{paths.model_home.name}.parquet")
+                )
+                inference = home / f"{split}_for_inference.parquet"
+                if not features or not inference.is_file():
+                    continue
+                vectors = pl.concat(
+                    [pl.read_parquet(f, columns=["features"]) for f in features]
+                )
+                keys = pl.read_parquet(inference, columns=["subject_id"])
+                if vectors.height != keys.height:
+                    logger.warning(
+                        f"  {site}/{key}/{split}: {vectors.height} features vs "
+                        f"{keys.height} rows; skipped"
+                    )
+                    continue
+                matrix = np.vstack(vectors["features"].to_list()).astype(np.float32)
+                collected.append(
+                    keys.with_columns(site=pl.lit(site), variant=pl.lit(key))
+                    .rename({"subject_id": "hospitalization_id"})
+                    .hstack(
+                        pl.from_numpy(
+                            matrix,
+                            schema=[f"emb_{i:04d}" for i in range(matrix.shape[1])],
+                        )
+                    )
+                )
+            logger.info(f"  {key}: embedded {wrote} sequence(s)")
+            for f in home.glob("features-*.parquet"):
+                f.unlink()
+            _clear_datasets_cache(logger)
+
+    if not collected:
+        return pl.DataFrame()
+    return pl.concat(collected, how="diagonal_relaxed")
 
 
 def load_grid(paths, args, logger) -> pl.DataFrame:
@@ -1665,6 +1823,164 @@ def plot_patient_paths(frame, spec, patients, out, title, logger):
     logger.info(f"wrote {out.name}")
 
 
+def interpolate_into_projection(real_emb, real_xy, new_emb, k: int = 15):
+    """
+    place a new embedding in an existing PaCMAP layout, by its neighbours
+
+    PaCMAP has no `transform`, so a point that was not in the fit cannot be
+    placed exactly. This takes the k nearest real points in the 1024-d space and
+    returns the inverse-distance-weighted mean of their 2-d coordinates.
+
+    THE POSITION IS AN INTERPOLATION. It cannot land anywhere the real points do
+    not already cover, so a hypothetical that moves the representation somewhere
+    genuinely new gets dragged back toward the nearest familiar region, and the
+    length of the arrow is NOT a distance in the latent space. It shows
+    direction and rough neighbourhood, which is what the figure is for; the
+    quantitative version of the same question is the cosine in the table.
+
+    Distances are computed in the full 1024-d space rather than in the 2-d
+    layout, so neighbours are neighbours in the representation and not merely
+    in the picture.
+    """
+    from sklearn.neighbors import NearestNeighbors
+
+    finder = NearestNeighbors(n_neighbors=min(k, len(real_emb))).fit(real_emb)
+    distances, indices = finder.kneighbors(new_emb)
+    weights = 1.0 / np.maximum(distances, 1e-9)
+    weights = weights / weights.sum(axis=1, keepdims=True)
+    return np.einsum("ij,ijk->ik", weights, real_xy[indices])
+
+
+def plot_counterfactual_paths(
+    frame, cf_frame, patients, home, paths, args, logger
+) -> pl.DataFrame:
+    """
+    one figure per patient: the real path, and where one more token would move it
+
+    The path and its hypothetical branches on the same axes. Branches leave the
+    patient position at the chosen hour and are coloured tab10, one hue per
+    intervention, with the baseline re-embedding drawn as a hollow marker so the
+    reader can see how far the hypotheticals sit from an unmodified prefix taken
+    through the identical code path.
+
+    Returns the per-patient, per-intervention displacement so the figures can be
+    read against a number rather than by eye.
+    """
+    import matplotlib.cm as cm
+
+    from clifcs.counterfactual import INTERVENTIONS
+
+    if cf_frame.is_empty():
+        logger.warning("no counterfactual embeddings; nothing to draw")
+        return pl.DataFrame()
+
+    _px, _py = proj_cols()
+    emb_cols = sorted(c for c in frame.columns if c.startswith("emb_"))
+    cf_cols = sorted(c for c in cf_frame.columns if c.startswith("emb_"))
+    if emb_cols != cf_cols:
+        logger.warning("counterfactual embeddings have a different width; skipped")
+        return pl.DataFrame()
+
+    real_emb = frame.select(emb_cols).to_numpy().astype(np.float64)
+    real_xy = frame.select(_px, _py).to_numpy().astype(np.float64)
+    placed = interpolate_into_projection(
+        real_emb, real_xy, cf_frame.select(cf_cols).to_numpy().astype(np.float64)
+    )
+    cf = cf_frame.select("hospitalization_id", "variant").with_columns(
+        cf_x=pl.Series(placed[:, 0]), cf_y=pl.Series(placed[:, 1])
+    )
+
+    order = ["baseline"] + [k for k, _, _ in INTERVENTIONS]
+    labels = {"baseline": "Actual prefix (control)"}
+    labels.update({k: label for k, label, _ in INTERVENTIONS})
+    palette = {
+        key: cm.tab10(i % 10) for i, key in enumerate(k for k in order if k != "baseline")
+    }
+
+    rows = []
+    for index, patient in enumerate(patients, start=1):
+        branches = cf.filter(pl.col("hospitalization_id") == patient)
+        if branches.height == 0:
+            continue
+        path = frame.filter(
+            pl.col("hospitalization_id") == patient
+        ).sort("offset_hours")
+        if path.height < 2:
+            continue
+
+        figure, ax = plt.subplots(figsize=(5.8, 5.2))
+        ax.scatter(real_xy[:, 0], real_xy[:, 1], s=1.0, c="#dcdbd6",
+                   linewidths=0, alpha=0.8, rasterized=True, zorder=1)
+
+        tx, ty = path[_px].to_numpy(), path[_py].to_numpy()
+        ax.plot(tx, ty, "-", color=INK_PRIMARY, linewidth=1.2, zorder=3, alpha=0.9)
+        ax.scatter(tx, ty, s=26, c=INK_PRIMARY, zorder=4, linewidths=0)
+
+        # the branch point: the patient position at the hour the hypotheticals
+        # leave from, which is the grid point nearest args.cf_hours
+        hours = np.asarray(path["offset_hours"].to_list(), dtype=float)
+        at = int(np.argmin(np.abs(hours - float(args.cf_hours))))
+        bx, by = float(tx[at]), float(ty[at])
+        ax.scatter([bx], [by], s=110, facecolors="none", edgecolors=INK_PRIMARY,
+                   linewidths=1.4, zorder=5)
+        ax.annotate(f"{hours[at]:+.0f}h", (bx, by), fontsize=8, fontweight="bold",
+                    color=INK_PRIMARY, xytext=(8, 8),
+                    textcoords="offset points", zorder=6)
+
+        lookup = dict(zip(branches["variant"].to_list(),
+                          zip(branches["cf_x"].to_list(), branches["cf_y"].to_list())))
+        for key in order:
+            if key not in lookup:
+                continue
+            qx, qy = lookup[key]
+            if key == "baseline":
+                ax.scatter([qx], [qy], s=52, facecolors="none",
+                           edgecolors=INK_SECONDARY, linewidths=1.2, zorder=6,
+                           label=labels[key])
+                continue
+            colour = palette[key]
+            ax.annotate(
+                "", xy=(qx, qy), xytext=(bx, by), zorder=6,
+                arrowprops=dict(arrowstyle="->", color=colour, linewidth=1.6,
+                                shrinkA=2, shrinkB=2),
+            )
+            ax.scatter([qx], [qy], s=46, c=[colour], linewidths=0, zorder=7,
+                       label=labels[key])
+            rows.append({
+                "hospitalization_id": patient,
+                "intervention": key,
+                "label": labels[key],
+                "displacement": float(np.hypot(qx - bx, qy - by)),
+            })
+
+        ax.legend(loc="upper left", fontsize=6.5, frameon=False, markerscale=1.1,
+                  handletextpad=0.5, borderpad=0.2)
+        site = path["site"][0]
+        died = bool(path["in_hospital_mortality"][0])
+        ax.set_title(
+            f"{paths.model_key}: patient {index}, hypothetical next events\n"
+            f"{site} / {path.height} timepoints / "
+            + ("died" if died else "survived"),
+            loc="left", pad=8, fontsize=9,
+        )
+        xlabel, ylabel = proj_labels()
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(f"{ylabel}  -- branch positions are interpolated; "
+                      "arrow length is not a distance")
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_aspect("equal", adjustable="datalim")
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(False)
+        figure.tight_layout()
+        out = home / f"counterfactual_path_{index:02d}.png"
+        save_figure(figure, out)
+        plt.close(figure)
+        logger.info(f"wrote {out.name} ({branches.height} branches)")
+
+    return pl.DataFrame(rows) if rows else pl.DataFrame()
+
+
 def plot_flow(frame, x, y, out, title, subtitle, logger, labels=None,
               colour_by=None):
     """streamplot of the displacement field over the point cloud"""
@@ -1776,6 +2092,20 @@ def main() -> None:
     parser.add_argument("--start-hours", type=float, default=-24.0)
     parser.add_argument("--end-hours", type=float, default=48.0)
     parser.add_argument("--step-hours", type=float, default=6.0)
+    parser.add_argument(
+        "--counterfactuals",
+        action="store_true",
+        help="also embed each plotted patient with one extra hypothetical token "
+        "on the end -- pressor up or down, MAP up or down, off the ventilator, "
+        "inotrope started -- and draw where that moves them. Needs the GPU, but "
+        "only for the handful of patients being plotted, so it is seconds.",
+    )
+    parser.add_argument(
+        "--cf-hours",
+        type=float,
+        default=24.0,
+        help="the hour the hypothetical branches leave from (default +24h)",
+    )
     parser.add_argument(
         "--subset",
         choices=SUBSETS,
@@ -1968,6 +2298,41 @@ def main() -> None:
             f"{paths.model_key}: patient {index} of {len(patients)}",
             logger,
         )
+
+    if args.counterfactuals:
+        logger.info(
+            f"hypothetical next tokens at +{args.cf_hours:g}h for "
+            f"{len(patients)} patient(s)"
+        )
+        cf_frame = extract_counterfactuals(paths, args, patients, logger)
+        if cf_frame.height:
+            # the same affine map the grid went through, or the branch and the
+            # path would sit in different spaces and every arrow would be
+            # measuring the correction rather than the token
+            cf_frame = apply_correction(
+                paths, cf_frame, args.correction, args.correction_anchor, logger
+            )
+            displacement = plot_counterfactual_paths(
+                frame, cf_frame, patients, home, paths, args, logger
+            )
+            if displacement.height:
+                out = paths.table_home / "counterfactual_displacement.csv"
+                displacement.write_csv(out)
+                logger.info(f"wrote {out.name}")
+                summary = (
+                    displacement.group_by("label")
+                    .agg(
+                        patients=pl.len(),
+                        median_displacement=pl.col("displacement").median(),
+                    )
+                    .sort("median_displacement", descending=True)
+                )
+                logger.info("  median branch displacement by intervention:")
+                for row in summary.iter_rows(named=True):
+                    logger.info(
+                        f"    {row['label']:<42} {row['median_displacement']:.2f} "
+                        f"(n={row['patients']})"
+                    )
     for spec in specs:
         plot_patient_paths(
             frame, spec, patients,

@@ -1,17 +1,23 @@
 #!/bin/bash
 #
-# Preflight: resolve every path in paths.yaml and check the model directory
-# is intact, before queueing anything. Safe on a login node -- it reads
-# config and lists directories, and opens no CLIF table.
+# Preflight: resolve every path in paths.yaml and check this machine has what
+# the run needs, before starting anything. Safe on a login node -- it reads
+# config and lists directories, and opens no CLIF table. Worth running whether
+# or not you have Slurm; it is the cheapest way to catch a misconfiguration.
 #
 #     bash hpc/00_preflight.sh
 #
-# The check that matters is the model glob. The weights directories are
-# named with a U+25A1 WHITE SQUARE between "GEM" and the dataset -- GEM□-all,
-# not GEM-all -- and `home_glob` matches it with a single-character wildcard,
-# `GEM?-all`. A copy that dropped the character, expanded it, or replaced it
-# with a multi-character escape leaves a glob that matches nothing or matches
-# twice, and the failure surfaces much later as a confusing path error.
+# For TIER 1 (01_site_tables.py) the checks that matter are the CLIF tables and
+# `tokenizer_yaml`. The model glob is reported but cannot fail the preflight:
+# tier 1 never loads the weights.
+#
+# For TIER 2 the model glob is the one people get wrong. The weights
+# directories are named with a U+25A1 WHITE SQUARE between "GEM" and the
+# dataset -- GEM□-all, not GEM-all -- and `home_glob` matches it with a
+# single-character wildcard, `GEM?-all`. A copy that dropped the character,
+# expanded it, or replaced it with a multi-character escape leaves a glob that
+# matches nothing or matches twice, and the failure surfaces much later as a
+# confusing path error.
 
 set -uo pipefail
 # Run directly (`bash hpc/00_preflight.sh`), never submitted, so unlike
@@ -47,6 +53,13 @@ def report(label, value, good, note=""):
     if not good:
         ok = False
     print(f"  [{mark}] {label:<16} {value}")
+    if note:
+        print(f"         {note}")
+
+
+def note_only(label, value, note=""):
+    """report something that is informational -- does not set the exit code"""
+    print(f"  [--  ] {label:<16} {value}")
     if note:
         print(f"         {note}")
 
@@ -118,7 +131,11 @@ for site in paths.sites:
     if extra:
         print(f"         also present, never read: {', '.join(extra)}")
 
-print("model")
+# TIER 2 ONLY. 01_site_tables.py never loads the weights -- it reads the
+# tokenizer, checked below -- so an unresolved glob here is reported but does
+# not fail the preflight. A site asked only for the aggregate tables can leave
+# `models.<key>.home_glob` pointing at nothing.
+print("model  (tier 2 only -- 01_site_tables.py does not read this)")
 try:
     home = paths.model_home
     config = pathlib.Path(home) / "config.json"
@@ -128,7 +145,10 @@ try:
     report("model.safetensors", weights.name, weights.is_file(),
            f"{weights.stat().st_size / 2**20:.0f} MiB" if weights.is_file() else "")
 except Exception as exc:
-    report("checkpoint", "unresolved", False, str(exc))
+    note_only("checkpoint", "unresolved",
+              "fine if you are running tier 1 only; 02_site_embeddings.py and "
+              "08_token_space.py will refuse to start until it resolves")
+    print(f"         {exc}")
     # the glob is the usual culprit; show what is actually on disk
     import re
     from omegaconf import OmegaConf
@@ -142,9 +162,15 @@ except Exception as exc:
             print(f"           {entry.name!r}  {cps or '(all ASCII)'}")
         print("         the glob needs EXACTLY ONE character where ? is.")
 
-print("tokenizer")
+# REQUIRED FOR TIER 1 AS WELL. The token-prevalence tables are token ids, and
+# they are only comparable across sites under the training-time mapping, so
+# this one is a hard failure whichever tier is being run.
+print("tokenizer  (required for tier 1 and tier 2)")
 tok = pathlib.Path(paths.tokenizer_yaml)
-report("tokenizer.yaml", tok, tok.is_file())
+report("tokenizer.yaml", tok, tok.is_file(),
+       "" if tok.is_file() else
+       "must be the tokenizer the model was TRAINED with -- a locally fitted "
+       "one maps the same clinical event to a different id")
 
 print("writable locations")
 for label, target in (("output_home", paths.output_home),

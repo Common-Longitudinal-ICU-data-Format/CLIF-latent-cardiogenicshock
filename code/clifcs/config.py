@@ -7,6 +7,7 @@ path resolution, config loading, and logging shared by all numbered scripts
 from __future__ import annotations
 
 import dataclasses
+import functools
 import glob
 import logging
 import os
@@ -103,12 +104,55 @@ class Paths:
 
     raw_site_data: dict[str, pathlib.Path]
     model_key: str
-    model_home: pathlib.Path
+    model_home_glob: str
     available_models: tuple[str, ...]
     tokenizer_yaml: pathlib.Path
     output_home: pathlib.Path
     scratch_home: pathlib.Path
     role: str = "site"
+
+    @functools.cached_property
+    def model_home(self) -> pathlib.Path:
+        """
+        the resolved checkpoint directory -- resolved on access, not on load
+
+        Tier 1 (`01_site_tables.py`) never loads the GEM weights. It reads the
+        tokenizer, which is a different file. Resolving the glob eagerly in
+        `load_paths` therefore made the weights a hard prerequisite for a run
+        that does not use them, and a site asked only for the aggregate tables
+        had to fetch a checkpoint tree to satisfy a check.
+
+        So the glob is resolved here instead, and raises only once something
+        actually reaches for the weights -- which is 02, 08, and the tier-2
+        manifest. A tier-1 site needs `tokenizer.yaml` and nothing else.
+
+        Cached, because 09 and `embedding.py` read `model_home.name` inside
+        per-split loops and the weights usually sit on a networked filesystem.
+        A raised FileNotFoundError is not cached, so a site that fixes its glob
+        mid-session does not have to reload paths.
+        """
+        matches = sorted(glob.glob(self.model_home_glob))
+        if len(matches) != 1:
+            raise FileNotFoundError(
+                f"models.{self.model_key}.home_glob matched {len(matches)} "
+                f"directories (expected exactly 1): {self.model_home_glob} -> "
+                f"{matches}. "
+                "The GEM weights are needed for tier 2 (02_site_embeddings.py) "
+                "and 08_token_space.py only. Tier 1 reads the tokenizer, so if "
+                "you are running 01_site_tables.py this path need not resolve."
+            )
+        home = pathlib.Path(matches[0]).resolve()
+        if not (home / "config.json").is_file():
+            raise FileNotFoundError(f"no config.json under {home}")
+        return home
+
+    @property
+    def model_home_or_none(self) -> pathlib.Path | None:
+        """`model_home` if the weights are on this machine, else None"""
+        try:
+            return self.model_home
+        except FileNotFoundError:
+            return None
 
     @property
     def site_data(self) -> dict[str, pathlib.Path]:
@@ -383,6 +427,10 @@ def load_paths(
     A pooled-role run still needs paths.yaml for the model and tokenizer (it
     has to check that the bundles it received were produced under the weights
     it holds), but its `sites` block may be empty.
+
+    The checkpoint glob is recorded but not resolved: `paths.model_home`
+    resolves it on access and raises there. Tier 1 never touches the weights,
+    so a site running only `01_site_tables.py` needs the tokenizer alone.
     """
     path = pathlib.Path(config or CONFIG_HOME / "paths.yaml")
     if not path.is_file():
@@ -414,17 +462,10 @@ def load_paths(
         raise KeyError(f"model {key!r} not in paths.yaml; have {available}")
 
     # the weights directory names contain a non-ASCII character, so they are
-    # globbed rather than written out literally
+    # globbed rather than written out literally. The glob is NOT resolved here
+    # -- see `Paths.model_home`, which resolves it on access so that a tier-1
+    # site, which never loads the weights, is not blocked by their absence.
     pattern = str(cfg.models[key].home_glob)
-    matches = sorted(glob.glob(pattern))
-    if len(matches) != 1:
-        raise FileNotFoundError(
-            f"models.{key}.home_glob matched {len(matches)} directories "
-            f"(expected exactly 1): {pattern} -> {matches}"
-        )
-    model_home = pathlib.Path(matches[0]).resolve()
-    if not (model_home / "config.json").is_file():
-        raise FileNotFoundError(f"no config.json under {model_home}")
 
     tokenizer_yaml = pathlib.Path(cfg.tokenizer_yaml).expanduser().resolve()
     if not tokenizer_yaml.is_file():
@@ -441,7 +482,7 @@ def load_paths(
         raw_site_data=site_data,
         role=resolved_role,
         model_key=key,
-        model_home=model_home,
+        model_home_glob=pattern,
         available_models=available,
         tokenizer_yaml=tokenizer_yaml,
         output_home=pathlib.Path(cfg.output_home).expanduser().resolve(),

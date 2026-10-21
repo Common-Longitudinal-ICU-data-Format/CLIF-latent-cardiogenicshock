@@ -40,6 +40,13 @@ sites:
 # colliding. All the GEM checkpoints share one architecture and one 1344-token
 # vocabulary, so they all read the same tokenized data.
 #
+# OPTIONAL FOR TIER 1. `01_site_tables.py` never loads the weights -- it reads
+# the tokenizer below, which is a different file. The glob is resolved on
+# access, so if you are only being asked for the aggregate tables you can leave
+# these paths pointing at nothing and tier 1 runs. Tier 2
+# (`02_site_embeddings.py`) and `08_token_space.py` resolve it and will refuse
+# to start until it points at exactly one directory holding `config.json`.
+#
 # NOTE the single-character wildcard. The weights directory holds both
 # `GEM-mimic-icu` and `GEM<star>-mimic-icu`; `GEM?-` matches only the second
 # (the 5-epoch "star" run), while `GEM*-` would match both and be ambiguous.
@@ -54,7 +61,9 @@ models:
 default_model: GEM-all
 
 # The fitted cocoa tokenizer the models were TRAINED with, shared by all of
-# them.
+# them. REQUIRED FOR EVERY TIER, including tier 1 -- the token-prevalence
+# tables in the bundle are token ids, and they are only comparable across sites
+# under one mapping.
 #
 # This is not interchangeable. A model's embedding table has one row per token
 # id and the numeric bin edges are baked into the token names, so a tokenizer

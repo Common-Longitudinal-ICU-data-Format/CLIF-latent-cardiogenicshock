@@ -99,7 +99,7 @@ def build(
     site: str,
     salt: str,
     model_key: str,
-    model_home: pathlib.Path,
+    model_home: pathlib.Path | None,
     tokenizer_yaml: pathlib.Path,
     anchors: tuple[str, ...],
     row_counts: dict[str, int],
@@ -114,11 +114,22 @@ def build(
         "site": site,
         "created_utc": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
         "code": code_version(),
+        # `model_home` is None for a tier-1 bundle produced on a machine that
+        # holds no weights, which is legitimate: tier 1 reads the tokenizer and
+        # never loads the model, so there is nothing for the coordinator to
+        # check the weights against. The tokenizer hash still travels, and it
+        # is the hash that matters for aggregate tables -- the token ids in
+        # `counts/` are only comparable across sites under one tokenizer.
+        # A tier-2 bundle always carries both, and `check_agreement`
+        # skips nulls rather than reading them as disagreement.
         "model": {
             "key": model_key,
-            "config_sha256": file_digest(model_home / "config.json"),
+            "config_sha256": file_digest(model_home / "config.json")
+            if model_home is not None
+            else None,
             "weights_sha256": file_digest(model_home / "model.safetensors")
-            if (model_home / "model.safetensors").is_file()
+            if model_home is not None
+            and (model_home / "model.safetensors").is_file()
             else None,
             "embedding_dim": embedding_dim,
         },

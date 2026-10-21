@@ -91,15 +91,23 @@ which one it is without reading any code, which is the point.
 ## The two site tiers
 
 **Tier 1 — [`01_site_tables.py`](../code/01_site_tables.py).** Every site runs
-it. Cohort → subset → derive → collate → tokenize → winnow → tokencounts →
-trials → export, as resumable stages. Everything it writes to
+it, and it is the only thing currently being asked of contributing sites.
+Cohort → subset → derive → collate → tokenize → winnow → tokencounts →
+baseline → trials → export, as resumable stages. Everything it writes to
 `upload_to_box_<SITE>/` is a count or an average over at least `--min-cell`
 patients. This is the classic CLIF federated contribution.
 
-**It needs no GPU and never loads the GEM weights.** It loads the *tokenizer*,
-which is a different file, because the token-prevalence table is built from the
-token stream. A site with no GPU, or with no agreement permitting patient-level
-transfer, runs this and stops.
+**It needs no GPU and never loads the GEM weights** — they need not be on the
+machine at all, since `models.<key>.home_glob` is resolved on access rather than
+at config load. It loads the *tokenizer*, which is a different file, because the
+token-prevalence table is built from the token stream. A site with no GPU, or
+with no agreement permitting patient-level transfer, runs this and stops.
+
+A bundle produced without the weights carries a null model hash in its manifest,
+which is correct: nothing was loaded, so there is nothing for the coordinator to
+check. Its tokenizer hash still travels, and that is the hash the token counts
+actually depend on. The pooled agreement check skips nulls rather than reading
+them as disagreement.
 
 That is a change. Tier 1 used to embed, because the phenotype-coherence measure
 needs the embeddings and that was the one substantive thing tier 1 reported
@@ -206,11 +214,10 @@ with "between one and ten were" would hide it.
 # once
 cp code/config/paths.example.yaml code/config/paths.yaml   # set role: site
 
-# tier 1 -- every site runs this. No GPU; the GEM weights are never loaded.
-python code/01_site_tables.py \
-    --phenotype-model <...>/phenotype_model.json \
-    --seymour-model   <...>/seymour_model.json \
-    --bhavani-model   <...>/bhavani_model.json
+# tier 1 -- every site runs this. No GPU; the GEM weights are never loaded,
+# and need not even be present. The shared phenotype models in models/ are
+# applied by default, so there are no flags to get wrong.
+python code/01_site_tables.py
 
 # tier 2 -- ONLY with a patient-level DUA in place. Needs a GPU.
 python code/02_site_embeddings.py --batch-size 8
@@ -221,10 +228,12 @@ run. Tier 1 alone is a complete, usable contribution: counts, the three
 phenotype breakdowns, the trial comparison, and the token-prevalence tables the
 site-effect decomposition reads.
 
-**The three `--*-model` flags are required at a contributing site.** Without
-them the site refits its own clusters and "phenotype II", "beta" and "group A"
-stop meaning the same thing at each site, which makes every pooled breakdown
-uninterpretable. The model files carry the feature set, the transform, the
+**A contributing site must not refit the phenotype models.** Its own clusters
+make "phenotype II", "beta" and "group A" mean something different there than at
+every other site, and every pooled breakdown becomes uninterpretable. 01 applies
+the shared models in `models/` by default and refuses to refit unless asked with
+`--refit-phenotypes`, which is only correct at the derivation site. The model
+files carry the feature set, the transform, the
 derivation cohort's moments and the centroids — all four, because a site that
 standardised against its own moments would re-centre the space and move patients
 between phenotypes without anything clinical changing.

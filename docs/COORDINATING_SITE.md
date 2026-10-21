@@ -79,16 +79,13 @@ under the token mapping it is about to interpret the exported ranks against.
 Tier 1, which you would run even if nothing else were permitted:
 
 ```bash
-python code/01_site_tables.py \
-    --phenotype-model models/phenotype_model.json \
-    --seymour-model   models/seymour_model.json \
-    --bhavani-model   models/bhavani_model.json
+python code/01_site_tables.py
 ```
 
-Nine stages: `cohort subset derive collate tokenize winnow tokencounts trials
-export`. All CPU -- tier 1 never loads the GEM weights. `derive` and `collate`
-are the slow ones. Resume with
-`--from-stage embed` rather than starting over.
+Ten stages: `cohort subset derive collate tokenize winnow tokencounts baseline
+trials export`. All CPU -- tier 1 never loads the GEM weights, and does not need
+them on disk. `derive` and `collate` are the slow ones; resume with
+`--from-stage collate` rather than starting over.
 
 **Read `output/cohort/filter_ledger.csv` before running anything expensive.** The
 two failures it catches are an ICU definition that does not match your unit
@@ -118,20 +115,24 @@ that cannot be matched to what you already sent.
 Send them the repo URL, the branch, and this:
 
 ```bash
-# tier 1 -- everyone
-python code/01_site_tables.py \
-    --phenotype-model models/phenotype_model.json \
-    --seymour-model   models/seymour_model.json \
-    --bhavani-model   models/bhavani_model.json
+# THE CURRENT REQUEST -- tier 1, everyone. No GPU, no weights, no flags.
+python code/01_site_tables.py
+```
 
-# tier 2 -- ONLY with the patient-level DUA executed. Needs a GPU.
+Then ask for `output/upload_to_box_<SITE>/`.
+
+Tier 2 is a separate ask, made only of sites with the patient-level DUA
+executed, and it needs a GPU:
+
+```bash
 python code/02_site_embeddings.py --batch-size 8
 ```
 
-The three `--*-model` flags are **not optional at a contributing site**. Without
-them the site refits its own clusters and "phenotype II", "beta" and "group A"
-stop meaning the same thing anywhere, which makes every pooled breakdown
-uninterpretable. The models ship in `models/`, so they arrive with the clone.
+A contributing site needs no flags: 01 applies the models in `models/` by
+default, and they arrive with the clone. **Confirm no site refit.** A refit
+takes `--refit-phenotypes` and logs a warning, so check for it -- its own
+clusters make "phenotype II", "beta" and "group A" mean something different at
+that site, and every pooled breakdown becomes uninterpretable.
 
 Ask every site for `upload_to_box_<SITE>/`. That is the whole request: a
 tier-2 site's bundle is the same directory with a `patient/` subdirectory in

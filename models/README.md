@@ -1,20 +1,24 @@
 # Fitted phenotype models
 
 The three phenotype assignments, fitted once on the derivation cohort and
-**transferred** to every contributing site. A site passes them to
-`01_site_aggregate.py`:
+**transferred** to every contributing site. `01_site_tables.py` applies them by
+default, so a contributing site passes no flags at all:
 
 ```bash
-python code/01_site_aggregate.py \
-    --phenotype-model models/phenotype_model.json \
-    --seymour-model   models/seymour_model.json \
-    --bhavani-model   models/bhavani_model.json
+python code/01_site_tables.py
 ```
 
-These flags are **required at a contributing site**. Without them the site
-refits its own clusters, and "phenotype II", "beta" and "group A" stop meaning
-the same thing at each site — which makes every pooled breakdown
-uninterpretable.
+They can be pointed elsewhere with `--phenotype-model`, `--seymour-model` and
+`--bhavani-model`, but the shipped files are the ones a contributing site wants.
+
+**Refitting has to be asked for**, with `--refit-phenotypes`, and is only
+correct at the derivation site. Without the shared models a site gets its own
+clusters, and "phenotype II", "beta" and "group A" stop meaning the same thing
+at each site — which makes every pooled breakdown uninterpretable. That used to
+be the silent default when the flags were absent, and it bit us: at Rush a
+shell ate the flags, the cohort stage refit its own clusters, and the only sign
+was the word "refit" in one log line among warnings that looked like findings
+about the data.
 
 ## Why these are in git when nothing else derived from patients is
 
@@ -53,7 +57,7 @@ because the default is the wrong answer and it is wrong silently.
 At the derivation site only:
 
 ```bash
-python code/01_site_aggregate.py --stage cohort
+python code/01_site_tables.py --stage cohort --refit-phenotypes
 cp output/cohort/{phenotype,seymour,bhavani}_model.json models/
 ```
 

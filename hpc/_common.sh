@@ -72,10 +72,12 @@ source "$VENV_HOME/bin/activate"
 cd "$REPO_HOME"
 mkdir -p logs
 
-# The three phenotype models are REQUIRED at a contributing site. Without
-# them the site refits its own clusters and "phenotype II", "beta" and
-# "group A" stop meaning the same thing at each site, which makes every
-# pooled breakdown uninterpretable. They are in git, under models/.
+# The three shared phenotype models, applied rather than refit. 01 now
+# defaults to exactly these files, so passing them is belt and braces rather
+# than mandatory -- but it keeps the invocation self-documenting in the job
+# log. A site must NOT refit: its own clusters make "phenotype II", "beta"
+# and "group A" mean something different here than everywhere else, and every
+# pooled breakdown becomes uninterpretable. They are in git, under models/.
 PHENOTYPE_FLAGS=(
     --phenotype-model models/phenotype_model.json
     --seymour-model   models/seymour_model.json

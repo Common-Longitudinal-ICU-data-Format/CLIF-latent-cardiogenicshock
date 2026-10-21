@@ -33,8 +33,10 @@
 # first version of these scripts sourced that path, failed, and carried on
 # regardless -- because `set -e` lived inside the file that had not loaded.
 # The job then ran with no module load, no venv activation, and an empty
-# PHENOTYPE_FLAGS, which silently refits the phenotype models instead of
-# applying the shared ones.
+# PHENOTYPE_FLAGS. That no longer refits silently -- 01 now applies the
+# models shipped in models/ by default and makes you ask for a refit with
+# --refit-phenotypes -- but a job running without its venv or modules is
+# still broken, so the check stays.
 #
 # SLURM_SUBMIT_DIR is where sbatch was invoked, which the docs say is the
 # repository root. Overridable, and checked rather than assumed.
