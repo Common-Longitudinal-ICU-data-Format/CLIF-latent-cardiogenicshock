@@ -2006,6 +2006,23 @@ def section_sites(paths, out: list) -> None:
     token_panels.append(
         ("Token-family mix", figure(tornado / "site_token_families.png"))
     )
+    # A volcano per site, which answers a different question from the tornado:
+    # the tornado is pairwise and ranks on a raw difference, so it is dominated
+    # by the commonest tokens and says nothing about noise. This asks which
+    # tokens each site is unusual for against everywhere else, with an effect
+    # size and a corrected p-value.
+    volcano_panels = [
+        (home_site, figure(
+            tornado / f"site_token_volcano_{home_site}.png",
+            f"{home_site} against every other site: log2 prevalence ratio "
+            "against corrected significance",
+        ))
+        for home_site in sorted(
+            f.stem.split("site_token_volcano_")[-1]
+            for f in tornado.glob("site_token_volcano_*.png")
+        )
+    ]
+    volcano_panels = [(label, body) for label, body in volcano_panels if body]
     token_panels = [(label, body) for label, body in token_panels if body]
     if not features and not token_panels:
         return
@@ -2025,6 +2042,28 @@ def section_sites(paths, out: list) -> None:
         f = paths.output_home / "tables" / "GEM-all" / f"site_lda_anchor-{anchor}.csv"
         if f.is_file():
             lda_rows.append(pl.read_csv(f))
+    if volcano_panels:
+        out.append("<h3>Tokens enriched and depleted at each site</h3>")
+        out.append(
+            "<p>One point per vocabulary entry. Effect is the log2 ratio of "
+            "<b>prevalence</b> &mdash; the share of patients emitting the token "
+            "at least once &mdash; at that site against every other, and "
+            "significance is a chi-square on the 2&times;2 of patients with and "
+            "without it, Bonferroni-corrected across every test. Open markers "
+            "are tokens only that site records at all: their true ratio is "
+            "infinite and the plotted value is a floor.</p>"
+        )
+        out.append(callout(
+            "<b>Read the effect size before the p-value.</b> With tens of "
+            "thousands of patients almost every token clears an uncorrected "
+            "threshold, and a great many clear the corrected one too &mdash; so "
+            "the vertical axis mostly separates common tokens from rare ones, "
+            "not real differences from noise. The horizontal axis is the "
+            "finding. Points along the top edge are at the floating-point "
+            "floor for p, not at a meaningfully larger significance than each "
+            "other.", "warn"))
+        out.append(tabs(volcano_panels))
+
     if token_panels:
         out.append("<h3>What each site charts</h3>")
         out.append(

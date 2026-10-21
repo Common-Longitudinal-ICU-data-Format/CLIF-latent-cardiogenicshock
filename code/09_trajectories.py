@@ -1600,7 +1600,13 @@ def plot_patient_path_single(frame, patient, index, out, title, logger) -> None:
 
     tx, ty = path[_px].to_numpy(), path[_py].to_numpy()
     ax.plot(tx, ty, "-", color=INK_PRIMARY, linewidth=1.3, zorder=3, alpha=0.9)
-    ax.scatter(tx, ty, s=34, c=INK_PRIMARY, zorder=4, linewidths=0)
+    # White at the first timepoint through to black at the last, every marker
+    # outlined in black. The ramp carries the direction of travel without
+    # needing a label on each point, which is what made these unreadable: the
+    # hour labels were doing a job the colour can do.
+    shade = np.linspace(1.0, 0.0, len(tx)) if len(tx) > 1 else np.array([0.0])
+    ax.scatter(tx, ty, s=46, c=[(v, v, v) for v in shade],
+               edgecolors=INK_PRIMARY, linewidths=0.9, zorder=4)
 
     # ONE label per end, carrying both the word and the hour. Annotating "end"
     # and "+48h" separately put two strings on the same coordinate, which was
@@ -1914,7 +1920,9 @@ def plot_counterfactual_paths(
 
         tx, ty = path[_px].to_numpy(), path[_py].to_numpy()
         ax.plot(tx, ty, "-", color=INK_PRIMARY, linewidth=1.2, zorder=3, alpha=0.9)
-        ax.scatter(tx, ty, s=26, c=INK_PRIMARY, zorder=4, linewidths=0)
+        shade = np.linspace(1.0, 0.0, len(tx)) if len(tx) > 1 else np.array([0.0])
+        ax.scatter(tx, ty, s=38, c=[(v, v, v) for v in shade],
+                   edgecolors=INK_PRIMARY, linewidths=0.9, zorder=4)
 
         # the branch point: the patient position at the hour the hypotheticals
         # leave from, which is the grid point nearest args.cf_hours

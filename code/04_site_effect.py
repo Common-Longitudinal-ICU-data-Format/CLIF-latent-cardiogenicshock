@@ -48,7 +48,15 @@ from sklearn.preprocessing import StandardScaler
 from clifcs import ANCHORS, get_logger, load_paths
 from clifcs import site_embedding_files
 from clifcs.figures import save_figure
-from clifcs.palette import GRID, INK_PRIMARY, INK_SECONDARY, SURFACE, site_colors
+from clifcs.palette import (
+    CATEGORICAL,
+    CONTEXT,
+    GRID,
+    INK_PRIMARY,
+    INK_SECONDARY,
+    SURFACE,
+    site_colors,
+)
 from clifcs.tokens import (
     family_matrix,
     load_pre_anchor_tokens,
@@ -728,6 +736,219 @@ def stage_matched(frame: pl.DataFrame, anchor: str, sites, logger) -> pl.DataFra
 # =============================================================== plotting
 
 
+def _pooled_token_prevalence(paths, anchor: str, logger) -> pl.DataFrame:
+    """
+    the tier-1 token_prevalence tables, stacked, with the patient counts kept
+
+    `_pooled_token_counts` reduces to (token, site, n) because that is all the
+    tornado needs. The volcano needs the patient count and the cohort size to
+    build a 2x2, so it reads the same tables and keeps more of them.
+    """
+    from clifcs.export import bundles as bundle_io
+
+    if paths.role == "pooled":
+        found = bundle_io.discover(paths.received_home, logger)
+        table = bundle_io.load_counts(
+            found, f"token_prevalence_anchor-{anchor}.csv", logger
+        )
+        if table is None:
+            return pl.DataFrame()
+        return table
+
+    frames = []
+    for site in paths.sites:
+        path = paths.cohort_home / f"token_prevalence_{site}_anchor-{anchor}.csv"
+        if path.is_file():
+            frames.append(pl.read_csv(path))
+    if not frames:
+        logger.info(
+            f"[{anchor}] no token_prevalence tables; run 01 --stage tokencounts"
+        )
+        return pl.DataFrame()
+    return pl.concat(frames, how="diagonal_relaxed")
+
+
+def token_enrichment(counts_by_site: pl.DataFrame, logger) -> pl.DataFrame:
+    """
+    per-token enrichment at each site against the pooled others
+
+    The tornado answers "which tokens differ most between these two sites" and
+    ranks on the raw difference, so it is dominated by the commonest tokens and
+    cannot say whether a difference exceeds sampling noise. This answers a
+    different question -- which tokens is THIS site unusual for -- with an
+    effect size and a p-value, which is what a volcano plot needs.
+
+    Effect is the log2 ratio of PREVALENCE: the share of patients emitting the
+    token at least once, here against everywhere else. Prevalence rather than
+    rate, because a proportion has a sampling distribution a two-proportion
+    test can use, and because "how many patients does this happen to" is the
+    question; a per-patient rate conflates that with how often it repeats in
+    the patients it happens to.
+
+    Significance is a two-sided chi-square on the 2x2 of patients with and
+    without the token, site against the rest, Bonferroni-corrected across every
+    test. With tens of thousands of patients almost everything clears an
+    uncorrected threshold, so the correction does real work and the effect size
+    is what should be read first.
+
+    Suppressed cells are dropped rather than treated as zero: a blank means
+    between one and min_cell patients, which is not none.
+    """
+    from scipy.stats import chi2_contingency
+
+    frame = counts_by_site.filter(pl.col("n_patients").is_not_null())
+    if frame.is_empty():
+        return pl.DataFrame()
+
+    cohort = dict(
+        frame.group_by("site").agg(n=pl.col("n_cohort").max()).iter_rows()
+    )
+    total = sum(cohort.values())
+
+    rows = []
+    for (token,), group in frame.group_by(["token_name"], maintain_order=True):
+        per_site = dict(zip(group["site"].to_list(), group["n_patients"].to_list()))
+        everywhere = sum(per_site.values())
+        for site, n_site in per_site.items():
+            n_rest = everywhere - n_site
+            cohort_site = cohort.get(site, 0)
+            cohort_rest = total - cohort_site
+            if cohort_site == 0 or cohort_rest == 0 or n_site <= 0:
+                continue
+            # a token nobody else emits has an infinite ratio. Half a patient in
+            # the denominator makes it finite so the point lands on the figure,
+            # and the marker is open so the value reads as a floor.
+            exclusive = n_rest == 0
+            p_site = n_site / cohort_site
+            p_rest = max(n_rest, 0.5) / cohort_rest
+            table = [
+                [int(n_site), int(cohort_site - n_site)],
+                [int(n_rest), int(cohort_rest - n_rest)],
+            ]
+            if min(min(r) for r in table) < 0:
+                continue
+            try:
+                _, pvalue, _, _ = chi2_contingency(table)
+            except ValueError:
+                continue
+            rows.append({
+                "site": site,
+                "token_name": token,
+                "family": group["family"][0],
+                "n_patients": int(n_site),
+                "prevalence_site": p_site,
+                "prevalence_rest": n_rest / cohort_rest,
+                "log2_ratio": float(np.log2(p_site / p_rest)),
+                "p_value": float(pvalue),
+                "site_exclusive": bool(exclusive),
+            })
+
+    if not rows:
+        return pl.DataFrame()
+    out = pl.DataFrame(rows)
+    tested = out.height
+    out = out.with_columns(
+        p_adjusted=pl.min_horizontal(pl.col("p_value") * tested, pl.lit(1.0))
+    )
+    logger.info(
+        f"  token enrichment: {tested} site-by-token tests, "
+        f"{int((out['p_adjusted'] < 0.05).sum())} significant after Bonferroni"
+    )
+    return out
+
+
+def plot_token_volcano(enrichment: pl.DataFrame, site: str, out_path, anchor,
+                       logger, top_n: int = 12) -> None:
+    """
+    volcano of token enrichment for one site against all the others
+
+    Effect on x, significance on y, one point per token. Enriched right,
+    depleted left. The labelled points are the largest EFFECTS among the
+    significant, not the most significant: with this many patients the smallest
+    p-values belong to commonplace tokens with trivial differences, and
+    labelling those says nothing.
+
+    Colours are the two all-pairs-validated CATEGORICAL slots rather than the
+    red-green a volcano usually wears, which fails the colourblind gate this
+    project applies to every other figure.
+
+    Site-exclusive tokens are open markers: their true ratio is infinite and the
+    plotted value is a floor.
+    """
+    part = enrichment.filter(pl.col("site") == site)
+    if part.is_empty():
+        return
+
+    x = part["log2_ratio"].to_numpy()
+    y = -np.log10(np.maximum(part["p_adjusted"].to_numpy(), 1e-300))
+    significant = part["p_adjusted"].to_numpy() < 0.05
+    exclusive = part["site_exclusive"].to_numpy()
+    enriched = significant & (x > 1) & ~exclusive
+    depleted = significant & (x < -1) & ~exclusive
+
+    figure, ax = plt.subplots(figsize=(7.0, 5.6))
+    ax.scatter(x[~significant], y[~significant], s=7, c=CONTEXT, linewidths=0,
+               rasterized=True, label="not significant")
+    ax.scatter(x[depleted], y[depleted], s=16, c=CATEGORICAL[0], linewidths=0,
+               rasterized=True, label=f"depleted at {site}")
+    ax.scatter(x[enriched], y[enriched], s=16, c=CATEGORICAL[1], linewidths=0,
+               rasterized=True, label=f"enriched at {site}")
+    if exclusive.any():
+        ax.scatter(x[exclusive], y[exclusive], s=26, facecolors="none",
+                   edgecolors=CATEGORICAL[1], linewidths=0.9,
+                   label=f"only {site} records it")
+
+    ax.axvline(0, color=GRID, linewidth=0.6)
+    for cut in (-1.0, 1.0):
+        ax.axvline(cut, color=GRID, linewidth=0.5, linestyle=":")
+    ax.axhline(-np.log10(0.05), color=GRID, linewidth=0.5, linestyle=":")
+
+    labelled = (
+        part.with_columns(magnitude=pl.col("log2_ratio").abs())
+        .filter(pl.col("p_adjusted") < 0.05)
+        .sort("magnitude", descending=True)
+        .head(top_n)
+    )
+    # Collision-aware labelling, in axes fraction so the threshold means the
+    # same thing on both axes. Everything that hits the 1e-300 p-value floor
+    # lands on one horizontal line, so the biggest effects are exactly the
+    # points most likely to overlap each other.
+    span_x = max(np.ptp(x), 1e-9)
+    span_y = max(np.ptp(y), 1e-9)
+    placed: list[tuple[float, float]] = []
+    for row in labelled.iter_rows(named=True):
+        lx = row["log2_ratio"]
+        ly = -np.log10(max(row["p_adjusted"], 1e-300))
+        fx, fy = lx / span_x, ly / span_y
+        if any(np.hypot(fx - qx, fy - qy) < 0.05 for qx, qy in placed):
+            continue
+        ax.annotate(
+            row["token_name"].split("//")[-1], (lx, ly),
+            fontsize=6, color=INK_SECONDARY, xytext=(4, 3),
+            textcoords="offset points",
+        )
+        placed.append((fx, fy))
+
+    ax.set_xlabel(f"log2 prevalence ratio, {site} against every other site")
+    ax.set_ylabel("-log10 adjusted p  (chi-square, Bonferroni)")
+    ax.set_title(
+        f"Tokens enriched and depleted at {site}, {anchor} anchor",
+        loc="left", pad=8,
+    )
+    ax.legend(loc="upper left", fontsize=6.5, frameon=False, markerscale=1.3)
+    ax.grid(True, color=GRID, linewidth=0.4, alpha=0.6)
+    ax.set_axisbelow(True)
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    figure.tight_layout()
+    save_figure(figure, out_path)
+    plt.close(figure)
+    logger.info(
+        f"wrote {out_path.name}: {int(enriched.sum())} enriched, "
+        f"{int(depleted.sum())} depleted, {int(exclusive.sum())} exclusive"
+    )
+
+
 def plot_token_tornado(
     counts: pl.DataFrame,
     site_sizes: dict[str, int],
@@ -951,6 +1172,24 @@ def main() -> None:
                     f"[{anchor}] drew {len(pairs)} pairwise tornados: "
                     + ", ".join("-vs-".join(p) for p in pairs)
                 )
+
+            # And a volcano per site. The tornado is pairwise and ranks on a raw
+            # difference, so it is dominated by common tokens and says nothing
+            # about noise; this asks which tokens each site is unusual for,
+            # against everywhere else, with an effect size and a p-value.
+            prevalence = _pooled_token_prevalence(paths, anchor, logger)
+            if prevalence.height:
+                enrichment = token_enrichment(prevalence, logger)
+                if enrichment.height:
+                    enrichment.write_csv(
+                        paths.table_home / f"site_token_enrichment_anchor-{anchor}.csv"
+                    )
+                    for site in sites:
+                        plot_token_volcano(
+                            enrichment, site,
+                            figures / f"site_token_volcano_{site}.png",
+                            anchor, logger,
+                        )
 
         axis_tables.append(stage_axis(paths, frame, anchor, sites, logger))
         frame, regions = stage_regions(frame, anchor, sites, logger)

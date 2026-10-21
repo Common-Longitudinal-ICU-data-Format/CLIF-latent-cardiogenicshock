@@ -67,7 +67,24 @@ def _redirect_hf_cache() -> None:
         return
     if not scratch:
         return
-    cache = pathlib.Path(str(scratch)).expanduser() / "hf-cache"
+    # PER PROCESS. Two runs sharing one cache directory destroy each other:
+    # both clear it between grid points, so one deletes an arrow file the other
+    # is still reading. That killed a septic grid extract twice -- first as a
+    # PermissionError in the process doing the deleting, and then, after the
+    # deleter was made not to raise, as a FileNotFoundError in the process doing
+    # the reading. Making the deletion forgiving moved the failure rather than
+    # removing it.
+    #
+    # Per-process costs nothing because this cache is never read back: cotorra
+    # maps a closure, `datasets` cannot fingerprint it, and every lookup misses
+    # by construction. There is no reuse to lose.
+    #
+    # A crashed run leaves its directory behind, bounded at roughly one grid
+    # point. Nothing sweeps those, deliberately: deleting another process's
+    # directory is the bug this is fixing.
+    cache = (
+        pathlib.Path(str(scratch)).expanduser() / "hf-cache" / f"pid-{os.getpid()}"
+    )
     cache.mkdir(parents=True, exist_ok=True)
     os.environ["HF_HOME"] = str(cache)
     os.environ["HF_DATASETS_CACHE"] = str(cache / "datasets")
