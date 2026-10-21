@@ -464,6 +464,60 @@ def section_cohort(paths, cfg, out: list) -> None:
             "within a site, never across. Section 9 takes the uncoded group as "
             "its subject.", "warn"))
 
+        baseline_file = paths.cohort_home / "baseline_by_shock_type.csv"
+        parts = sorted(paths.cohort_home.glob("baseline_by_shock_type_*.csv"))
+        if parts or baseline_file.is_file():
+            frames = [pl.read_csv(f) for f in (parts or [baseline_file])]
+            baseline = pl.concat(frames, how="diagonal_relaxed")
+            out.append("<h3>Who these patients are, by shock type</h3>")
+            out.append(
+                "<p>Median [IQR] for the continuous variables and n (%) for the "
+                "binary ones, measured <b>at shock onset</b> rather than at "
+                "admission or over the stay &mdash; the question is how each "
+                "mechanism presented, and a median over a whole admission "
+                "weights a patient by how long they stayed. Norepinephrine "
+                "equivalents are used rather than a count of agents, because a "
+                "dose of phenylephrine and a dose of norepinephrine are not the "
+                "same quantity and &ldquo;on a pressor&rdquo; discards the "
+                "difference this comparison is about. Cells naming fewer than "
+                "the minimum cell size are blank, not zero.</p>"
+            )
+            display = baseline.with_columns(
+                value=pl.when(pl.col("kind") == "continuous")
+                .then(
+                    pl.when(pl.col("median").is_null())
+                    .then(pl.lit(""))
+                    .otherwise(
+                        pl.col("median").cast(pl.String)
+                        + pl.lit(" [") + pl.col("q1").cast(pl.String)
+                        + pl.lit("-") + pl.col("q3").cast(pl.String) + pl.lit("]")
+                    )
+                )
+                .otherwise(
+                    pl.when(pl.col("share").is_null())
+                    .then(pl.lit(""))
+                    .otherwise(
+                        pl.col("n_measured").cast(pl.String)
+                        + pl.lit(" (")
+                        + (pl.col("share") * 100).round(1).cast(pl.String)
+                        + pl.lit("%)")
+                    )
+                )
+            )
+            out.append(tabs([
+                (
+                    str(site).upper(),
+                    table(
+                        display.filter(pl.col("site") == site)
+                        .select("variable", "shock_type", "value")
+                        .pivot(on="shock_type", index="variable", values="value"),
+                        {},
+                        key_column="variable",
+                    ),
+                )
+                for site in display["site"].unique(maintain_order=True).to_list()
+            ]))
+
     # --------------------------------------------------------- the phenotypes
     phenotype_tabs = []
     summary_file = paths.cohort_home / "phenotype_summary.csv"
@@ -1726,14 +1780,26 @@ def section_flow(paths, out: list) -> None:
     # field through a cell where half the patients move each way still draws an
     # arrow, with only the coherence number beside it to say so -- these panels
     # are what that arrow is an average of.
-    paths_figure = figure(
-        home / "patient_paths.png",
-        "Each dot is one 6-hourly grid point, joined in time order and "
-        "labelled with hours from shock onset",
-    )
-    if paths_figure:
+    # One figure per patient, tabbed. Eight on a shared canvas gave each about
+    # three inches and the hour labels overlapped whatever the spacing rule --
+    # the constraint was the panel size, not the rule.
+    patient_panels = [
+        (f"Patient {index}", figure(home / f"patient_path_{index:02d}.png", ""))
+        for index in range(1, 13)
+    ]
+    patient_panels = [(label, body) for label, body in patient_panels if body]
+    if patient_panels:
         out.append('<h3>Individual patients</h3>')
-        out.append(paths_figure)
+        out.append(
+            "<p>Each dot is one 6-hourly grid point, joined in time order, with "
+            "the hour relative to shock onset. These patients were chosen "
+            "<b>because their own path follows the averaged field</b> &mdash; a "
+            "deliberately biased sample, picked to show what the arrows are an "
+            "average of. A patient drawn at random is usually a few coincident "
+            "dots and one long jump. Nothing is measured from these; the field "
+            "beside them carries any claim.</p>"
+        )
+        out.append(tabs(patient_panels))
 
     out.append(callout(
         "<b>Patients do not follow these lines.</b> A streamplot integrates its "

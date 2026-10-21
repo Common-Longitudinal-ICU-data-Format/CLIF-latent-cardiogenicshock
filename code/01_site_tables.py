@@ -95,6 +95,10 @@ STAGES = (
     # 04 draws its tornado from this table, which is why that figure now
     # survives for a site that shares nothing patient-level.
     "tokencounts",
+    # who these patients are, split by the coded mechanism. Reads raw CLIF for
+    # the physiology at onset, so it has to run site-side; everything it emits
+    # is a median or a share.
+    "baseline",
     "trials",
     "export",
 )
@@ -620,6 +624,58 @@ def stage_tokencounts(paths, sites, logger, min_cell: int) -> None:
                 )
 
 
+# ======================================================== stage: baseline
+
+
+def stage_baseline(paths, sites, logger, min_cell: int) -> None:
+    """
+    median [IQR] and n (%) for each coded shock type
+
+    The table a reader wants before any latent-space claim, and the one that
+    says whether "cardiogenic" and "septic" describe clinically different
+    patients at this site at all. Physiology is taken at cs_onset_dttm, through
+    the same code 09 uses for its grid.
+
+    Per site and never pooled: coding practice differs enough between sites
+    that a pooled median is a weighted average over three documentation
+    habits. The coordinating site stacks them and compares.
+    """
+    from clifcs import baseline
+
+    cohort = pl.read_parquet(paths.cohort_home / "cohort.parquet")
+    for site in sites:
+        part = cohort.filter(pl.col("site") == site)
+        if part.height == 0:
+            continue
+        logger.info(f"[{site}] baseline characteristics by shock type")
+        # raw_subset, not site_data: the physiology needs the DERIVED tables
+        # (clif_medication_admin_continuous_converted, clif_sofa) that the
+        # derive stage wrote into scratch, and norepinephrine equivalents
+        # cannot be computed without the dose conversion. This is the same
+        # directory 09 passes trajectory_state.
+        collected = baseline.collect(paths.raw_subset(site), part, logger)
+        table = baseline.summarise(collected, site, min_cell)
+        if not table.height:
+            logger.warning(f"[{site}] baseline table is empty")
+            continue
+        out = paths.cohort_home / f"baseline_by_shock_type_{site}.csv"
+        table.write_csv(out)
+        blanked = int(table.select(pl.col("n").is_null().sum()).item())
+        logger.info(
+            f"  wrote {out.name}: {table.height} rows across "
+            f"{table['shock_type'].n_unique()} shock types"
+            + (f", {blanked} suppressed below n={min_cell}" if blanked else "")
+        )
+        for row in table.filter(
+            (pl.col("variable") == "MAP at onset (mmHg)")
+            & pl.col("median").is_not_null()
+        ).iter_rows(named=True):
+            logger.info(
+                f"    {row['shock_type']:<14} MAP {row['median']:.0f} "
+                f"[{row['q1']:.0f}-{row['q3']:.0f}]  n={row['n']}"
+            )
+
+
 # ===================================================== stage: trials, export
 
 
@@ -974,6 +1030,8 @@ def main() -> None:
         stage_winnow(paths, sites, logger, args.force)
     if "tokencounts" in todo:
         stage_tokencounts(paths, sites, logger, args.min_cell)
+    if "baseline" in todo:
+        stage_baseline(paths, sites, logger, args.min_cell)
     if "trials" in todo:
         stage_trials(paths, sites, logger, args.min_cell)
     if "export" in todo:

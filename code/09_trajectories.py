@@ -1100,6 +1100,106 @@ def plot_single_colouring(frame, spec, out, title, logger):
     logger.info(f"wrote {out.name}")
 
 
+def path_alignment(frame: pl.DataFrame, patient, cx, cy, vx, vy, counts) -> float:
+    """
+    how well one patient's own path follows the averaged flow field
+
+    The mean cosine between each of the patient's steps and the field vector in
+    the cell that step starts from. +1 means they travel with the field at every
+    step, 0 means their motion is unrelated to it, -1 means they move against
+    it throughout.
+
+    This exists to choose figures, not to measure anything. A panel is meant to
+    show what the arrows are an average OF, and a patient drawn at random is
+    usually a few coincident dots with one long jump -- legible as data, useless
+    as illustration. Picking patients that follow the field answers "what does
+    moving with the flow look like for one person", which is the question the
+    field invites and cannot itself answer.
+
+    It is emphatically a biased sample, and the figure caption says so.
+    """
+    _px, _py = proj_cols()
+    path = frame.filter(pl.col("hospitalization_id") == patient).sort("offset_hours")
+    if path.height < 3:
+        return float("nan")
+    tx, ty = path[_px].to_numpy(), path[_py].to_numpy()
+    dx, dy = np.diff(tx), np.diff(ty)
+
+    # the cell each step starts in
+    ix = np.clip(np.searchsorted(cx, tx[:-1]) - 1, 0, len(cx) - 1)
+    iy = np.clip(np.searchsorted(cy, ty[:-1]) - 1, 0, len(cy) - 1)
+
+    cosines = []
+    for sx, sy, i, j in zip(dx, dy, ix, iy):
+        if counts[j, i] < 5:
+            continue
+        fx, fy = vx[j, i], vy[j, i]
+        step = np.hypot(sx, sy)
+        field = np.hypot(fx, fy)
+        if step < 1e-9 or field < 1e-9 or not np.isfinite(field):
+            continue
+        cosines.append((sx * fx + sy * fy) / (step * field))
+    return float(np.mean(cosines)) if cosines else float("nan")
+
+
+def pick_flow_followers(frame: pl.DataFrame, x, y, n: int = 8,
+                        min_points: int = 6, pool: int = 400, seed: int = 7):
+    """
+    patients whose own path follows the flow field, spread across the groups
+
+    Two stages. A stratified random pool first, so every (outcome, phenotype)
+    combination is represented and the result is not simply the eight patients
+    with the longest paths; then the best-aligned from each stratum.
+
+    `min_points` is higher than the plain sampler's: a path needs enough steps
+    for "follows the field" to mean anything, and six grid points is three
+    steps at the coarsest useful resolution.
+    """
+    cx, cy, vx, vy, counts, _ = displacement_field(frame, x, y)
+
+    eligible = (
+        frame.group_by("hospitalization_id")
+        .agg(points=pl.len())
+        .filter(pl.col("points") >= min_points)
+    )
+    if eligible.height == 0:
+        return []
+
+    keys = [c for c in ("in_hospital_mortality", "cs_phenotype") if c in frame.columns]
+    table = (
+        frame.select("hospitalization_id", *keys)
+        .unique(subset=["hospitalization_id"])
+        .join(eligible, on="hospitalization_id", how="inner")
+        .sort("hospitalization_id")
+    )
+
+    rng = np.random.default_rng(seed)
+    strata: list[list] = []
+    if keys:
+        for (_, group) in table.group_by(keys, maintain_order=True):
+            ids = group["hospitalization_id"].to_list()
+            rng.shuffle(ids)
+            strata.append(ids[: max(1, pool // max(len(keys), 1))])
+    else:
+        ids = table["hospitalization_id"].to_list()
+        rng.shuffle(ids)
+        strata = [ids[:pool]]
+
+    chosen: list = []
+    for bucket in strata:
+        scored = [
+            (path_alignment(frame, pid, cx, cy, vx, vy, counts), pid)
+            for pid in bucket
+        ]
+        scored = [(s, p) for s, p in scored if np.isfinite(s)]
+        if scored:
+            scored.sort(reverse=True)
+            chosen.append(scored[0])
+
+    chosen.sort(reverse=True)
+    return [pid for _, pid in chosen[:n]]
+
+
 def pick_patients(frame: pl.DataFrame, n: int = 8, min_points: int = 5, seed: int = 7):
     """
     patients with enough timepoints to show a path, spread across the groups
@@ -1149,6 +1249,86 @@ def pick_patients(frame: pl.DataFrame, n: int = 8, min_points: int = 5, seed: in
             if bucket and len(chosen) < n:
                 chosen.append(bucket.pop())
     return chosen
+
+
+def plot_patient_path_single(frame, patient, index, out, title, logger) -> None:
+    """
+    ONE patient per figure, so the HTML can lay them out however it likes
+
+    Previously eight patients shared one 4-column canvas, which made each panel
+    about three inches wide: the hour labels overlapped whatever the spacing
+    rule, because the problem was the panel size and not the rule. A figure per
+    patient gives each the whole canvas and lets the report arrange them.
+
+    Labels are placed by walking the path and skipping any point closer than a
+    fixed fraction of the panel to the last label placed, ends always kept. At
+    full size that leaves them legible even where a patient hovers in one spot.
+    """
+    _px, _py = proj_cols()
+    path = frame.filter(pl.col("hospitalization_id") == patient).sort("offset_hours")
+    if path.height < 2:
+        return
+
+    figure, ax = plt.subplots(figsize=(5.4, 5.0))
+    px, py = frame[_px].to_numpy(), frame[_py].to_numpy()
+    ax.scatter(px, py, s=1.0, c="#dcdbd6", linewidths=0, alpha=0.8,
+               rasterized=True, zorder=1)
+
+    tx, ty = path[_px].to_numpy(), path[_py].to_numpy()
+    ax.plot(tx, ty, "-", color=INK_PRIMARY, linewidth=1.3, zorder=3, alpha=0.9)
+    ax.scatter(tx, ty, s=34, c=INK_PRIMARY, zorder=4, linewidths=0)
+
+    # ONE label per end, carrying both the word and the hour. Annotating "end"
+    # and "+48h" separately put two strings on the same coordinate, which was
+    # the last collision left after the spacing rule was fixed -- the rule
+    # cannot help when the figure deliberately labels one point twice.
+    hours_all = path["offset_hours"].to_list()
+    ax.annotate(f"start  {hours_all[0]:+.0f}h", (tx[0], ty[0]), fontsize=8,
+                color=INK_PRIMARY, xytext=(7, 7), textcoords="offset points",
+                zorder=5, fontweight="bold")
+    ax.annotate(f"end  {hours_all[-1]:+.0f}h", (tx[-1], ty[-1]), fontsize=8,
+                color=INK_PRIMARY, xytext=(7, -13), textcoords="offset points",
+                zorder=5, fontweight="bold")
+
+    # Collision test against EVERY label already placed, not just the previous
+    # one. Walking in time order and comparing to the last placed label fails
+    # for a path that wanders off and comes back: the last label is somewhere
+    # else by then, so the point gets labelled on top of one from six hours
+    # earlier. That is what left "+12h", "+30h", "+48h" and "end" stacked on a
+    # single dot.
+    span = max(np.ptp(px), np.ptp(py), 1e-6)
+    gap = 0.055 * span
+    placed: list[tuple[float, float]] = [(tx[0], ty[0]), (tx[-1], ty[-1])]
+    hours = path["offset_hours"].to_list()
+    for position, (hour, a, b) in enumerate(zip(hours, tx, ty)):
+        if position in (0, len(hours) - 1):
+            continue  # already carried by the start/end label
+        if any(np.hypot(a - qx, b - qy) < gap for qx, qy in placed):
+            continue
+        ax.annotate(f"{hour:+.0f}h", (a, b), fontsize=7, color=INK_SECONDARY,
+                    xytext=(5, 4), textcoords="offset points", zorder=5)
+        placed.append((a, b))
+
+    site = path["site"][0]
+    died = bool(path["in_hospital_mortality"][0])
+    phenotype = path["cs_phenotype"][0] if "cs_phenotype" in path.columns else None
+    bits = [str(site), f"{path.height} timepoints",
+            "died" if died else "survived"]
+    if phenotype is not None:
+        bits.append(str(phenotype))
+    ax.set_title(f"{title}\n{' / '.join(bits)}", loc="left", pad=8, fontsize=9)
+    xlabel, ylabel = proj_labels()
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.set_aspect("equal", adjustable="datalim")
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    figure.tight_layout()
+    save_figure(figure, out)
+    plt.close(figure)
+    logger.info(f"wrote {out.name} ({path.height} timepoints)")
 
 
 def plot_patient_paths_plain(frame, patients, out, title, logger, columns: int = 4):
@@ -1589,14 +1769,24 @@ def main() -> None:
             logger,
         )
 
-    patients = pick_patients(frame)
+    # Patients whose own path follows the averaged field, so the panels show
+    # what the arrows are an average of rather than a random walk. A biased
+    # sample on purpose; the captions say so.
+    patients = pick_flow_followers(frame, px, py)
+    if not patients:
+        patients = pick_patients(frame)
+        logger.warning(
+            "no patient path aligned with the flow field; falling back to a "
+            "stratified random sample"
+        )
     logger.info(f"patient paths: {patients}")
-    plot_patient_paths_plain(
-        frame, patients, home / "patient_paths.png",
-        f"{paths.model_key}: {len(patients)} individual patients through the "
-        "latent space",
-        logger,
-    )
+    for index, patient in enumerate(patients, start=1):
+        plot_patient_path_single(
+            frame, patient, index,
+            home / f"patient_path_{index:02d}.png",
+            f"{paths.model_key}: patient {index} of {len(patients)}",
+            logger,
+        )
     for spec in specs:
         plot_patient_paths(
             frame, spec, patients,

@@ -361,6 +361,17 @@ def write_counts(paths, bundle: pathlib.Path, min_cell: int, logger, site=None) 
         # tables. These are the reason a site sharing nothing patient-level can
         # still contribute to decomposing the site effect -- which, at 97%
         # neighbour purity, is the largest single finding in this pipeline.
+        # baseline characteristics by shock type. Medians and shares, already
+        # suppressed by the baseline stage; re-checked here like the rest.
+        for source in sorted(
+            paths.cohort_home.glob(f"baseline_by_shock_type_{site}.csv")
+        ):
+            table = pl.read_csv(source)
+            contract.validate_counts_frame(table, source.name, min_cell)
+            name = source.name.replace(f"_{site}", "")
+            table.write_csv(out / name)
+            logger.info(f"  counts/{name} ({table.height} rows)")
+
         for pattern in ("token_prevalence", "token_families"):
             for source in sorted(
                 paths.cohort_home.glob(f"{pattern}_{site}_anchor-*.csv")
