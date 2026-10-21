@@ -733,6 +733,9 @@ PROJECTION_PANELS = [
     ("concordance", "treated per the recommendation"),
 ]
 
+#: 09's patient subsets, in reading order. A subset with no figures is skipped.
+SUBSET_ORDER = ("cardiogenic", "septic", "all")
+
 #: the physiology underlays 09 draws one figure each for, label as shown.
 #: Mirrors clifcs.state.VARIABLES; a variable 09 could not populate is dropped
 #: by the `if body` filter rather than leaving an empty tab.
@@ -773,10 +776,40 @@ def trajectory_home(paths) -> pathlib.Path:
     reader would assume unless told otherwise.
     """
     base = paths.output_home / "figures" / "GEM-all" / "trajectory"
+    for home in trajectory_homes(paths).values():
+        return home
+    return base
+
+
+def trajectory_homes(paths) -> dict:
+    """
+    every subset 09 has drawn, as {subset: directory}
+
+    09 scopes its figures by subset now -- cardiogenic and septic both write
+    trajectory_flow_pacmap.png, so sharing one directory meant the second run
+    silently overwrote the first and the report showed one labelled as the
+    other. Returned in SUBSET_ORDER so the report tabs read the same way every
+    time rather than in whatever order the filesystem offers.
+    """
+    base = paths.output_home / "figures" / "GEM-all" / "trajectory"
+    found = {}
+    for subset in SUBSET_ORDER:
+        home = base / subset
+        if not home.is_dir():
+            continue
+        if (home / "trajectory_flow_pacmap.png").is_file():
+            found[subset] = home
+            continue
+        corrected = sorted(home.glob("corrected-*"))
+        if corrected:
+            found[subset] = corrected[0]
+    if found:
+        return found
+    # a run from before figures were scoped by subset
     if (base / "trajectory_flow_pacmap.png").is_file():
-        return base
+        return {"all": base}
     corrected = sorted(base.glob("corrected-*"))
-    return corrected[0] if corrected else base
+    return {"all": corrected[0]} if corrected else {}
 
 
 def trajectory_coverage(paths, logger=None) -> tuple[str, str]:
@@ -1705,6 +1738,10 @@ def section_patient_paths(paths, out: list) -> None:
 
 def section_flow(paths, out: list) -> None:
     home = trajectory_home(paths)
+    homes = trajectory_homes(paths)
+    # falls back to `home` so the tabs simply come up empty, and are dropped by
+    # the `if body` filter, when no septic grid has been extracted
+    septic_home = homes.get("septic", home)
     alignment_file = paths.output_home / "tables" / "GEM-all" / "trajectory_flow_alignment.csv"
     # 09 names the flow figure after whichever projection it drew, so that a
     # field can never be shown under the wrong axis labels. Prefer PaCMAP,
@@ -1749,6 +1786,23 @@ def section_flow(paths, out: list) -> None:
         ("By outcome",
          figure(home / "trajectory_flow_mortality.png",
                 "One field over everyone, coloured by in-hospital mortality")),
+        # Septic shock, from the grid extracted over the coded-septic
+        # denominator. Present only when 09 has been run with --subset septic;
+        # drawing these from the cardiogenic grid would show the minority of
+        # septic patients who also met a cardiac-origin criterion.
+        ("Septic, by Seymour",
+         figure(septic_home / "trajectory_flow_septic_seymour_phenotype.png",
+                "Coded septic shock, coloured by Seymour phenotype")),
+        ("Septic, by Bhavani",
+         figure(septic_home / "trajectory_flow_septic_bhavani_phenotype.png",
+                "The same field, coloured by Bhavani vital-trajectory group")),
+        ("Septic, by Zweck",
+         figure(septic_home / "trajectory_flow_septic_zweck.png",
+                "The same field, coloured by Zweck phenotype -- derived in "
+                "cardiogenic shock, so a comparison and not a transfer")),
+        ("Septic, by outcome",
+         figure(septic_home / "trajectory_flow_septic_mortality.png",
+                "The same field, coloured by in-hospital mortality")),
     ]))
 
     # Physiology, one variable per tab. The combined grid is kept as an

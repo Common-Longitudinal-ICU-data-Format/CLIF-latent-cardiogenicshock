@@ -67,6 +67,7 @@ from clifcs.palette import (
     site_colors,
 )
 from clifcs.phenotype import PHENOTYPES
+from clifcs.sepsis_phenotype import BHAVANI_LABELS, SEYMOUR_LABELS
 from clifcs.state import (
     VARIABLES,
     gradient_alignment,
@@ -109,16 +110,20 @@ def offsets(args) -> list[float]:
 #: is 13x the work of one anchor -- about 12-20 hours for 40,000 patients on a
 #: single consumer GPU -- and the figure this analysis exists for is the flow
 #: among cardiogenic shock patients, who are a quarter of that.
-SUBSETS = ("all", "cardiogenic")
+SUBSETS = ("all", "cardiogenic", "septic")
 
 
 def subset_filter(name: str) -> "pl.Expr | None":
     """the cohort predicate for a --subset value"""
     if name == "all":
         return None
-    # the union of the two readings of cardiogenic shock, which is what the
-    # side-by-side comparison needs: CS_DEFINITIONS splits them again for the
-    # figures, so extracting the union covers both panels from one pass
+    if name == "septic":
+        # the coded-septic denominator, which is also exactly the set Seymour
+        # and Bhavani are assigned over -- a septic flow figure coloured by
+        # either phenotype has no meaning outside it
+        return pl.col("sepsis_cohort").fill_null(False)
+    # the union of the two readings of cardiogenic shock. Extracting the union
+    # covers both the Zweck panel and the by-definition panel from one pass.
     return (pl.col("shock_type") == "cardiogenic") | pl.col(
         "cardiac_origin"
     ).fill_null(False)
@@ -707,6 +712,122 @@ def plot_cardiogenic_flow(frame, px, py, home, paths, args, logger) -> None:
             "order": list(CS_DEFINITION_LEVELS),
         },
     )
+
+
+#: the two sepsis phenotype systems, as flow underlays
+#:
+#: Both are REFITS, not transfers: neither paper publishes centroids, so the
+#: clusters are this cohort's and the labels come from matching each centroid
+#: profile to the published description. Read the flow panels as "do these four
+#: classes occupy different parts of the space and move differently", never as
+#: a replication of Seymour or Bhavani.
+#:
+#: The denominator is the coded septic-shock flag, which fails in both
+#: directions and fails differently at each site. That is the weakest part of
+#: both systems and it is upstream of every panel here.
+SEPSIS_SCHEMES: tuple[tuple[str, tuple[str, ...], str], ...] = (
+    ("seymour_phenotype", SEYMOUR_LABELS, "Seymour 2019 alpha/beta/gamma/delta"),
+    ("bhavani_phenotype", BHAVANI_LABELS, "Bhavani 2022 group A-D"),
+)
+
+
+def plot_septic_flow(frame, px, py, home, paths, args, logger) -> None:
+    """
+    latent flow among coded septic shock, by each sepsis phenotype system
+
+    The septic counterpart of plot_cardiogenic_flow, and built the same way:
+    ONE field over the whole septic set, drawn repeatedly with different hues
+    beneath it. Holding the arrows fixed is what lets two panels be compared --
+    fitting a field per phenotype would vary both the population and the
+    arrows, with nothing saying which difference you were looking at.
+
+    Requires a grid extracted with --subset septic. Running it against the
+    cardiogenic grid would draw the 23% of septic patients who also met a
+    cardiac-origin criterion -- patients on inotropes or with a high troponin,
+    which is atypical for septic shock -- and present them as septic shock.
+    """
+    if "sepsis_cohort" not in frame.columns:
+        logger.warning("no sepsis_cohort column; skipping the septic panels")
+        return
+    part = frame.filter(pl.col("sepsis_cohort").fill_null(False))
+    if part.height == 0:
+        logger.warning("no coded-septic patients in this grid")
+        return
+
+    n_patients = part["hospitalization_id"].n_unique()
+    total = frame["hospitalization_id"].n_unique()
+    logger.info(
+        f"septic flow: {n_patients:,} coded-septic patients of {total:,} in the grid"
+    )
+    if n_patients < 0.5 * total:
+        logger.warning(
+            f"  only {n_patients / max(total, 1):.0%} of this grid is "
+            "coded-septic -- these panels are drawn over a subset selected for "
+            "something else. Re-extract with --subset septic."
+        )
+
+    subtitle = (
+        f"{n_patients:,} patients carrying a septic shock code; one field over "
+        f"all of them, mean displacement between consecutive "
+        f"{args.step_hours:g}h timepoints, cells with <5 vectors blank"
+    )
+
+    for key, labels, scheme in SEPSIS_SCHEMES:
+        if key not in part.columns:
+            logger.info(f"  {key} absent, no panel")
+            continue
+        labelled = part.filter(pl.col(key).is_not_null())
+        if labelled.height == 0:
+            logger.info(f"  {key} entirely null, no panel")
+            continue
+        assigned = labelled["hospitalization_id"].n_unique()
+        plot_flow(
+            labelled, px, py,
+            home / f"trajectory_flow_septic_{key}.png",
+            f"{paths.model_key}: latent flow, septic shock by {scheme}",
+            subtitle
+            + f"; {assigned:,} of {n_patients:,} carry a {key.split('_')[0]} label",
+            logger, labels=proj_labels(),
+            colour_by={
+                "key": key,
+                "colors": husl_colors(labels),
+                "order": list(labels),
+            },
+        )
+
+    # Zweck over the septic set too. Zweck is a cardiogenic shock phenotyping
+    # applied here to septic patients, which is not what it was derived for --
+    # it is drawn because the comparison is the point of the whole pipeline,
+    # not because the label is claimed to mean the same thing.
+    if "cs_phenotype" in part.columns:
+        plot_flow(
+            part.filter(pl.col("cs_phenotype").is_not_null()), px, py,
+            home / "trajectory_flow_septic_zweck.png",
+            f"{paths.model_key}: latent flow, septic shock by Zweck phenotype",
+            subtitle + "; Zweck was derived in cardiogenic shock, so this is a "
+            "comparison and not a claim that the label transfers",
+            logger, labels=proj_labels(),
+            colour_by={
+                "key": "cs_phenotype",
+                "colors": phenotype_colors(),
+                "order": list(PHENOTYPES),
+            },
+        )
+
+    if "in_hospital_mortality" in part.columns:
+        plot_flow(
+            part, px, py,
+            home / "trajectory_flow_septic_mortality.png",
+            f"{paths.model_key}: latent flow, septic shock by outcome",
+            subtitle,
+            logger, labels=proj_labels(),
+            colour_by={
+                "key": "in_hospital_mortality",
+                "colors": mortality_colors(),
+                "order": [False, True],
+                "names": {False: "survived", True: "died in hospital"},
+            },
+        )
 
 
 def attach_state(paths, frame: pl.DataFrame, logger) -> pl.DataFrame:
@@ -1722,6 +1843,10 @@ def main() -> None:
         "hospitalization_id", "cs_phenotype", "in_hospital_mortality",
         "icu_los_days", "admission_dttm", "cs_onset_dttm",
         "shock_type", "cardiac_origin",
+        # the two sepsis phenotype systems and their denominator. Without these
+        # a septic flow figure has nothing to colour by, and the omission is
+        # silent: the panel guards test for column presence.
+        "seymour_phenotype", "bhavani_phenotype", "sepsis_cohort",
     )
     frame = frame.join(cohort, on="hospitalization_id", how="inner")
 
@@ -1742,7 +1867,10 @@ def main() -> None:
 
     # Corrected runs write beside the raw ones rather than over them, so the
     # pair can be compared. Same reasoning as 03's corrected-<method>/.
-    home = paths.figure_home / "trajectory"
+    # Scoped by subset as well as by correction. Both write
+    # trajectory_flow_pacmap.png, so a septic run would otherwise overwrite the
+    # cardiogenic one and the report would show one labelled as the other.
+    home = paths.figure_home / "trajectory" / args.subset
     if args.correction != "none":
         home = home / f"corrected-{args.correction}"
     home.mkdir(parents=True, exist_ok=True)
@@ -1776,6 +1904,8 @@ def main() -> None:
     # The figure this analysis exists for
     logger.info("cardiogenic shock flow, both definitions:")
     plot_cardiogenic_flow(frame, px, py, home, paths, args, logger)
+    logger.info("septic shock flow, by each phenotype system:")
+    plot_septic_flow(frame, px, py, home, paths, args, logger)
 
     # Outcome as a COLOUR on one field, not two fields over two cohorts.
     # Splitting the cohort fits a separate field to each, so the two figures
