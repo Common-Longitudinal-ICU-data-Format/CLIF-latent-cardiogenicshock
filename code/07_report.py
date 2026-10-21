@@ -686,6 +686,28 @@ CORRECTIONS = [
 ]
 
 
+def trajectory_home(paths) -> pathlib.Path:
+    """
+    where 09 actually put its figures
+
+    09 writes into `trajectory/corrected-<method>/` when it applies a site
+    correction, and correcting is its default -- site dominates that geometry at
+    ~1.9x neighbour purity, so an uncorrected field is largely a picture of
+    three hospitals. Looking only in the base directory found nothing for every
+    corrected run, and because each panel is wrapped in `figure()`, which drops
+    a missing file rather than failing, the section rendered with no figures in
+    it at all.
+
+    Prefers the uncorrected directory when both exist, since that is the one a
+    reader would assume unless told otherwise.
+    """
+    base = paths.output_home / "figures" / "GEM-all" / "trajectory"
+    if (base / "trajectory_flow_pacmap.png").is_file():
+        return base
+    corrected = sorted(base.glob("corrected-*"))
+    return corrected[0] if corrected else base
+
+
 def trajectory_coverage(paths, logger=None) -> tuple[str, str]:
     """
     whether 09's trajectory artifacts describe the cohort 01 last wrote
@@ -1564,7 +1586,7 @@ def section_trial_fit(paths, out: list) -> bool:
 
 
 def section_patient_embeddings(paths, out: list) -> None:
-    home = paths.output_home / "figures" / "GEM-all" / "trajectory"
+    home = trajectory_home(paths)
     panels = [
         (label, figure(home / f"trajectory_label_{key}.png"))
         for key, label in LABELLINGS
@@ -1587,7 +1609,7 @@ def section_patient_embeddings(paths, out: list) -> None:
 
 
 def section_patient_paths(paths, out: list) -> None:
-    home = paths.output_home / "figures" / "GEM-all" / "trajectory"
+    home = trajectory_home(paths)
     panels = [
         (label, figure(home / f"patient_paths_{key}.png"))
         for key, label in LABELLINGS
@@ -1611,7 +1633,7 @@ def section_patient_paths(paths, out: list) -> None:
 
 
 def section_flow(paths, out: list) -> None:
-    home = paths.output_home / "figures" / "GEM-all" / "trajectory"
+    home = trajectory_home(paths)
     alignment_file = paths.output_home / "tables" / "GEM-all" / "trajectory_flow_alignment.csv"
     # 09 names the flow figure after whichever projection it drew, so that a
     # field can never be shown under the wrong axis labels. Prefer PaCMAP,
@@ -1641,6 +1663,22 @@ def section_flow(paths, out: list) -> None:
                                   f"Flow field in {projection_label} space")),
         ("PCA (cross-check)", figure(home / "trajectory_flow_pca.png",
                                      "The same field in a linear space")),
+        # The two readings of cardiogenic shock, which is what this analysis
+        # exists for. Identical bins and mask thresholds, so the panels are
+        # comparable -- and they select largely different people: the ICD code
+        # and the treatment-based flag overlap on only a quarter of their union.
+        ("Cardiogenic, ICD code",
+         figure(home / "trajectory_flow_cardiogenic_coded.png",
+                "Coded cardiogenic shock (R57.0)")),
+        ("Cardiogenic, by treatment",
+         figure(home / "trajectory_flow_cardiogenic_cardiac_origin.png",
+                "Inotrope, mechanical support, or troponin above threshold")),
+        ("Zweck, ICD code",
+         figure(home / "trajectory_cardiogenic_coded_phenotype.png",
+                "The same patients coloured by Zweck phenotype")),
+        ("Zweck, by treatment",
+         figure(home / "trajectory_cardiogenic_cardiac_origin_phenotype.png",
+                "The same patients coloured by Zweck phenotype")),
         ("Died", figure(home / "trajectory_flow_died.png",
                         "Patients who died in hospital")),
         ("Survived", figure(home / "trajectory_flow_survived.png",

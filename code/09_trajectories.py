@@ -462,9 +462,35 @@ def plot_scatter(frame, x, y, column, colors, order, title, label, out, logger,
         bar.ax.tick_params(labelsize=6, color=GRID, labelcolor=INK_SECONDARY)
         bar.outline.set_visible(False)
     else:
-        values = shuffled[column].cast(pl.String).to_list()
-        ax.scatter(px, py, s=size, c=[colors[v] for v in values], linewidths=0,
-                   alpha=0.75, rasterized=True)
+        # One scatter per category, in `order`, so the LAST level named is drawn
+        # on top. For Zweck that is I -> II -> III, which puts the smallest and
+        # most distinctive group above the largest: III cardiometabolic is ~5%
+        # of the cohort and I non-congested is ~70%, so a single pooled scatter
+        # buries III under points drawn after it and the figure reads as though
+        # III were absent.
+        #
+        # Shuffling is kept WITHIN each category and dropped between them. The
+        # within-category shuffle is what stops row order in the parquet showing
+        # up as structure; the across-category shuffle was what made the layering
+        # unpredictable.
+        # Both sides through key_string, for the reason spelled out in
+        # plot_flow: it lowercases, so a raw-vs-canonical comparison silently
+        # matches nothing.
+        canon = np.array([key_string(v) for v in shuffled[column].to_list()])
+        palette = {key_string(k): v for k, v in colors.items()}
+        levels = list(order) if order else sorted(set(canon))
+        seen = set()
+        for level in levels:
+            key = key_string(level)
+            if key in seen:
+                continue
+            seen.add(key)
+            mask = canon == key
+            if not mask.any():
+                continue
+            ax.scatter(px[mask], py[mask], s=size,
+                       c=palette.get(key, "#cccccc"), linewidths=0,
+                       alpha=0.8, rasterized=True, zorder=2)
         counts = frame[column].cast(pl.String).value_counts()
         lookup = dict(zip(counts[column].to_list(), counts["count"].to_list()))
         legend_ax.legend(
@@ -657,9 +683,14 @@ def plot_cardiogenic_flow(frame, px, py, home, paths, args, logger) -> None:
             f"{paths.model_key}: latent flow, {label}",
             f"{n_patients:,} patients, mean observed displacement between "
             f"consecutive {args.step_hours:g}h timepoints; cells with <5 "
-            "vectors blank",
+            "vectors blank; points coloured by Zweck phenotype",
             logger,
             labels=proj_labels(),
+            colour_by={
+                "key": "cs_phenotype",
+                "colors": phenotype_colors(),
+                "order": list(PHENOTYPES),
+            },
         )
         phenotyped = part.filter(pl.col("cs_phenotype").is_not_null())
         if phenotyped.height:
@@ -778,9 +809,13 @@ def plot_state_flow(frame, x, y, out, title, logger, columns: int = 4):
         points.set_clim(lo, hi)
         masked_x = np.ma.array(vx, mask=counts < 5)
         masked_y = np.ma.array(vy, mask=counts < 5)
+        # zorder above the underlay rather than relying on call order: a
+        # streamplot is a LineCollection plus FancyArrowPatches, and collections
+        # and patches do not share a default zorder, so the arrows could land
+        # under the hue they are meant to be read against.
         ax.streamplot(cx, cy, masked_x, masked_y, color=INK_PRIMARY,
                       linewidth=0.55, density=1.1, arrowsize=0.75,
-                      arrowstyle="->")
+                      arrowstyle="->", zorder=3)
 
         alignment, cells = gradient_alignment(sx, sy, svx, svy,
                                               step[name].to_numpy().astype(float))
@@ -901,7 +936,7 @@ def plot_colouring_grid(frame, specs, out, title, logger, columns: int = 4):
             values = [key_string(v) for v in shuffled[spec["key"]].to_list()]
             ax.scatter(px, py, s=size,
                        c=[colours.get(v, "#cccccc") for v in values],
-                       linewidths=0, alpha=0.8, rasterized=True)
+                       linewidths=0, alpha=0.8, rasterized=True, zorder=1)
             names = spec.get("names", {})
             ax.legend(
                 handles=[
@@ -1047,14 +1082,14 @@ def plot_patient_paths(frame, spec, patients, out, title, logger):
             mesh = ax.hexbin(
                 px[finite], py[finite], C=values[finite],
                 reduce_C_function=np.mean, mincnt=5, gridsize=46,
-                cmap=continuous_cmap(), linewidths=0, alpha=0.75,
+                cmap=continuous_cmap(), linewidths=0, alpha=0.8,
             )
             cells = mesh.get_array()
             good = cells.compressed() if hasattr(cells, "compressed") else cells
             lo, hi = np.nanpercentile(good[np.isfinite(good)], [2, 98])
             mesh.set_clim(lo, hi)
         else:
-            ax.scatter(px, py, s=0.9, c=values, linewidths=0, alpha=0.5,
+            ax.scatter(px, py, s=0.9, c=values, linewidths=0, alpha=0.8,
                        rasterized=True)
 
         path = frame.filter(pl.col("hospitalization_id") == patient).sort("offset_hours")
@@ -1093,7 +1128,8 @@ def plot_patient_paths(frame, spec, patients, out, title, logger):
     logger.info(f"wrote {out.name}")
 
 
-def plot_flow(frame, x, y, out, title, subtitle, logger, labels=None):
+def plot_flow(frame, x, y, out, title, subtitle, logger, labels=None,
+              colour_by=None):
     """streamplot of the displacement field over the point cloud"""
     cx, cy, vx, vy, counts, n_vectors = displacement_field(frame, x, y)
 
@@ -1108,10 +1144,51 @@ def plot_flow(frame, x, y, out, title, subtitle, logger, labels=None):
 
     figure, ax = plt.subplots(figsize=(6.0, 5.2))
 
-    ax.scatter(frame[x].to_numpy(), frame[y].to_numpy(), s=1.0,
-               c="#dcdbd6", linewidths=0, rasterized=True)
+    # The point cloud goes UNDER the arrows. `colour_by` turns it from flat grey
+    # into the hue the field is meant to be read against -- Zweck phenotype,
+    # mortality -- so one figure answers both "where do these patients sit" and
+    # "which way do they move", instead of asking the reader to hold two
+    # side-by-side figures in their head.
+    #
+    # Categories are drawn in `order` so the last named lands on top, and zorder
+    # is explicit rather than left to call order: a streamplot is a
+    # LineCollection plus FancyArrowPatches, which do not share a default
+    # zorder, so the arrows can otherwise end up beneath the scatter.
+    px, py = frame[x].to_numpy(), frame[y].to_numpy()
+    if colour_by:
+        # key_string lowercases as well as normalising booleans, so BOTH sides
+        # of every comparison have to go through it. Canonicalising the colour
+        # dict and the level while leaving the series raw matched nothing at
+        # all: "I non-congested" never equals "i non-congested", every mask
+        # came out empty, and the figure rendered as arrows over a blank panel
+        # with no legend. That is the failure key_string's own docstring
+        # describes, in the other direction.
+        values = np.array(
+            [key_string(v) for v in frame[colour_by["key"]].to_list()]
+        )
+        colours = {key_string(k): v for k, v in colour_by["colors"].items()}
+        for level in colour_by["order"]:
+            mask = values == key_string(level)
+            if not mask.any():
+                logger.warning(
+                    f"  {out.name}: no points for {level!r}; the hue underlay "
+                    "will be missing that level"
+                )
+                continue
+            ax.scatter(
+                px[mask], py[mask], s=2.0,
+                c=colours.get(key_string(level), "#cccccc"),
+                linewidths=0, alpha=0.8, rasterized=True, zorder=1,
+                label=f"{level} (n={int(mask.sum()):,})",
+            )
+        ax.legend(
+            loc="upper left", fontsize=6, frameon=False,
+            markerscale=3, handletextpad=0.4, borderpad=0.2,
+        )
+    else:
+        ax.scatter(px, py, s=1.0, c="#dcdbd6", linewidths=0,
+                   rasterized=True, alpha=0.8, zorder=1)
 
-    speed = np.hypot(vx, vy)
     mask = counts < 5
     vx = np.ma.array(vx, mask=mask)
     vy = np.ma.array(vy, mask=mask)
@@ -1122,6 +1199,7 @@ def plot_flow(frame, x, y, out, title, subtitle, logger, labels=None):
         density=1.5,
         arrowsize=0.9,
         arrowstyle="->",
+        zorder=3,
     )
 
     ax.set_title(title, loc="left", pad=8)
@@ -1288,8 +1366,14 @@ def main() -> None:
             plot_flow(part, px, py,
                       home / f"trajectory_flow_{name}.png",
                       f"{paths.model_key}: latent flow, patients who {name}",
-                      f"{part['hospitalization_id'].n_unique():,} patients",
-                      logger, labels=proj_labels())
+                      f"{part['hospitalization_id'].n_unique():,} patients, "
+                      "coloured by Zweck phenotype",
+                      logger, labels=proj_labels(),
+                      colour_by={
+                          "key": "cs_phenotype",
+                          "colors": phenotype_colors(),
+                          "order": list(PHENOTYPES),
+                      })
 
     frame = attach_state(paths, frame, logger)
     if "on_imv" in frame.columns:
