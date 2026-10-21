@@ -223,6 +223,27 @@ def extract_grid(paths, args, logger) -> None:
             if out_file.is_file() and not args.force:
                 logger.info(f"[{site} t={offset:+.0f}h] exists, skipping")
                 continue
+            # A grid point holding working files but no embeddings.parquet is
+            # debris from an interrupted run: the cleanup at the end of this
+            # loop removes the working files only after the embeddings are
+            # written, so that combination cannot arise any other way. Clear it
+            # before re-winnowing. A half-written parquet left behind by a
+            # killed process fails later as "Page was smaller than expected",
+            # which reads as data corruption rather than as an interrupted job
+            # -- and the `if not ... is_file()` guard below would have reused it.
+            if destination.is_dir():
+                leftovers = [f for f in destination.iterdir() if f.is_file()]
+                if leftovers:
+                    logger.info(
+                        f"[{site} t={offset:+.0f}h] clearing {len(leftovers)} "
+                        "file(s) left by an interrupted run"
+                    )
+                    for f in leftovers:
+                        try:
+                            f.unlink()
+                        except OSError as exc:
+                            logger.warning(f"  could not remove {f.name}: {exc}")
+
             destination.mkdir(parents=True, exist_ok=True)
             for name in shared:
                 if not (destination / name).is_file():
