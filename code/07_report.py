@@ -1850,6 +1850,68 @@ def section_flow(paths, out: list) -> None:
         )
         out.append(tabs(patient_panels))
 
+    # Hypothetical next tokens: the same patients, with one more event appended
+    # to their prefix and re-embedded. Present only when 09 ran with
+    # --counterfactuals.
+    cf_panels = [
+        (f"Patient {index}",
+         figure(home / f"counterfactual_path_{index:02d}.png", ""))
+        for index in range(1, 13)
+    ]
+    cf_panels = [(label, body) for label, body in cf_panels if body]
+    if cf_panels:
+        out.append('<h3>Where one more event would move them</h3>')
+        out.append(
+            "<p>The same patients, with a single hypothetical event appended to "
+            "their token prefix at the branch point and re-embedded. The model "
+            "is a deterministic function of the sequence, so this is what it "
+            "would have computed had that event been charted. Branches are "
+            "coloured <code>tab10</code>, one hue per intervention, and the "
+            "hollow marker is the unmodified prefix re-embedded through the "
+            "identical code path &mdash; the control the hypotheticals are "
+            "measured against.</p>"
+        )
+        out.append(
+            "<p>Dose and pressure changes are relative to <b>that patient's own "
+            "current decile</b>: an absolute target would be an increase for one "
+            "patient and a decrease for another. An intervention that does not "
+            "apply &mdash; increasing a vasopressor for somebody on none &mdash; "
+            "omits that patient from that branch rather than inventing a "
+            "starting dose, so the number of arrows differs between panels.</p>"
+        )
+        out.append(callout(
+            "<b>Branch positions are interpolated and arrow length is not a "
+            "distance.</b> PaCMAP has no transform, so a point outside the fit "
+            "cannot be placed exactly; each branch sits at the weighted mean of "
+            "its nearest real neighbours in the full 1024-d space. An "
+            "interpolated point cannot land anywhere the real points do not "
+            "already cover, so a hypothetical that moves the representation "
+            "somewhere genuinely new is dragged back toward the nearest "
+            "familiar region. Read direction and neighbourhood, not magnitude; "
+            "the per-intervention displacements in "
+            "<code>counterfactual_displacement.csv</code> are the quantitative "
+            "version, and they are in the same interpolated units.", "warn"))
+        out.append(tabs(cf_panels))
+
+        displacement = paths.output_home / "tables" / "GEM-all" / "counterfactual_displacement.csv"
+        if displacement.is_file():
+            frame = pl.read_csv(displacement)
+            summary = (
+                frame.group_by("label")
+                .agg(patients=pl.len(),
+                     median_displacement=pl.col("displacement").median())
+                .sort("median_displacement", descending=True)
+            )
+            out.append(
+                "<p>Which charted events the representation is most sensitive "
+                "to, ranked. This is the question these panels can actually "
+                "answer.</p>"
+            )
+            out.append(table(
+                summary, {"patients": thousands, "median_displacement": num(2)},
+                key_column="label",
+            ))
+
     out.append(callout(
         "<b>Patients do not follow these lines.</b> A streamplot integrates its "
         "field and renders far more orderly than the data beneath it, so the "
@@ -1892,34 +1954,87 @@ def section_flow(paths, out: list) -> None:
 
 
 def section_sites(paths, out: list) -> None:
+    """
+    7 - why the sites separate
+
+    Each block is guarded on ITS OWN input. An earlier version returned from the
+    whole section when figures/shared/site_features.png was absent, which is
+    produced by 10_site_features.py -- so not running one optional script
+    silently deleted the token tornado, the structural-zero ranking and the
+    family mix along with it. Those are 04's output and the largest single
+    finding in this pipeline; they do not depend on 10 in any way.
+    """
     shared = paths.output_home / "figures" / "shared"
-    if not (shared / "site_features.png").is_file():
-        return
-    out.append('<h2 id="sites">7 &middot; UCMC versus NU</h2>')
-    out.append(
-        "<p>The embedding separates the two sites almost perfectly (section 6), "
-        "so the first question is whether the patients differ that much. "
-        "Distributions and proportions below, in each institution's own "
-        "colours.</p>"
+    features = figure(shared / "site_features.png")
+    tornado = paths.output_home / "figures" / "GEM-all" / "anchor-24h"
+    # One tab per PAIR of sites. The tornado ranks on the difference between
+    # two per-patient rates, so it is pairwise by construction; with three
+    # sites there are three comparisons and showing only one of them would hide
+    # whichever site was left out.
+    pair_figures = sorted(tornado.glob("site_token_tornado_*-vs-*.png"))
+    pairs = sorted({
+        f.stem.split("site_token_tornado_")[-1].replace("exclusive_", "")
+        for f in pair_figures
+    })
+    token_panels = []
+    for pair in pairs:
+        body = figure(
+            tornado / f"site_token_tornado_{pair}.png",
+            f"{pair.replace('-vs-', ' versus ')}, ranked by the difference in "
+            "per-patient rate",
+        )
+        if body:
+            token_panels.append((pair.replace("-vs-", " v "), body))
+    for pair in pairs:
+        body = figure(
+            tornado / f"site_token_tornado_exclusive_{pair}.png",
+            f"{pair.replace('-vs-', ' versus ')}: tokens one of them never "
+            "records at all",
+        )
+        if body:
+            token_panels.append((f"{pair.replace('-vs-', ' v ')}, exclusive", body))
+    if not pair_figures:
+        # a run from before the tornado was drawn per pair
+        token_panels = [
+            ("Differential tokens", figure(
+                tornado / "site_token_tornado.png",
+                "Ranked by absolute difference in per-patient rate")),
+            ("Tokens one site never records", figure(
+                tornado / "site_token_tornado_exclusive.png",
+                "Structural zeros in the vocabulary")),
+        ]
+    token_panels.append(
+        ("Token-family mix", figure(tornado / "site_token_families.png"))
     )
-    out.append(figure(shared / "site_features.png"))
+    token_panels = [(label, body) for label, body in token_panels if body]
+    if not features and not token_panels:
+        return
+
+    out.append('<h2 id="sites">7 &middot; Why the sites separate</h2>')
+    if features:
+        out.append(
+            "<p>The embedding separates the contributing sites almost perfectly "
+            "(section 6), so the first question is whether the patients differ "
+            "that much. Distributions and proportions below, in each "
+            "institution's own colours.</p>"
+        )
+        out.append(features)
 
     lda_rows = []
     for anchor in ANCHORS:
         f = paths.output_home / "tables" / "GEM-all" / f"site_lda_anchor-{anchor}.csv"
         if f.is_file():
             lda_rows.append(pl.read_csv(f))
-    tornado = paths.output_home / "figures" / "GEM-all" / "anchor-24h"
-    out.append("<h3>Why they separate</h3>")
-    out.append(tabs([
-        ("Differential tokens", figure(
-            tornado / "site_token_tornado.png",
-            "Ranked by absolute difference in per-patient rate")),
-        ("Tokens one site never records", figure(
-            tornado / "site_token_tornado_exclusive.png",
-            "Structural zeros in the vocabulary")),
-        ("Token-family mix", figure(tornado / "site_token_families.png")),
-    ]))
+    if token_panels:
+        out.append("<h3>What each site charts</h3>")
+        out.append(
+            "<p>Per-token and per-family rates, from the counts every site "
+            "ships in tier 1 &mdash; so this comparison covers a site that "
+            "shares nothing patient-level. Rates are per patient, because the "
+            "sites contribute very different numbers of them and raw totals "
+            "would make the largest site look the most verbose.</p>"
+        )
+        out.append(tabs(token_panels))
     out.append(callout(
         "<b>The cause is structural zeros in the vocabulary, not patient "
         "differences.</b> UCMC emits 101 token types NU never produces &mdash; "

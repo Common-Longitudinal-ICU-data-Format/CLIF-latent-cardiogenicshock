@@ -24,6 +24,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import itertools
 import pathlib
 import sys
 
@@ -919,12 +920,36 @@ def main() -> None:
         # this is no longer conditional on the site role -- the guard is only
         # for a bundle set that predates the tokencounts stage.
         if counts.height:
-            for mode, name in (
-                ("difference", "site_token_tornado.png"),
-                ("exclusive", "site_token_tornado_exclusive.png"),
-            ):
-                plot_token_tornado(
-                    counts, site_sizes, sites, figures / name, anchor, logger, rank=mode
+            # ONE TORNADO PER PAIR OF SITES. plot_token_tornado is inherently
+            # pairwise -- it ranks on the difference between two per-patient
+            # rates -- and it took sites[0] and sites[1]. With a third site
+            # configured that silently compared the first two and dropped the
+            # third, while labelling itself as the site comparison. Rush has by
+            # far the most distinctive token profile of the three (14.8% UNK
+            # against 7.8% and 8.8%), so it was the one panel worth seeing and
+            # the one being dropped.
+            #
+            # The first pair keeps the historical filenames so an existing
+            # report or link does not break; every pair also gets a named file.
+            pairs = list(itertools.combinations(sites, 2))
+            for position, pair in enumerate(pairs):
+                tag = "-vs-".join(pair)
+                for mode, stem in (
+                    ("difference", "site_token_tornado"),
+                    ("exclusive", "site_token_tornado_exclusive"),
+                ):
+                    names = [f"{stem}_{tag}.png"]
+                    if position == 0:
+                        names.append(f"{stem}.png")
+                    for name in names:
+                        plot_token_tornado(
+                            counts, site_sizes, list(pair), figures / name,
+                            anchor, logger, rank=mode,
+                        )
+            if len(pairs) > 1:
+                logger.info(
+                    f"[{anchor}] drew {len(pairs)} pairwise tornados: "
+                    + ", ".join("-vs-".join(p) for p in pairs)
                 )
 
         axis_tables.append(stage_axis(paths, frame, anchor, sites, logger))
