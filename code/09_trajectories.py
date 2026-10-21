@@ -269,9 +269,19 @@ def extract_grid(paths, args, logger) -> None:
                 f"{time.perf_counter() - t0:.0f}s -> {out_file.parent.name}"
             )
 
-            # the raw shards are large and fully regenerable
-            for f in destination.glob("features-*.parquet"):
-                f.unlink()
+            # The raw shards are large and fully regenerable -- and so is every
+            # other working file in here. Only embeddings.parquet is wanted
+            # afterwards; the winnowed inputs the extractor consumed
+            # (tokens_times, *_for_inference, the per-split copies) are about
+            # 820 MB per grid point, which is 32 GB across a 39-point grid
+            # against 0.26 GB of output. Deleting them does not affect resume,
+            # which keys on embeddings.parquet.
+            for f in destination.iterdir():
+                if f.is_file() and f.name != out_file.name:
+                    try:
+                        f.unlink()
+                    except OSError as exc:
+                        logger.warning(f"could not remove {f.name}: {exc}")
 
             # AND the datasets cache, which is the thing that actually fills the
             # disk. cotorra maps a closure, so `datasets` cannot fingerprint the
