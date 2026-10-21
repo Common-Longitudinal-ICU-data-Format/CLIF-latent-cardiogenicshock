@@ -100,7 +100,7 @@ def build(
     salt: str,
     model_key: str,
     model_home: pathlib.Path | None,
-    tokenizer_yaml: pathlib.Path,
+    tokenizer_yaml: pathlib.Path | None,
     anchors: tuple[str, ...],
     row_counts: dict[str, int],
     min_cell: int,
@@ -133,7 +133,14 @@ def build(
             else None,
             "embedding_dim": embedding_dim,
         },
-        "tokenizer_sha256": file_digest(tokenizer_yaml),
+        # None where the site holds no tokenizer. Legitimate: without one, 01
+        # skips the token stages, so the bundle carries no token ids and there
+        # is nothing for the coordinator to check a mapping against. A bundle
+        # that DOES carry token counts always carries this hash, which is what
+        # makes those counts comparable across sites.
+        "tokenizer_sha256": file_digest(tokenizer_yaml)
+        if tokenizer_yaml is not None
+        else None,
         "anchors": list(anchors),
         "row_counts": dict(row_counts),
         # lets the coordinator spot a resend whose pseudonyms no longer line up
@@ -228,6 +235,25 @@ def check_agreement(manifests: dict[str, dict], logger) -> None:
             "sites applied different minimum cell sizes to their count tables: "
             + ", ".join(f"{s}={v}" for s, v in cells.items())
             + " -- pooled tables inherit the weakest of them"
+        )
+
+    # A bundle with neither hash has had nothing checked. That is legitimate
+    # for a tier-1 site holding no weights and no tokenizer -- it shipped no
+    # embeddings and no token ids, so there is nothing a hash would protect --
+    # but it must not read as "verified".
+    unverifiable = sorted(
+        site
+        for site, m in manifests.items()
+        if not m.get("tokenizer_sha256")
+        and not m.get("model", {}).get("config_sha256")
+    )
+    if unverifiable:
+        logger.warning(
+            f"bundle(s) from {', '.join(unverifiable)} carry neither a model "
+            "nor a tokenizer hash, so nothing in them was checked for "
+            "compatibility. Expected for a site that holds neither and so "
+            "shipped no embeddings and no token counts; verify that is what "
+            "happened rather than a broken export."
         )
 
     logger.info(

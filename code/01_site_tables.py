@@ -103,6 +103,22 @@ STAGES = (
     "export",
 )
 
+#: the stages that need the training-time tokenizer, and nothing else does.
+#:
+#: Skipped with a warning when `paths.has_tokenizer` is false, rather than
+#: failing the run. Everything 01 reports besides token prevalence -- the
+#: cohort, the three phenotype breakdowns, the baseline tables by coded
+#: mechanism, and the whole trial and guideline analysis -- is computed from
+#: CLIF and the published literature and never sees a token. A site that cannot
+#: get the tokenizer should still send all of that; requiring it meant a site
+#: that could have contributed almost everything contributed nothing.
+#:
+#: They are skipped as a GROUP because they chain: `winnow` copies the
+#: `tokenizer.yaml` and `tokens_times.parquet` that `tokenize` wrote into each
+#: anchor directory, and `tokencounts` reads the winnowed stream. Running
+#: `winnow` without `tokenize` fails on a missing file rather than degrading.
+TOKEN_STAGES = ("tokenize", "winnow", "tokencounts")
+
 #: tables cocoa's collation.yaml reads, plus what clifpy needs to derive them
 REQUIRED_TABLES = (
     "clif_hospitalization",
@@ -1079,6 +1095,26 @@ def main() -> None:
         stage_derive(paths, sites, logger, args.force)
     if "collate" in todo:
         stage_collate(paths, sites, logger, args.force)
+    # The token stages, or an explanation of why they are not running. One
+    # message for the group rather than three, and at WARNING so it survives a
+    # long log -- a bundle silently missing token_prevalence is the kind of gap
+    # the coordinating site finds out about weeks later.
+    wanted_token_stages = [stage for stage in TOKEN_STAGES if stage in todo]
+    if wanted_token_stages and not paths.has_tokenizer:
+        logger.warning(
+            f"SKIPPING {', '.join(wanted_token_stages)}: no training-time "
+            "tokenizer on this machine. Set `tokenizer_yaml` in paths.yaml to "
+            "include them."
+        )
+        logger.warning(
+            "  the bundle will carry no token_prevalence, no token_families "
+            "and no token_levels, so this site will not appear in the "
+            "token-space decomposition of the site effect. Everything else -- "
+            "cohort, phenotypes, baseline, trials and guidelines -- is "
+            "unaffected and is still a complete contribution."
+        )
+        todo = tuple(stage for stage in todo if stage not in TOKEN_STAGES)
+
     if "tokenize" in todo:
         stage_tokenize(paths, sites, logger, args.force)
     if "winnow" in todo:

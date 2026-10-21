@@ -435,8 +435,17 @@ def write_aggregate(
     write_counts(paths, bundle, min_cell, logger, site=site)
 
     # the legend, from the tokenizer alone -- no patient data, and identical at
-    # every site, so it travels for the reader's convenience
-    levels(str(paths.tokenizer_yaml)).write_csv(bundle / "token_levels.csv")
+    # every site, so it travels for the reader's convenience. Absent where the
+    # site holds no tokenizer, in which case the bundle carries no token tables
+    # for it to be a legend to.
+    if paths.has_tokenizer:
+        levels(str(paths.tokenizer_yaml)).write_csv(bundle / "token_levels.csv")
+    else:
+        logger.warning(
+            " no tokenizer on this machine: token_levels.csv, "
+            "token_prevalence_* and token_families_* are not in this bundle. "
+            "Everything else is."
+        )
 
     manifest.write(
         manifest.build(
@@ -450,7 +459,7 @@ def write_aggregate(
             # tokenizer hash, which is the one the token counts depend on,
             # still travels.
             model_home=paths.model_home_or_none,
-            tokenizer_yaml=paths.tokenizer_yaml,
+            tokenizer_yaml=paths.tokenizer_yaml_or_none,
             anchors=tuple(),
             row_counts={},
             min_cell=min_cell,

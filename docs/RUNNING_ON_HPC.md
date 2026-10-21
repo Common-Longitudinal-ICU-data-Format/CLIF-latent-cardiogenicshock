@@ -175,22 +175,61 @@ module avail 2>&1 | head -50
 Then set them once, in [`hpc/_common.sh`](../hpc/_common.sh), and in the
 `#SBATCH --partition=` line of each job script.
 
-**You may not need a python module at all.** `PYTHON_MODULE` is empty by
-default, and on Rush CRI it should stay empty. Both `python/3.10.5` and
-`python/3.12.3` are hierarchical modules sitting behind a toolchain
-prerequisite, and Lmod refuses them with *"exist but cannot be loaded as
-requested"*. Chasing that prerequisite is wasted work: the venv runs on a
-standalone CPython 3.11.16 that `uv` installed under `~/.local/share/uv`,
-and activating the venv is what puts it on PATH.
+**The system python is 3.6.8 on Rush CRI and far too old.** `cotorra` and
+`cocoa-tokenizer` both declare `requires_python >=3.11`. Of the two modules
+`module spider python` lists, `python/3.10.5` is still too old and
+**`python/3.12.3` works**:
 
-Set `PYTHON_MODULE` only where the system python is too old to create the
-venv in the first place. To build the venv from a specific interpreter
-without a module, use `BOOTSTRAP_PYTHON`:
+```bash
+module load python/3.12.3
+python3 --version            # 3.12.3
+```
+
+`PYTHON_MODULE` in [`hpc/_common.sh`](../hpc/_common.sh) and
+[`hpc/00_setup_env.sbatch`](../hpc/00_setup_env.sbatch) therefore defaults to
+`python/3.12.3`. It has to be right in **both**: the setup job builds the venv
+from it, and every later job does `module purge` and then activates that venv.
+
+> An earlier version of this section said Lmod refused both pythons here --
+> *"exist but cannot be loaded as requested"* -- and that a `uv`-installed
+> standalone CPython was the only route. That is no longer true on this
+> cluster. `module spider python` is cheaper than believing either version of
+> this paragraph.
+
+### The venv is bound to the interpreter that built it
+
+**Load the module before creating the venv, not after.** `bin/python` is a
+symlink to the creating interpreter and `pyvenv.cfg` records its absolute path,
+so a venv built against 3.6.8 stays 3.6.8 however many modules are loaded
+afterwards, and it cannot be upgraded in place.
+
+The symptom, inside an activated venv:
+
+```
+$ python3 --version
+Python 3.12.3          <- the module
+$ python --version
+Python 3.6.8           <- the venv. This is the one pip uses.
+```
+
+They disagree because the module supplies `python3` and the venv supplies
+`python`. `00_setup_env.sbatch` asserts the *venv's* version after activating
+it, not only `BOOTSTRAP_PYTHON`'s before creating it, so the reuse branch
+cannot quietly install into a stale 3.6 venv. To recover:
+
+```bash
+deactivate
+module load python/3.12.3
+rm -rf "$VENV_HOME"
+sbatch hpc/00_setup_env.sbatch
+```
+
+**Where no usable module exists**, build from a standalone interpreter instead
+and leave `PYTHON_MODULE` empty:
 
 ```bash
 uv python install 3.11
-sbatch --export=ALL,BOOTSTRAP_PYTHON=$(uv python find 3.11) \
-       hpc/00_setup_env.sbatch
+sbatch --export=ALL,PYTHON_MODULE=,BOOTSTRAP_PYTHON=$(uv python find 3.11) hpc/00_setup_env.sbatch
 ```
 
 There is no CUDA module either, and none is needed: the pip `cu121` torch

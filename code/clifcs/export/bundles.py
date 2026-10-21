@@ -170,12 +170,23 @@ def check(
     # bundles were made with the ones it is about to interpret them against --
     # otherwise the legend it renders from its own tokenizer describes different
     # bin edges from the ranks the sites exported.
-    local_tokenizer = manifest.file_digest(paths.tokenizer_yaml)
-    mismatched = [
-        site
-        for site, m in manifests.items()
-        if m.get("tokenizer_sha256") not in (None, local_tokenizer)
-    ]
+    local = paths.tokenizer_yaml_or_none
+    if local is None:
+        logger.warning(
+            "no tokenizer configured here, so the received bundles cannot be "
+            "checked against the mapping this machine would render a legend "
+            "from. Bundles carrying token counts still agree with each other "
+            "(check_agreement covers that); what is unverified is whether they "
+            "agree with THIS machine."
+        )
+        mismatched = []
+    else:
+        local_tokenizer = manifest.file_digest(local)
+        mismatched = [
+            site
+            for site, m in manifests.items()
+            if m.get("tokenizer_sha256") not in (None, local_tokenizer)
+        ]
     if mismatched:
         raise ValueError(
             f"bundle(s) from {', '.join(mismatched)} were produced with a "

@@ -92,15 +92,21 @@ they are present but unpopulated, so check them rather than assuming:
 
 ```bash
 git clone <repo> && cd CLIF-latent-cardiogenicshock
-# Python 3.11+ is required. `python` is 3.6 on many clusters, and `venv` will
+# Python 3.11+ is required. `python3` is 3.6 on many clusters, and `venv` will
 # build a 3.6 environment silently -- then the install fails on
 # cocoa-tokenizer (requires_python >=3.11) with an error that says nothing
-# about versions. Check first; if it is too old, `uv python install 3.11`
-# gives you one without root.
+# about versions.
 python3 --version
+# Too old? Look for a module (`module spider python`) and LOAD IT BEFORE the
+# next line -- a venv is bound to the interpreter that created it and cannot be
+# upgraded afterwards. Failing that, `uv python install 3.11` gives you one
+# without root. See the README for both routes.
 python3 -m venv ~/venvs/clif-cs             # NOT on a synced or networked drive
 source ~/venvs/clif-cs/bin/activate         # Windows: ~/venvs/clif-cs/Scripts/activate
-python --version                            # must say 3.11 or newer
+python --version                            # must say 3.11+ -- and note this is
+                                            # `python`, not `python3`: inside a
+                                            # venv built by the wrong
+                                            # interpreter the two disagree
 
 # About 200 MB. No torch, no CUDA, no GPU. This is the whole install.
 pip install -r requirements-site.txt

@@ -106,7 +106,7 @@ class Paths:
     model_key: str
     model_home_glob: str
     available_models: tuple[str, ...]
-    tokenizer_yaml: pathlib.Path
+    tokenizer_yaml_path: pathlib.Path | None
     output_home: pathlib.Path
     scratch_home: pathlib.Path
     role: str = "site"
@@ -153,6 +153,53 @@ class Paths:
             return self.model_home
         except FileNotFoundError:
             return None
+
+    @property
+    def tokenizer_yaml(self) -> pathlib.Path:
+        """
+        the training-time cocoa tokenizer -- checked on access, not on load
+
+        Raises when it is not on this machine, which is deliberate for the
+        things that genuinely cannot proceed without it: tokenizing, the
+        token-prevalence tables, and anything that reads the model's embedding
+        table by token id.
+
+        It is NOT required to run 01 as a whole. The cohort, the phenotype
+        breakdowns, the baseline tables and the entire trial and guideline
+        analysis are computed from CLIF and the published literature and never
+        see a token, so a site with no tokenizer skips the token stages and
+        sends everything else. Use `has_tokenizer` to branch rather than
+        catching this.
+        """
+        if self.tokenizer_yaml_path is None:
+            raise FileNotFoundError(
+                "no `tokenizer_yaml` is configured in paths.yaml. It is needed "
+                "to tokenize and to compare token prevalence across sites, and "
+                "must be the tokenizer the model was TRAINED with. The rest of "
+                "01_site_tables.py does not use it."
+            )
+        if not self.tokenizer_yaml_path.is_file():
+            raise FileNotFoundError(
+                "the training-time cocoa tokenizer is required to make the "
+                "model's token embeddings meaningful, but was not found: "
+                f"{self.tokenizer_yaml_path}. The cohort, phenotype, baseline "
+                "and trial tables in 01_site_tables.py do not need it; the "
+                "token stages and all of tier 2 do."
+            )
+        return self.tokenizer_yaml_path
+
+    @property
+    def tokenizer_yaml_or_none(self) -> pathlib.Path | None:
+        """`tokenizer_yaml` if it is on this machine, else None"""
+        try:
+            return self.tokenizer_yaml
+        except FileNotFoundError:
+            return None
+
+    @property
+    def has_tokenizer(self) -> bool:
+        """whether the token stages can run at all"""
+        return self.tokenizer_yaml_or_none is not None
 
     @property
     def site_data(self) -> dict[str, pathlib.Path]:
@@ -441,6 +488,56 @@ def load_paths(
         )
     cfg = OmegaConf.load(path)
 
+    # ------------------------------------------------------------------
+    # Unedited placeholders, caught by name.
+    #
+    # paths.example.yaml ships `/path/to/...` in every location. Left in, the
+    # first thing that touches one fails somewhere deep in pathlib or glob and
+    # the error is whatever the filesystem said about `/path` -- at Rush that
+    # was `[Errno 13] Permission denied: '/path'`, which names neither the file
+    # to edit nor the key that is wrong, and sends the reader looking for a
+    # permissions problem they do not have.
+    #
+    # Checked before anything is resolved, so the message is about the config
+    # rather than about the filesystem's opinion of a path nobody meant.
+    def _is_placeholder(value) -> bool:
+        text = str(value) if value is not None else ""
+        return text.startswith("/path/to") or text == "/path"
+
+    # ONLY `sites.<name>.data_dir` is fatal, because it is the only key with no
+    # sane fallback -- there is nothing to analyse without it. Everything else
+    # either degrades or defaults:
+    #
+    #   models.<key>.home_glob  tier 2 only; checked by `Paths.model_home`
+    #   tokenizer_yaml          token stages only; checked by `Paths.tokenizer_yaml`
+    #   scratch_home            defaults to ./scratch
+    #   output_home             defaults to ./output
+    #
+    # Checking any of those here would re-impose a prerequisite that the lazy
+    # resolution and the defaults exist to remove, and would stop a site that
+    # could have contributed almost everything from contributing anything.
+    placeholders = [
+        f"    {key}: {value}"
+        for key, value in (
+            (f"sites.{site}.data_dir", cfg.sites[site].get("data_dir"))
+            for site in (cfg.get("sites") or {})
+        )
+        if _is_placeholder(value)
+    ]
+    if placeholders:
+        raise ValueError(
+            f"{path} still holds the example placeholders:"
+            + chr(10)
+            + chr(10).join(placeholders)
+            + chr(10) * 2
+            + "Point it at this machine's CLIF-2.1 directory. That is the "
+            "only key 01_site_tables.py cannot do without: `scratch_home` and "
+            "`output_home` default to ./scratch and ./output, and "
+            "`tokenizer_yaml` and `models.<key>.home_glob` may be left pointing "
+            "at nothing -- without the tokenizer 01 skips the token stages and "
+            "exports everything else."
+        )
+
     site_data = {}
     for site in cfg.sites:
         d = pathlib.Path(cfg.sites[site].data_dir).expanduser().resolve()
@@ -467,16 +564,39 @@ def load_paths(
     # site, which never loads the weights, is not blocked by their absence.
     pattern = str(cfg.models[key].home_glob)
 
-    tokenizer_yaml = pathlib.Path(cfg.tokenizer_yaml).expanduser().resolve()
-    if not tokenizer_yaml.is_file():
-        raise FileNotFoundError(
-            "the training-time cocoa tokenizer is required to make the model's "
-            f"token embeddings meaningful, but was not found: {tokenizer_yaml}"
-        )
+    # Recorded, not checked -- see `Paths.tokenizer_yaml`, which checks it on
+    # access. A missing tokenizer stops the token stages and all of tier 2; it
+    # does not stop the cohort, the phenotype breakdowns, the baseline tables or
+    # the trial and guideline analysis, none of which read a token. Requiring it
+    # here made a site that could have contributed all of those contribute
+    # nothing. May also be absent from paths.yaml entirely.
+    configured_tokenizer = cfg.get("tokenizer_yaml")
+    tokenizer_yaml = (
+        pathlib.Path(str(configured_tokenizer)).expanduser().resolve()
+        if configured_tokenizer
+        else None
+    )
 
     resolved_role = role or cfg.get("role") or "site"
     if resolved_role not in ROLES:
         raise ValueError(f"role must be one of {ROLES}, not {resolved_role!r}")
+
+    # `output_home` and `scratch_home` default to the working directory, so
+    # neither has to be set to get a run out of the box. An unedited
+    # placeholder counts as unset rather than as an error: falling back to a
+    # working default beats refusing to start over a path nobody chose.
+    #
+    # `./scratch` is a DEFAULT, not a recommendation. Intermediates are
+    # cohort-restricted CLIF, token streams and feature shards -- hundreds of GB
+    # for a large cohort, fully regenerable, and ruinous on a synced drive
+    # (Box, Dropbox, OneDrive will both replicate them and hold locks on them).
+    # Point `scratch_home` at real scratch before running a big cohort; it is
+    # logged on every run so the location is never a surprise.
+    def _home(key: str, default: str) -> pathlib.Path:
+        value = cfg.get(key)
+        if not value or _is_placeholder(value):
+            value = default
+        return pathlib.Path(str(value)).expanduser().resolve()
 
     return Paths(
         raw_site_data=site_data,
@@ -484,9 +604,9 @@ def load_paths(
         model_key=key,
         model_home_glob=pattern,
         available_models=available,
-        tokenizer_yaml=tokenizer_yaml,
-        output_home=pathlib.Path(cfg.output_home).expanduser().resolve(),
-        scratch_home=pathlib.Path(cfg.scratch_home).expanduser().resolve(),
+        tokenizer_yaml_path=tokenizer_yaml,
+        output_home=_home("output_home", "./output"),
+        scratch_home=_home("scratch_home", "./scratch"),
     )
 
 

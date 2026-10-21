@@ -162,17 +162,28 @@ except Exception as exc:
             print(f"           {entry.name!r}  {cps or '(all ASCII)'}")
         print("         the glob needs EXACTLY ONE character where ? is.")
 
-# REQUIRED FOR TIER 1 AS WELL. The token-prevalence tables are token ids, and
-# they are only comparable across sites under the training-time mapping, so
-# this one is a hard failure whichever tier is being run.
-print("tokenizer  (required for tier 1 and tier 2)")
-tok = pathlib.Path(paths.tokenizer_yaml)
-report("tokenizer.yaml", tok, tok.is_file(),
-       "" if tok.is_file() else
-       "must be the tokenizer the model was TRAINED with -- a locally fitted "
-       "one maps the same clinical event to a different id")
+# TOKEN STAGES ONLY. Needed to tokenize and to build the token-prevalence
+# tables, which are token ids and are only comparable across sites under the
+# training-time mapping. Without it 01 skips `tokenize`, `winnow` and
+# `tokencounts` and exports everything else, so this cannot fail the preflight
+# either -- the cohort, phenotype, baseline and trial tables never see a token.
+print("tokenizer  (token stages and tier 2 -- the rest of 01 runs without it)")
+tok = paths.tokenizer_yaml_or_none
+if tok is not None:
+    report("tokenizer.yaml", tok, True)
+else:
+    note_only("tokenizer.yaml", paths.tokenizer_yaml_path or "not configured",
+              "01 will SKIP tokenize, winnow and tokencounts, so the bundle "
+              "carries no token_prevalence, no token_families and no "
+              "token_levels. Everything else still exports.")
+    print("         it must be the tokenizer the model was TRAINED with -- a "
+          "locally fitted one maps the same clinical event to a different id")
 
-print("writable locations")
+# Both default to the working directory when unset or left as a placeholder,
+# so these lines say where the run will actually write -- which is the point,
+# since ./scratch under a repo on a synced drive is a working default and a bad
+# idea for a large cohort.
+print("writable locations  (default to ./output and ./scratch when unset)")
 for label, target in (("output_home", paths.output_home),
                       ("scratch_home", paths.scratch_home)):
     target = pathlib.Path(target)

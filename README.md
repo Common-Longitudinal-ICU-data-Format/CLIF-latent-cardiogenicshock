@@ -214,17 +214,43 @@ institution requires more.
 
 `python` on a cluster is often 3.6, and `python -m venv` will build a 3.6 venv
 without complaint — then the install fails on `cocoa-tokenizer`
-(`requires_python >=3.11`) and leaves you an empty venv whose error says nothing
-about versions. Get a newer interpreter without root using
+(`requires_python >=3.11`) and leaves you a venv whose error says nothing about
+versions.
+
+**Look for a module first** — most clusters have one, and it is less work than
+anything else here:
+
+```bash
+module spider python              # or: module avail python
+module load python/3.12            # whatever it lists at 3.11 or newer
+python3 --version                  # confirm before going on
+```
+
+**Then create the venv, in that order.** A venv is permanently bound to the
+interpreter that built it — `bin/python` is a symlink to it — so loading a
+module *after* creating the venv does nothing, and the venv cannot be upgraded
+in place. If `python3 --version` says 3.12 while `python --version` inside the
+activated venv says 3.6, that is this mistake: delete the venv, load the
+module, and create it again.
+
+```bash
+python3 -m venv ~/venvs/clif-cs
+source ~/venvs/clif-cs/bin/activate
+python --version                   # must say 3.11+ -- stop here if it does not
+pip install -r requirements-site.txt
+```
+
+**If no module is new enough**, get an interpreter without root using
 [uv](https://astral.sh/uv):
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
 uv python install 3.11
-PY=$(uv python find 3.11)             # an absolute path to a 3.11 interpreter
-"$PY" -m venv .venv
-.venv/bin/python --version            # must say 3.11+ -- stop here if it does not
-.venv/bin/pip install -r requirements-site.txt
+PY=$(uv python find 3.11)          # an absolute path to a 3.11 interpreter
+"$PY" -m venv ~/venvs/clif-cs      # note: uv does NOT change `python3`
+source ~/venvs/clif-cs/bin/activate
+python --version                   # must say 3.11+
+pip install -r requirements-site.txt
 ```
 
 ## If you have Slurm

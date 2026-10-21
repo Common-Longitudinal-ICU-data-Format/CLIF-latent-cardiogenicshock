@@ -42,17 +42,22 @@ REPO_HOME="${REPO_HOME:-/gpfs/data/pearson-lab/PERSONAL/hhieromnimon/CLIF-latent
 # middle of pip, leaving a venv that looks built and imports about half of
 # what it needs.
 VENV_HOME="${VENV_HOME:-/gpfs/data/pearson-lab/PERSONAL/hhieromnimon/venvs/clif-cs}"
-# PYTHON_MODULE is EMPTY BY DEFAULT, and on Rush CRI it should stay that
-# way. The cluster has python/3.10.5 and python/3.12.3, and Lmod answers
-# "exist but cannot be loaded as requested" for both -- they sit behind a
-# toolchain prerequisite in a hierarchical module tree. None of that matters,
-# because the venv does not need a python module: it was built on a
-# standalone CPython 3.11.16 that uv installed under ~/.local/share/uv, and
-# activating the venv is what puts the right interpreter on PATH.
+# The python module the venv was BUILT FROM. Must match, because a venv is
+# permanently bound to the interpreter that created it: `bin/python` is a
+# symlink to that interpreter and `pyvenv.cfg` records its absolute path.
+# Activating a venv whose base interpreter is not on PATH -- which is what a
+# `module purge` with PYTHON_MODULE empty leaves you -- gives a venv that
+# either fails to start or starts without the module's LD_LIBRARY_PATH.
 #
-# Set it only on a cluster where the system python is too old to create the
-# venv in the first place, e.g. PYTHON_MODULE=python/3.11.
-PYTHON_MODULE="${PYTHON_MODULE:-}"
+# On Rush CRI `module load python/3.12.3` works, and 3.12.3 clears the >=3.11
+# floor cotorra and cocoa-tokenizer declare. An earlier version of this
+# comment said Lmod refused both pythons here and that a uv-installed
+# standalone CPython was the only route; that is no longer true. Check with
+# `module spider python` -- 3.10.5 is still too old, 3.12.3 loads.
+#
+# Leave it EMPTY only if the venv was built on an interpreter that needs no
+# module: a system python new enough, or a standalone CPython from uv.
+PYTHON_MODULE="${PYTHON_MODULE:-python/3.12.3}"
 SITE="${SITE:-RUSH}"
 # ------------------------------------------------------------------------
 

@@ -49,15 +49,27 @@
 
 set -euo pipefail
 
-# --- EDIT THESE to match `module avail` on this cluster -----------------
-# Empty by default, and on Rush CRI it should stay that way. The cluster
-# has python/3.10.5 and python/3.12.3 and Lmod answers "exist but cannot
-# be loaded as requested" for both -- they sit behind a toolchain
-# prerequisite in a hierarchical module tree. None of that matters: the
-# venv is built on a standalone CPython that uv installed, and activating
-# the venv is what puts the right interpreter on PATH.
-PYTHON_MODULE="${PYTHON_MODULE:-}"
-# The interpreter the venv is created FROM. Must be 3.11 or newer.
+# --- EDIT THESE to match `module spider python` on this cluster ---------
+# The module providing the interpreter the venv is built FROM. On Rush CRI
+# `module load python/3.12.3` works and 3.12.3 clears the >=3.11 floor that
+# cotorra and cocoa-tokenizer declare. (3.10.5, the other module, does not.)
+#
+# An earlier version of this comment said Lmod refused both pythons here and
+# that a uv-installed standalone CPython was the only route. That is no longer
+# true -- check with `module spider python` rather than believing either
+# version of this comment.
+#
+# Whatever you set here must ALSO be set in hpc/_common.sh, because every
+# later job does `module purge` and then activates the venv: a venv is bound
+# to the interpreter that created it, and activating one whose base
+# interpreter is not on PATH gives a python that fails to start or starts
+# without the module's LD_LIBRARY_PATH.
+#
+# Leave it empty only when the bootstrap interpreter needs no module.
+PYTHON_MODULE="${PYTHON_MODULE:-python/3.12.3}"
+# The interpreter the venv is created FROM. Must be 3.11 or newer. `python3`
+# is correct once PYTHON_MODULE is loaded; the module supplies `python3` and
+# often not `python`, which is why this is not `python`.
 BOOTSTRAP_PYTHON="${BOOTSTRAP_PYTHON:-python3}"
 VENV_HOME="${VENV_HOME:-/gpfs/data/pearson-lab/PERSONAL/hhieromnimon/venvs/clif-cs}"
 # Where pip keeps downloaded wheels. Defaults NEXT TO THE VENV rather than to
@@ -156,6 +168,39 @@ else
 fi
 # shellcheck disable=SC1091
 source "$VENV_HOME/bin/activate"
+
+# WHAT THE VENV IS, not what BOOTSTRAP_PYTHON was. The check further up tests
+# the interpreter we would CREATE from; this tests the one we are about to
+# install INTO, and those are different questions whenever the venv already
+# existed and the reuse branch above was taken.
+#
+# A venv is permanently bound to the interpreter that created it: `bin/python`
+# is a symlink to it and pyvenv.cfg records its absolute path. So a venv built
+# before the python module was loaded stays 3.6 however many modules are loaded
+# afterwards, and it cannot be upgraded in place. The symptom is
+# `python3 --version` reporting 3.12.3 while `python --version` reports 3.6.8
+# inside the activated venv -- the module supplies `python3`, the venv supplies
+# `python`. Without this guard pip then installs into the 3.6 venv and dies on
+# cocoa-tokenizer with an error that never mentions versions.
+python - <<'VENVCHECK'
+import sys
+if sys.version_info < (3, 11):
+    print(
+        "the venv at this location was built from Python "
+        f"{sys.version.split()[0]}, which cannot install this stack: "
+        "cotorra and cocoa-tokenizer declare requires_python >=3.11.",
+        file=sys.stderr,
+    )
+    print(
+        "A venv cannot be upgraded in place. Load the python module FIRST, "
+        "then rebuild it:",
+        file=sys.stderr,
+    )
+    print("    rm -rf $VENV_HOME", file=sys.stderr)
+    print("    sbatch hpc/00_setup_env.sbatch", file=sys.stderr)
+    raise SystemExit(1)
+print(f"  venv interpreter ok ({sys.version.split()[0]})")
+VENVCHECK
 
 python -m pip install --upgrade pip
 
