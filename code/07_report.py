@@ -848,18 +848,20 @@ def trajectory_coverage(paths, logger=None) -> tuple[str, str]:
     # so an uncorrected flow field is largely a picture of three hospitals.
     # Looking only for the unsuffixed name reported "09 has not been run" for
     # every corrected run and omitted sections 4-6 on a complete analysis.
+    # 09 scopes this by subset and by correction, so there can be several.
+    # Preference order matters: the cardiogenic subset is what sections 4-6 are
+    # about, and an uncorrected run is the one a reader assumes unless told.
     home = paths.output_home / "patient_level_data" / "GEM-all"
-    trajectory_file = next(
-        (
-            candidate
-            for candidate in (
-                home / "trajectory_projections.parquet",
-                *sorted(home.glob("trajectory_projections_corrected-*.parquet")),
-            )
-            if candidate.is_file()
-        ),
-        None,
-    )
+    candidates = []
+    for subset in SUBSET_ORDER:
+        candidates.append(home / f"trajectory_projections_{subset}.parquet")
+        candidates.extend(
+            sorted(home.glob(f"trajectory_projections_{subset}_corrected-*.parquet"))
+        )
+    # names written before the subset was part of the path
+    candidates.append(home / "trajectory_projections.parquet")
+    candidates.extend(sorted(home.glob("trajectory_projections_corrected-*.parquet")))
+    trajectory_file = next((c for c in candidates if c.is_file()), None)
     if trajectory_file is None:
         return "stale", "09 has not been run"
     if not cohort_file.is_file():

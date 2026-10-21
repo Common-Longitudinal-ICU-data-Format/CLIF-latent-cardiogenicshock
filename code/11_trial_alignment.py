@@ -523,13 +523,17 @@ def plot_trajectory_distance(paths, frame, trials, regions, cfg, out_path,
     # so look for both. The raw file is preferred when both exist because the
     # rest of this script works in the uncorrected space and mixing the two in
     # one figure set would be the kind of difference nobody notices.
+    # 09 scopes its output by subset and by correction. The cardiogenic subset
+    # is preferred: this figure is about trial eligibility in cardiogenic
+    # shock, and a septic-only layout would place those patients relative to a
+    # different disease.
+    home = paths.patient_level_home
     candidates = [
-        paths.patient_level_home / "trajectory_projections.parquet",
-        *sorted(
-            paths.patient_level_home.glob(
-                "trajectory_projections_corrected-*.parquet"
-            )
-        ),
+        home / "trajectory_projections_cardiogenic.parquet",
+        *sorted(home.glob("trajectory_projections_cardiogenic_corrected-*.parquet")),
+        home / "trajectory_projections.parquet",
+        *sorted(home.glob("trajectory_projections_corrected-*.parquet")),
+        *sorted(home.glob("trajectory_projections_*.parquet")),
     ]
     path = next((c for c in candidates if c.is_file()), None)
     if path is None:

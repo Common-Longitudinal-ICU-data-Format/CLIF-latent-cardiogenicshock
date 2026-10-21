@@ -2395,16 +2395,23 @@ def main() -> None:
         "hospitalization_id", "site", "offset_hours", "last_valid",
         "cs_phenotype", "in_hospital_mortality",
         "umap_1", "umap_2", "pacmap_1", "pacmap_2", "pca_1", "pca_2",
-    # Suffixed on a corrected run, so it never overwrites the raw one. 11 reads
-    # the unsuffixed file for its trajectory figure; a corrected run silently
-    # replacing it would re-draw that figure in a different space without
-    # anything in 11 saying so. Same reasoning as 03's corrected-<method>/.
+    # Scoped by BOTH subset and correction. Each subset fits its own PaCMAP --
+    # project() runs on whatever load_grid returned -- so the cardiogenic
+    # figures sit in a cardiogenic-only space and the septic ones in a
+    # septic-only space, which is the point: a layout fitted over both would
+    # place every patient relative to the other disease.
+    #
+    # That makes the coordinates incomparable between subsets, so they cannot
+    # share a filename. They did: the septic plot stage would have overwritten
+    # the cardiogenic projections, and 07 and 11 read that file to draw their
+    # own figures, so they would have silently redrawn cardiogenic patients in
+    # septic coordinates.
     ).write_parquet(
         paths.patient_level_home
         / (
-            f"trajectory_projections_corrected-{args.correction}.parquet"
-            if args.correction != "none"
-            else "trajectory_projections.parquet"
+            f"trajectory_projections_{args.subset}"
+            + (f"_corrected-{args.correction}" if args.correction != "none" else "")
+            + ".parquet"
         )
     )
     logger.info("09 done")
