@@ -56,6 +56,7 @@ from clifcs.config import CONFIG_HOME
 from clifcs.grid_winnower import GridWinnower
 from clifcs.figures import key_string, quantile_colour, save_figure
 from clifcs.palette import (
+    husl_colors,
     mortality_colors,
     GRID,
     INK_PRIMARY,
@@ -609,115 +610,103 @@ def apply_correction(paths, frame: pl.DataFrame, method: str, anchor: str, logge
     )
 
 
-#: the two readings of "cardiogenic shock", drawn side by side
+#: how a patient qualifies as cardiogenic, as a LABEL rather than a cohort
 #:
-#: They disagree, and which one is right is the question rather than a detail.
-#: The coded label is what a clinician concluded; `cardiac_origin` is what was
-#: done to the patient -- an inotrope, a mechanical support device, or a
-#: troponin over 500 ng/L near onset. The repository prefers measurement to
-#: coding everywhere else, and the coded cardiogenic rate differs 2.5x between
-#: UCMC and NU, so a figure drawn on the code alone is partly a figure about
-#: documentation habit.
-#:
-#: Drawn with identical bins and an identical low-count mask so the two panels
-#: are comparable. They also overlap heavily, so the intersection is reported:
-#: these are not two independent pieces of evidence.
-CS_DEFINITIONS = (
-    (
-        "coded",
-        "ICD-coded cardiogenic shock (R57.0)",
-        # exactly "cardiogenic", so `mixed` is excluded. A mixed patient does
-        # carry a cardiogenic code, but their trajectory may be driven by the
-        # other mechanism, and mixed is the deadliest group at 43.3% -- folding
-        # it in would move the field for a reason that is not cardiogenic.
-        pl.col("shock_type") == "cardiogenic",
-    ),
-    (
-        "cardiac_origin",
-        "cardiac origin by treatment or troponin",
-        pl.col("cardiac_origin").fill_null(False),
-    ),
-)
+#: Splitting the cohort fitted a separate field to each definition, so the two
+#: figures differed both in who was in them and in what the arrows were computed
+#: from -- and nothing on the page said which difference you were looking at.
+#: One field over the union, with the definition as the hue, holds the arrows
+#: fixed and varies only the colour. It also puts the overlap on the figure:
+#: the two definitions agree on about a quarter of their union, which is the
+#: single most important caveat about comparing them and was previously a line
+#: in a log.
+CS_DEFINITION_LEVELS: tuple[str, ...] = ("both", "ICD code only", "treatment only")
+
+
+def cardiogenic_definition() -> pl.Expr:
+    """which of the two readings of cardiogenic shock a patient satisfies"""
+    coded = pl.col("shock_type") == "cardiogenic"
+    treated = pl.col("cardiac_origin").fill_null(False)
+    return (
+        pl.when(coded & treated).then(pl.lit("both"))
+        .when(coded).then(pl.lit("ICD code only"))
+        .when(treated).then(pl.lit("treatment only"))
+        .otherwise(pl.lit(None))
+    )
 
 
 def plot_cardiogenic_flow(frame, px, py, home, paths, args, logger) -> None:
     """
-    the headline figure: latent flow for cardiogenic shock, by Zweck phenotype
+    the headline figures: latent flow among cardiogenic shock patients
 
-    One flow field per definition of cardiogenic shock, over a scatter coloured
-    by Zweck phenotype. The field is pooled over all cardiogenic patients
-    rather than drawn once per phenotype: at 26x26 bins a per-phenotype field
-    would hold roughly a third as many displacement vectors per cell, and the
-    tails of the cloud would be mostly empty cells rather than mostly arrows.
-    Colouring the scatter answers where the phenotypes sit; a faceted field
-    would answer whether they move differently, and does not have the sample
-    size to.
+    One flow field over the union of the two definitions, drawn twice with
+    different hues beneath it -- Zweck phenotype, and which definition the
+    patient satisfies. Both carry the arrows, because a panel without them
+    answers a different question from the one this section is asking.
+
+    The field is computed on the union rather than per definition for the
+    reason in CS_DEFINITION_LEVELS: holding the arrows fixed is what makes two
+    panels comparable.
     """
-    available = [
-        (key, label, expression)
-        for key, label, expression in CS_DEFINITIONS
-        if set(expression.meta.root_names()) <= set(frame.columns)
-    ]
-    if not available:
-        logger.warning("no cardiogenic definition is computable here")
+    needed = {"shock_type", "cardiac_origin"}
+    if not needed <= set(frame.columns):
+        logger.warning(
+            f"cannot label cardiogenic definition; missing "
+            f"{sorted(needed - set(frame.columns))}"
+        )
         return
 
-    selected = {}
-    for key, label, expression in available:
-        part = frame.filter(expression)
-        n_patients = part["hospitalization_id"].n_unique()
-        selected[key] = set(part["hospitalization_id"].unique().to_list())
-        if n_patients < 200:
-            logger.warning(
-                f"  {key}: only {n_patients} patients, too few for a flow field"
-            )
-            continue
-        logger.info(
-            f"  {key}: {n_patients:,} patients, {part.height:,} patient-timepoints"
-        )
-        plot_flow(
-            part,
-            px,
-            py,
-            home / f"trajectory_flow_cardiogenic_{key}.png",
-            f"{paths.model_key}: latent flow, {label}",
-            f"{n_patients:,} patients, mean observed displacement between "
-            f"consecutive {args.step_hours:g}h timepoints; cells with <5 "
-            "vectors blank; points coloured by Zweck phenotype",
-            logger,
-            labels=proj_labels(),
-            colour_by={
-                "key": "cs_phenotype",
-                "colors": phenotype_colors(),
-                "order": list(PHENOTYPES),
-            },
-        )
-        phenotyped = part.filter(pl.col("cs_phenotype").is_not_null())
-        if phenotyped.height:
-            plot_scatter(
-                phenotyped,
-                px,
-                py,
-                "cs_phenotype",
-                phenotype_colors(),
-                list(PHENOTYPES),
-                f"{paths.model_key}: {label}, by Zweck phenotype",
-                "",
-                home / f"trajectory_cardiogenic_{key}_phenotype.png",
-                logger,
-            )
+    labelled = frame.with_columns(cs_definition=cardiogenic_definition())
+    part = labelled.filter(pl.col("cs_definition").is_not_null())
+    if part.height == 0:
+        logger.warning("no cardiogenic patients to draw")
+        return
 
-    # The two definitions are not independent evidence; say how much they share
-    if len(selected) == 2:
-        a, b = list(selected)
-        overlap = selected[a] & selected[b]
-        union = selected[a] | selected[b]
+    n_patients = part["hospitalization_id"].n_unique()
+    breakdown = (
+        part.group_by("cs_definition")
+        .agg(patients=pl.col("hospitalization_id").n_unique())
+        .sort("patients", descending=True)
+    )
+    logger.info(f"cardiogenic flow: {n_patients:,} patients in the union")
+    for row in breakdown.iter_rows(named=True):
         logger.info(
-            f"  the two definitions overlap on {len(overlap):,} patients "
-            f"({len(overlap) / max(len(union), 1):.1%} of their union): "
-            f"{a} {len(selected[a]):,}, {b} {len(selected[b]):,}. They are two "
-            "readings of one cohort, not two independent findings."
+            f"    {row['cs_definition']:<16} {row['patients']:>6,} patients "
+            f"({row['patients'] / n_patients:.1%} of the union)"
         )
+
+    subtitle = (
+        f"{n_patients:,} patients meeting either definition of cardiogenic "
+        f"shock; one field over all of them, mean displacement between "
+        f"consecutive {args.step_hours:g}h timepoints, cells with <5 vectors blank"
+    )
+
+    plot_flow(
+        part, px, py,
+        home / "trajectory_flow_cardiogenic_phenotype.png",
+        f"{paths.model_key}: latent flow, cardiogenic shock by Zweck phenotype",
+        subtitle,
+        logger, labels=proj_labels(),
+        colour_by={
+            "key": "cs_phenotype",
+            "colors": phenotype_colors(),
+            "order": list(PHENOTYPES),
+        },
+    )
+
+    plot_flow(
+        part, px, py,
+        home / "trajectory_flow_cardiogenic_definition.png",
+        f"{paths.model_key}: latent flow, cardiogenic shock by how it was identified",
+        subtitle + "; the ICD code and the treatment-based flag agree on only "
+        "part of this set, so they are not two independent findings",
+        logger, labels=proj_labels(),
+        colour_by={
+            "key": "cs_definition",
+            "colors": husl_colors(CS_DEFINITION_LEVELS),
+            "order": list(CS_DEFINITION_LEVELS),
+        },
+    )
 
 
 def attach_state(paths, frame: pl.DataFrame, logger) -> pl.DataFrame:
@@ -1100,50 +1089,95 @@ def plot_single_colouring(frame, spec, out, title, logger):
     logger.info(f"wrote {out.name}")
 
 
-def path_alignment(frame: pl.DataFrame, patient, cx, cy, vx, vy, counts) -> float:
+def path_quality(frame, patient, cx, cy, vx, vy, counts, extent) -> float:
     """
-    how well one patient's own path follows the averaged flow field
+    how well one patient's path illustrates the averaged flow field
 
-    The mean cosine between each of the patient's steps and the field vector in
-    the cell that step starts from. +1 means they travel with the field at every
-    step, 0 means their motion is unrelated to it, -1 means they move against
-    it throughout.
+    WHAT THIS SCORES, because the first version got it wrong. It used the mean
+    cosine between each step and the local field vector and nothing else.
+    Cosine is scale-free, so a patient who teleports across the whole map in
+    roughly the right direction scored a perfect 1.0, identically to one
+    gliding along a streamline -- and a step spanning twenty cells was judged
+    against the field in the cell it happened to start in. The criterion was
+    therefore selecting FOR big jumps, which is exactly what the figures showed.
 
-    This exists to choose figures, not to measure anything. A panel is meant to
-    show what the arrows are an average OF, and a patient drawn at random is
-    usually a few coincident dots with one long jump -- legible as data, useless
-    as illustration. Picking patients that follow the field answers "what does
-    moving with the flow look like for one person", which is the question the
-    field invites and cannot itself answer.
+    Four things now, all of which a usable illustration needs:
 
-    It is emphatically a biased sample, and the figure caption says so.
+      steps       at least four usable ones. A mean over two is not a tendency.
+      direction   the FRACTION of steps pointing with the field, not the mean
+                  cosine -- one long well-aligned step cannot carry a path that
+                  otherwise wanders.
+      scale       steps comparable to the field's own resolution. A step longer
+                  than two grid cells is not following the field, it is
+                  crossing it, and the local vector cannot describe it.
+      smoothness  net displacement over path length. A path that doubles back
+                  covers ground without going anywhere, and reads as noise
+                  however well each individual step lines up.
+
+    Returns 0 for a path that fails any of them, so sorting descending puts the
+    usable ones first and never promotes a teleporter.
     """
     _px, _py = proj_cols()
     path = frame.filter(pl.col("hospitalization_id") == patient).sort("offset_hours")
-    if path.height < 3:
-        return float("nan")
+    if path.height < 5:
+        return 0.0
     tx, ty = path[_px].to_numpy(), path[_py].to_numpy()
     dx, dy = np.diff(tx), np.diff(ty)
+    lengths = np.hypot(dx, dy)
 
-    # the cell each step starts in
+    # the field's own resolution: displacement_field uses `bins` cells across
+    # the 0.5-99.5 percentile span, so one cell is that span over `bins`
+    cell = extent / 26.0
+    if cell <= 0:
+        return 0.0
+
     ix = np.clip(np.searchsorted(cx, tx[:-1]) - 1, 0, len(cx) - 1)
     iy = np.clip(np.searchsorted(cy, ty[:-1]) - 1, 0, len(cy) - 1)
 
-    cosines = []
-    for sx, sy, i, j in zip(dx, dy, ix, iy):
+    cosines, steps = [], []
+    for sx, sy, length, i, j in zip(dx, dy, lengths, ix, iy):
         if counts[j, i] < 5:
             continue
         fx, fy = vx[j, i], vy[j, i]
-        step = np.hypot(sx, sy)
         field = np.hypot(fx, fy)
-        if step < 1e-9 or field < 1e-9 or not np.isfinite(field):
+        if length < 1e-9 or field < 1e-9 or not np.isfinite(field):
             continue
-        cosines.append((sx * fx + sy * fy) / (step * field))
-    return float(np.mean(cosines)) if cosines else float("nan")
+        cosines.append((sx * fx + sy * fy) / (length * field))
+        steps.append(length)
+
+    if len(cosines) < 4:
+        return 0.0
+    cosines = np.asarray(cosines)
+    steps = np.asarray(steps)
+
+    # LENGTH FILTERS APPLY TO EVERY STEP, not just the scoreable ones. Steps
+    # landing in empty cells are skipped above because there is no vector to
+    # compare them against -- but skipping them from the length test too meant
+    # a path could jump right across the plot through empty space and still be
+    # judged on the handful of small steps it took afterwards. That is what put
+    # a patient with one enormous opening stride at the top of the ranking.
+    if np.median(lengths) > 1.5 * cell:
+        return 0.0
+    if lengths.max() > 0.15 * extent:
+        return 0.0
+    # and most of the path has to be somewhere the field actually exists, or
+    # "follows the field" is a statement about a minority of it
+    if len(cosines) / len(lengths) < 0.7:
+        return 0.0
+
+    aligned = float(np.mean(cosines > 0.3))
+    if aligned < 0.6:
+        return 0.0
+
+    travelled = float(steps.sum())
+    net = float(np.hypot(tx[-1] - tx[0], ty[-1] - ty[0]))
+    directness = net / travelled if travelled > 0 else 0.0
+
+    return aligned * float(np.mean(cosines)) * (0.5 + 0.5 * directness)
 
 
-def pick_flow_followers(frame: pl.DataFrame, x, y, n: int = 8,
-                        min_points: int = 6, pool: int = 400, seed: int = 7):
+def pick_flow_followers(frame: pl.DataFrame, x, y, logger, n: int = 8,
+                        min_points: int = 8, pool: int = 900, seed: int = 7):
     """
     patients whose own path follows the flow field, spread across the groups
 
@@ -1156,6 +1190,7 @@ def pick_flow_followers(frame: pl.DataFrame, x, y, n: int = 8,
     steps at the coarsest useful resolution.
     """
     cx, cy, vx, vy, counts, _ = displacement_field(frame, x, y)
+    extent = float(max(np.ptp(frame[x].to_numpy()), np.ptp(frame[y].to_numpy())))
 
     eligible = (
         frame.group_by("hospitalization_id")
@@ -1185,18 +1220,28 @@ def pick_flow_followers(frame: pl.DataFrame, x, y, n: int = 8,
         rng.shuffle(ids)
         strata = [ids[:pool]]
 
+    # Score every candidate, keep only those that clear the hard filters, and
+    # take the best from each stratum. Taking the best available per stratum
+    # regardless of score is what put teleporting patients in the figures: a
+    # stratum where nothing qualifies should contribute nothing, not its least
+    # bad member.
     chosen: list = []
     for bucket in strata:
         scored = [
-            (path_alignment(frame, pid, cx, cy, vx, vy, counts), pid)
+            (path_quality(frame, pid, cx, cy, vx, vy, counts, extent), pid)
             for pid in bucket
         ]
-        scored = [(s, p) for s, p in scored if np.isfinite(s)]
+        scored = [(s, p) for s, p in scored if s > 0.0]
         if scored:
             scored.sort(reverse=True)
             chosen.append(scored[0])
 
     chosen.sort(reverse=True)
+    if chosen:
+        logger.info(
+            "  path quality of the chosen: "
+            + ", ".join(f"{s:.2f}" for s, _ in chosen[:n])
+        )
     return [pid for _, pid in chosen[:n]]
 
 
@@ -1546,11 +1591,12 @@ def plot_flow(frame, x, y, out, title, subtitle, logger, labels=None,
                     "will be missing that level"
                 )
                 continue
+            pretty = colour_by.get("names", {}).get(level, level)
             ax.scatter(
                 px[mask], py[mask], s=2.0,
                 c=colours.get(key_string(level), "#cccccc"),
                 linewidths=0, alpha=0.8, rasterized=True, zorder=1,
-                label=f"{level} (n={int(mask.sum()):,})",
+                label=f"{pretty} (n={int(mask.sum()):,})",
             )
         ax.legend(
             loc="upper left", fontsize=6, frameon=False,
@@ -1731,20 +1777,25 @@ def main() -> None:
     logger.info("cardiogenic shock flow, both definitions:")
     plot_cardiogenic_flow(frame, px, py, home, paths, args, logger)
 
-    for survived, name in ((False, "died"), (True, "survived")):
-        part = frame.filter(pl.col("in_hospital_mortality") != survived)
-        if part.height > 2000:
-            plot_flow(part, px, py,
-                      home / f"trajectory_flow_{name}.png",
-                      f"{paths.model_key}: latent flow, patients who {name}",
-                      f"{part['hospitalization_id'].n_unique():,} patients, "
-                      "coloured by Zweck phenotype",
-                      logger, labels=proj_labels(),
-                      colour_by={
-                          "key": "cs_phenotype",
-                          "colors": phenotype_colors(),
-                          "order": list(PHENOTYPES),
-                      })
+    # Outcome as a COLOUR on one field, not two fields over two cohorts.
+    # Splitting the cohort fits a separate field to each, so the two figures
+    # differ both in who is in them and in what the arrows were computed from,
+    # and there is no way to tell which difference you are looking at. One
+    # field with the outcome underneath holds the arrows fixed and varies only
+    # the hue.
+    if "in_hospital_mortality" in frame.columns:
+        plot_flow(frame, px, py,
+                  home / "trajectory_flow_mortality.png",
+                  f"{paths.model_key}: latent flow, coloured by outcome",
+                  f"{frame['hospitalization_id'].n_unique():,} patients; one "
+                  "field over everyone, hue is in-hospital mortality",
+                  logger, labels=proj_labels(),
+                  colour_by={
+                      "key": "in_hospital_mortality",
+                      "colors": mortality_colors(),
+                      "order": [False, True],
+                      "names": {False: "survived", True: "died in hospital"},
+                  })
 
     frame = attach_state(paths, frame, logger)
     if "on_imv" in frame.columns:
@@ -1772,7 +1823,7 @@ def main() -> None:
     # Patients whose own path follows the averaged field, so the panels show
     # what the arrows are an average of rather than a random walk. A biased
     # sample on purpose; the captions say so.
-    patients = pick_flow_followers(frame, px, py)
+    patients = pick_flow_followers(frame, px, py, logger)
     if not patients:
         patients = pick_patients(frame)
         logger.warning(

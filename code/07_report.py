@@ -1734,26 +1734,21 @@ def section_flow(paths, out: list) -> None:
                                   f"Flow field in {projection_label} space")),
         ("PCA (cross-check)", figure(home / "trajectory_flow_pca.png",
                                      "The same field in a linear space")),
-        # The two readings of cardiogenic shock, which is what this analysis
-        # exists for. Identical bins and mask thresholds, so the panels are
-        # comparable -- and they select largely different people: the ICD code
-        # and the treatment-based flag overlap on only a quarter of their union.
-        ("Cardiogenic, ICD code",
-         figure(home / "trajectory_flow_cardiogenic_coded.png",
-                "Coded cardiogenic shock (R57.0)")),
-        ("Cardiogenic, by treatment",
-         figure(home / "trajectory_flow_cardiogenic_cardiac_origin.png",
-                "Inotrope, mechanical support, or troponin above threshold")),
-        ("Zweck, ICD code",
-         figure(home / "trajectory_cardiogenic_coded_phenotype.png",
-                "The same patients coloured by Zweck phenotype")),
-        ("Zweck, by treatment",
-         figure(home / "trajectory_cardiogenic_cardiac_origin_phenotype.png",
-                "The same patients coloured by Zweck phenotype")),
-        ("Died", figure(home / "trajectory_flow_died.png",
-                        "Patients who died in hospital")),
-        ("Survived", figure(home / "trajectory_flow_survived.png",
-                            "Patients who survived")),
+        # ONE field over the cardiogenic union, drawn with different hues under
+        # it. Splitting the cohort per definition or per outcome fitted a
+        # separate field to each, so two panels differed both in who was in them
+        # and in what the arrows were computed from, with nothing saying which
+        # difference you were looking at. Every panel here carries the arrows.
+        ("Cardiogenic, by Zweck",
+         figure(home / "trajectory_flow_cardiogenic_phenotype.png",
+                "Patients meeting either definition, coloured by Zweck phenotype")),
+        ("Cardiogenic, by definition",
+         figure(home / "trajectory_flow_cardiogenic_definition.png",
+                "The same field, coloured by whether the ICD code, the "
+                "treatment-based flag, or both identified the patient")),
+        ("By outcome",
+         figure(home / "trajectory_flow_mortality.png",
+                "One field over everyone, coloured by in-hospital mortality")),
     ]))
 
     # Physiology, one variable per tab. The combined grid is kept as an
