@@ -46,14 +46,25 @@ CONTINUOUS: tuple[tuple[str, str, int], ...] = (
     ("icu_los_days", "ICU length of stay (days)", 1),
 )
 
-#: binary variables: n (share).
-BINARY: tuple[tuple[str, str], ...] = (
-    ("on_imv", "Invasive mechanical ventilation"),
-    ("on_rrt", "Renal replacement therapy"),
-    ("cardiac_inotrope", "Inotrope (dobutamine or milrinone)"),
-    ("cardiac_mcs", "Mechanical circulatory support (ECMO, IABP, pVAD)"),
-    ("cardiac_troponin", "Peak troponin above threshold"),
-    ("in_hospital_mortality", "Died in hospital"),
+#: binary variables: key, label, and whether a null means "no".
+#:
+#: THE THIRD FIELD MATTERS AND IS NOT COSMETIC. The cardiac_* arms are stored
+#: as True-or-null, never False: a patient who got no inotrope has a null, not
+#: a false. Dropping nulls before taking a share therefore collapses the
+#: denominator onto the positives and every one of those rows reads 100%, which
+#: is what the first version of this table published for all six shock types.
+#:
+#: `on_rrt` is the opposite case and must NOT be filled: a null there means the
+#: site has no clif_crrt_therapy table, and turning that into "no dialysis"
+#: would assert something about the patients from the absence of a file.
+#: `on_imv` likewise -- a null is no respiratory record at onset.
+BINARY: tuple[tuple[str, str, bool], ...] = (
+    ("on_imv", "Invasive mechanical ventilation", False),
+    ("on_rrt", "Renal replacement therapy", False),
+    ("cardiac_inotrope", "Inotrope (dobutamine or milrinone)", True),
+    ("cardiac_mcs", "Mechanical circulatory support (ECMO, IABP, pVAD)", True),
+    ("cardiac_troponin", "Peak troponin above threshold", True),
+    ("in_hospital_mortality", "Died in hospital", True),
 )
 
 
@@ -90,6 +101,40 @@ def _rrt_flag(data_dir, ids: pl.Series) -> pl.DataFrame:
     })
 
 
+def _sofa(data_dir, ids: pl.Series) -> pl.DataFrame:
+    """
+    SOFA total and the non-cardiovascular part, from the derived clif_sofa
+
+    One row per patient: clif_sofa is per encounter block, so the first is
+    taken. The non-cardiovascular total is the sum of the components other than
+    the cardiovascular one -- the cardiovascular component is largely a
+    restatement of the vasopressor dose, which is what defines shock here, so
+    adjusting on the full score adjusts partly on the exposure.
+    """
+    from clifcs.concordance import NON_CV_SOFA_COMPONENTS
+
+    try:
+        frame = scan(data_dir, "clif_sofa").collect()
+    except Exception:
+        return pl.DataFrame()
+    have = [c for c in NON_CV_SOFA_COMPONENTS if c in frame.columns]
+    if "hospitalization_id" not in frame.columns or not have:
+        return pl.DataFrame()
+    keep = ["hospitalization_id", *(["sofa_total"] if "sofa_total" in frame.columns else []), *have]
+    out = (
+        frame.select(keep)
+        .with_columns(pl.col("hospitalization_id").cast(pl.String))
+        .unique(subset=["hospitalization_id"], keep="first")
+        .with_columns(
+            sofa_non_cv=pl.sum_horizontal(
+                *(pl.col(c).cast(pl.Int32) for c in have)
+            )
+        )
+        .drop([c for c in have if c != "sofa_non_cv"])
+    )
+    return out.filter(pl.col("hospitalization_id").is_in(ids.cast(pl.String).implode()))
+
+
 def collect(data_dir, cohort: pl.DataFrame, logger) -> pl.DataFrame:
     """
     per-patient baseline values at shock onset, for one site
@@ -107,6 +152,26 @@ def collect(data_dir, cohort: pl.DataFrame, logger) -> pl.DataFrame:
     )
     state = trajectory_state(data_dir, grid).drop("offset_hours")
     logger.info(f"  baseline: physiology at onset for {state.height} patients")
+
+    # SOFA separately. trajectory_state lists sofa_total in its VARIABLES but
+    # never populates it -- the grid frame carries no sofa column either, which
+    # is also why 09 draws no sofa panel. It comes from clif_sofa, the parquet
+    # the derive stage writes, which is where attach_severity reads it.
+    sofa = _sofa(data_dir, cohort["hospitalization_id"])
+    if sofa.height:
+        # Drop whatever trajectory_state already called sofa_* before joining.
+        # It emits sofa_total as part of its variable set and never fills it,
+        # so a plain join put the real column in sofa_total_right and this
+        # table read the empty one -- a blank row that looked like "this site
+        # does not compute SOFA" rather than a name collision.
+        collision = [c for c in state.columns if c.startswith("sofa_")]
+        if collision:
+            logger.info(
+                f"  baseline: dropping {collision} from the state frame; "
+                "clif_sofa is the populated source"
+            )
+            state = state.drop(collision)
+        state = state.join(sofa, on="hospitalization_id", how="left")
 
     return cohort.join(state, on="hospitalization_id", how="left").join(
         _rrt_flag(data_dir, cohort["hospitalization_id"]),
@@ -150,10 +215,13 @@ def summarise(frame: pl.DataFrame, site: str, min_cell: int) -> pl.DataFrame:
                 "share": None,
             })
 
-        for key, label in BINARY:
+        for key, label, null_is_false in BINARY:
             if key not in part.columns:
                 continue
-            measured = part[key].cast(pl.Boolean, strict=False).drop_nulls()
+            series = part[key].cast(pl.Boolean, strict=False)
+            if null_is_false:
+                series = series.fill_null(False)
+            measured = series.drop_nulls()
             positives = int(measured.sum()) if len(measured) else 0
             # the count is suppressed when it names few patients, and so is the
             # share, which would otherwise hand it straight back
