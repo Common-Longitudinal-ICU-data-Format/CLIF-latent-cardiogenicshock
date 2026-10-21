@@ -757,6 +757,67 @@ def attach_state(paths, frame: pl.DataFrame, logger) -> pl.DataFrame:
     return frame.join(state, on=["hospitalization_id", "offset_hours"], how="left")
 
 
+def plot_state_flow_single(frame, x, y, name, out, title, logger) -> None:
+    """
+    the flow field over ONE physiological variable, on its own axes
+
+    plot_state_flow packs every available variable into a 4-column grid, which
+    is useful as an overview and unreadable as evidence: eleven panels at
+    3.6 inches each means the colour ramp spans a few hundred pixels and the
+    streamlines are hairlines. One variable per figure gives each the whole
+    canvas, and the report puts them in a tab strip so they are still compared
+    by flicking between them rather than by scrolling.
+
+    The flow field is identical in every one of these -- only the underlay
+    changes -- so a difference between two of them is a difference in the
+    underlay and never in the arrows.
+    """
+    label, _ = VARIABLES[name]
+    values = frame[name].to_numpy().astype(float)
+    finite = np.isfinite(values)
+    if finite.sum() < 100:
+        logger.info(f"  {name}: {int(finite.sum())} finite values, no panel")
+        return
+
+    cx, cy, vx, vy, counts, _ = displacement_field(frame, x, y)
+    figure, ax = plt.subplots(figsize=(6.0, 5.2))
+
+    mesh = ax.hexbin(
+        frame[x].to_numpy()[finite], frame[y].to_numpy()[finite],
+        C=values[finite], reduce_C_function=np.mean, mincnt=5, gridsize=52,
+        cmap=continuous_cmap(), linewidths=0, alpha=0.8, zorder=1,
+    )
+    cells = mesh.get_array()
+    good = cells.compressed() if hasattr(cells, "compressed") else cells
+    good = good[np.isfinite(good)]
+    if good.size:
+        mesh.set_clim(*np.nanpercentile(good, [2, 98]))
+    bar = figure.colorbar(mesh, ax=ax, fraction=0.046, pad=0.02)
+    bar.set_label(label, color=INK_SECONDARY, fontsize=8)
+    bar.ax.tick_params(labelsize=7, color=GRID, labelcolor=INK_SECONDARY)
+    bar.outline.set_visible(False)
+
+    # arrows above the underlay, explicitly -- see plot_flow
+    ax.streamplot(
+        cx, cy, np.ma.array(vx, mask=counts < 5), np.ma.array(vy, mask=counts < 5),
+        color=INK_PRIMARY, linewidth=0.7, density=1.4, arrowsize=0.9,
+        arrowstyle="->", zorder=3,
+    )
+
+    ax.set_title(title, loc="left", pad=8)
+    xlabel, ylabel = proj_labels()
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.set_aspect("equal", adjustable="datalim")
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    ax.grid(True, color=GRID, linewidth=0.4, alpha=0.6)
+    figure.tight_layout()
+    save_figure(figure, out)
+    plt.close(figure)
+    logger.info(f"wrote {out.name}")
+
+
 def plot_state_flow(frame, x, y, out, title, logger, columns: int = 4):
     """
     the flow field over each physiological variable in turn
@@ -1039,20 +1100,150 @@ def plot_single_colouring(frame, spec, out, title, logger):
     logger.info(f"wrote {out.name}")
 
 
-def pick_patients(frame: pl.DataFrame, n: int = 5, min_points: int = 5, seed: int = 7):
-    """random patients with enough timepoints to show a path"""
-    counts = (
+def pick_patients(frame: pl.DataFrame, n: int = 8, min_points: int = 5, seed: int = 7):
+    """
+    patients with enough timepoints to show a path, spread across the groups
+
+    A uniform draw reproduces the cohort's imbalance, which for eight panels
+    meant eight survivors and seven of one phenotype -- technically a random
+    sample and useless as an illustration, because the reader cannot tell a
+    phenotype-I path from a phenotype-III one when only phenotype I is shown.
+
+    Sampling is therefore stratified on (died, Zweck phenotype) and drawn
+    round-robin across the strata, so the panel shows variety. These are
+    examples, never evidence: nothing is measured from them, and the averaged
+    field beside them is what carries any claim.
+    """
+    eligible = (
         frame.group_by("hospitalization_id")
         .agg(points=pl.len())
         .filter(pl.col("points") >= min_points)
+    )
+    if eligible.height == 0:
+        return []
+
+    keys = [c for c in ("in_hospital_mortality", "cs_phenotype") if c in frame.columns]
+    table = (
+        frame.select("hospitalization_id", *keys)
+        .unique(subset=["hospitalization_id"])
+        .join(eligible, on="hospitalization_id", how="inner")
         .sort("hospitalization_id")
     )
-    if counts.height == 0:
-        return []
+
     rng = np.random.default_rng(seed)
-    ids = counts["hospitalization_id"].to_list()
-    chosen = rng.choice(len(ids), size=min(n, len(ids)), replace=False)
-    return [ids[int(i)] for i in sorted(chosen)]
+    if not keys:
+        ids = table["hospitalization_id"].to_list()
+        picked = rng.choice(len(ids), size=min(n, len(ids)), replace=False)
+        return [ids[int(i)] for i in sorted(picked)]
+
+    strata = []
+    for (_, group) in table.group_by(keys, maintain_order=True):
+        ids = group["hospitalization_id"].to_list()
+        rng.shuffle(ids)
+        strata.append(ids)
+    rng.shuffle(strata)
+
+    chosen: list = []
+    while len(chosen) < n and any(strata):
+        for bucket in strata:
+            if bucket and len(chosen) < n:
+                chosen.append(bucket.pop())
+    return chosen
+
+
+def plot_patient_paths_plain(frame, patients, out, title, logger, columns: int = 4):
+    """
+    one panel per patient: where that patient goes, and in what order
+
+    The smoothed field answers where patients go on average, which is not the
+    same claim as any individual making that journey -- a flow field through a
+    cell where half the patients move each way shows an arrow, and the
+    coherence number beside it is the only hint. These panels are the
+    unsmoothed version: black dots at each grid point, joined in time order,
+    annotated with the hour relative to shock onset.
+
+    The cloud behind is deliberately neutral grey. Colouring it invites reading
+    the path against whatever the colour means, and the point here is only the
+    path -- the coloured variants are the `patient_paths_<label>.png` figures.
+
+    First and last points are always labelled, then every third, because a
+    patient who barely moves stacks every label on one spot and a patient who
+    moves a lot does not need eleven of them.
+    """
+    if not patients:
+        logger.warning("no patient has enough timepoints to draw a path")
+        return
+    rows = int(np.ceil(len(patients) / columns))
+    figure, axes = plt.subplots(
+        rows, columns, figsize=(3.3 * columns, 3.5 * rows), squeeze=False
+    )
+    _px, _py = proj_cols()
+    px, py = frame[_px].to_numpy(), frame[_py].to_numpy()
+
+    for position, patient in enumerate(patients):
+        ax = axes[position // columns][position % columns]
+        ax.scatter(px, py, s=0.8, c="#dcdbd6", linewidths=0, alpha=0.8,
+                   rasterized=True, zorder=1)
+
+        path = frame.filter(
+            pl.col("hospitalization_id") == patient
+        ).sort("offset_hours")
+        tx, ty = path[_px].to_numpy(), path[_py].to_numpy()
+        ax.plot(tx, ty, "-", color=INK_PRIMARY, linewidth=1.1, zorder=3,
+                alpha=0.9)
+        ax.scatter(tx, ty, s=24, c=INK_PRIMARY, zorder=4, linewidths=0)
+
+        # Label the ends always, then any point far enough from the last label
+        # placed. An every-third-point rule collides badly here: a patient who
+        # barely moves stacks "+30h" on "+48h" at the same coordinates, which
+        # is unreadable and worse than no label. The threshold is a fraction of
+        # the panel's own extent so it travels across projections.
+        hours = path["offset_hours"].to_list()
+        # Spacing threshold from the PANEL's extent, not the patient's. Using
+        # the path's own extent is self-defeating: a patient who barely moves
+        # has a tiny span, so the threshold shrinks with them and the labels
+        # collide anyway -- which is precisely the case that needed fixing.
+        span = max(np.ptp(px), np.ptp(py), 1e-6)
+        gap = 0.05 * span
+        last = None
+        for index, (hour, a, b) in enumerate(zip(hours, tx, ty)):
+            ends = index in (0, len(hours) - 1)
+            if not ends and last is not None and np.hypot(a - last[0], b - last[1]) < gap:
+                continue
+            ax.annotate(f"{hour:+.0f}h", (a, b), fontsize=6, color=INK_PRIMARY,
+                        xytext=(4, 3), textcoords="offset points", zorder=5)
+            last = (a, b)
+
+        site = path["site"][0]
+        died = bool(path["in_hospital_mortality"][0])
+        phenotype = path["cs_phenotype"][0] if "cs_phenotype" in path.columns else None
+        bits = [str(site), f"{path.height} points",
+                "died" if died else "survived"]
+        if phenotype is not None:
+            bits.append(str(phenotype))
+        ax.set_title(" / ".join(bits), loc="left", fontsize=7, pad=3)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_aspect("equal", adjustable="datalim")
+        for side in ("top", "right", "bottom", "left"):
+            ax.spines[side].set_visible(False)
+
+    for position in range(len(patients), rows * columns):
+        axes[position // columns][position % columns].axis("off")
+
+    figure.suptitle(title, x=0.02, ha="left", fontsize=10, y=0.998)
+    figure.text(
+        0.02, 0.004,
+        "each dot is one 6-hourly grid point, joined in time order and labelled "
+        "with hours from shock onset; grey is every other patient-timepoint. "
+        "These are individuals, not the averaged field -- a cell where half the "
+        "patients move one way and half the other still draws a streamline",
+        fontsize=7, color=INK_SECONDARY,
+    )
+    figure.tight_layout(rect=(0, 0.025, 1, 0.97))
+    save_figure(figure, out)
+    plt.close(figure)
+    logger.info(f"wrote {out.name} ({len(patients)} patients)")
 
 
 def plot_patient_paths(frame, spec, patients, out, title, logger):
@@ -1400,17 +1591,32 @@ def main() -> None:
 
     patients = pick_patients(frame)
     logger.info(f"patient paths: {patients}")
+    plot_patient_paths_plain(
+        frame, patients, home / "patient_paths.png",
+        f"{paths.model_key}: {len(patients)} individual patients through the "
+        "latent space",
+        logger,
+    )
     for spec in specs:
         plot_patient_paths(
             frame, spec, patients,
             home / f"patient_paths_{spec['key']}.png",
-            f"{paths.model_key}: five patients, cloud coloured by {spec['label']}",
+            f"{paths.model_key}: {len(patients)} patients, cloud coloured by {spec['label']}",
             logger,
         )
     alignment = plot_state_flow(
         frame, px, py, home / "trajectory_flow_state.png",
         f"{paths.model_key}: what changes as patients move", logger,
     )
+    # and one figure per variable, which is what the report tabs through
+    for name in VARIABLES:
+        if name in frame.columns and frame[name].is_not_null().sum() > frame.height * 0.2:
+            plot_state_flow_single(
+                frame, px, py, name,
+                home / f"trajectory_flow_state_{name}.png",
+                f"{paths.model_key}: latent flow over {VARIABLES[name][0]}",
+                logger,
+            )
     if alignment.height:
         alignment.write_csv(paths.table_home / "trajectory_flow_alignment.csv")
         logger.info("position encodes the variable (R2) vs flow follows it (cos):")

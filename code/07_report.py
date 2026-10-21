@@ -679,6 +679,23 @@ PROJECTION_PANELS = [
     ("concordance", "treated per the recommendation"),
 ]
 
+#: the physiology underlays 09 draws one figure each for, label as shown.
+#: Mirrors clifcs.state.VARIABLES; a variable 09 could not populate is dropped
+#: by the `if body` filter rather than leaving an empty tab.
+STATE_VARIABLES = [
+    ("map", "MAP"),
+    ("shock_index", "shock index"),
+    ("heart_rate", "heart rate"),
+    ("nee", "norepinephrine equivalents"),
+    ("n_vasopressors", "vasoactive agents running"),
+    ("lactate", "lactate"),
+    ("bicarbonate", "bicarbonate"),
+    ("creatinine", "creatinine"),
+    ("gcs_total", "GCS total"),
+    ("sofa_total", "SOFA total"),
+    ("on_imv", "invasive ventilation"),
+]
+
 #: 05's affine corrections, in the order 05 reports them
 CORRECTIONS = [
     ("leace", "LEACE"),
@@ -1683,9 +1700,40 @@ def section_flow(paths, out: list) -> None:
                         "Patients who died in hospital")),
         ("Survived", figure(home / "trajectory_flow_survived.png",
                             "Patients who survived")),
-        ("Physiology underlay", figure(home / "trajectory_flow_state.png",
-                                       "The same field over each variable")),
     ]))
+
+    # Physiology, one variable per tab. The combined grid is kept as an
+    # overview, but eleven panels at 3.6 inches each is unreadable as evidence
+    # -- the colour ramp spans a few hundred pixels and the streamlines are
+    # hairlines. The flow field is identical in every one of these, so a
+    # difference between two tabs is a difference in the underlay, never in
+    # the arrows.
+    state_panels = [
+        (label, figure(home / f"trajectory_flow_state_{name}.png",
+                       f"Flow over {label}"))
+        for name, label in STATE_VARIABLES
+    ]
+    state_panels = [(label, body) for label, body in state_panels if body]
+    overview = figure(home / "trajectory_flow_state.png",
+                      "Every variable at once; the flow field is the same in each")
+    if overview:
+        state_panels.append(("All together", overview))
+    if state_panels:
+        out.append('<h3>What changes as patients move</h3>')
+        out.append(tabs(state_panels))
+
+    # And the unsmoothed version: individual patients, in time order. A flow
+    # field through a cell where half the patients move each way still draws an
+    # arrow, with only the coherence number beside it to say so -- these panels
+    # are what that arrow is an average of.
+    paths_figure = figure(
+        home / "patient_paths.png",
+        "Each dot is one 6-hourly grid point, joined in time order and "
+        "labelled with hours from shock onset",
+    )
+    if paths_figure:
+        out.append('<h3>Individual patients</h3>')
+        out.append(paths_figure)
 
     out.append(callout(
         "<b>Patients do not follow these lines.</b> A streamplot integrates its "
