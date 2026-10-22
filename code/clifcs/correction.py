@@ -41,7 +41,15 @@ class AffineCorrection:
             out = np.empty_like(x, dtype=np.float64)
             for site, (mean, scale) in self.per_site.items():
                 mask = sites == site
-                if mask.any():
+                if not mask.any():
+                    continue
+                if scale.ndim == 2:
+                    # a full per-site matrix (CORAL), not a per-feature scale.
+                    # Recentred on the pooled mean rather than left at the
+                    # origin, so the corrected sites share one location as well
+                    # as one second moment.
+                    out[mask] = (x[mask] - mean) @ scale + self.centre
+                else:
                     out[mask] = (x[mask] - mean) / scale
             unseen = ~np.isin(sites, list(self.per_site))
             if unseen.any():
@@ -133,6 +141,73 @@ def fit_site_standardize(
         per_site[site] = (part.mean(axis=0), part.std(axis=0) + eps)
     return AffineCorrection(
         name="site-standardized", centre=x.mean(axis=0), per_site=per_site
+    )
+
+
+def _inv_sqrt(matrix: np.ndarray, eps: float) -> tuple[np.ndarray, np.ndarray]:
+    """symmetric inverse-square-root and square-root of a covariance"""
+    values, vectors = np.linalg.eigh(matrix)
+    values = np.clip(values, eps, None)
+    return (
+        vectors @ np.diag(values**-0.5) @ vectors.T,
+        vectors @ np.diag(values**0.5) @ vectors.T,
+    )
+
+
+def fit_coral(
+    x: np.ndarray, sites: np.ndarray, eps: float = 1e-6
+) -> AffineCorrection:
+    """
+    CORAL: align each site's second-order statistics to the pooled ones
+
+    Sun, Saenko and Feng, "Return of frustratingly easy domain adaptation"
+    (AAAI 2016) -- the same reference FEATMAP cites as [51].
+
+    Why this and not FEATMAP. FEATMAP estimates `W, b` by least squares
+    between PAIRED embeddings: "identical tissue sections scanned on two
+    different scanners", biology held constant while the acquisition condition
+    varies. Its own limitations section says it "requires paired calibration
+    data in which biological content is held constant while acquisition
+    conditions vary, which may be difficult to obtain for certain acquisition
+    conditions". Here the acquisition condition is the hospital, and the three
+    sites hold disjoint patients -- no person is admitted to UCMC and NU with
+    the same physiology, and the deidentified extracts could not be linked
+    across sites if they were. There is no row correspondence to regress on.
+
+    CORAL is the unpaired analogue of the same idea: still one global affine
+    map per site, still closed-form, but fitted to match distributions rather
+    than rows.
+
+        x -> (x - mu_s) Sigma_s^(-1/2) Sigma_pooled^(1/2) + mu_pooled
+
+    It whitens each site by its own covariance and recolours it with the
+    pooled one, so after it every site shares a mean and a covariance. That is
+    strictly more than site-standardized removes -- that one matches per-feature
+    location and scale and leaves the between-feature correlations alone, which
+    is where most of the site structure lives.
+
+    What it does NOT do is guarantee site is unrecoverable. Matching two
+    moments leaves any higher-order or class-conditional site structure in
+    place, and unlike LEACE there is no erasure guarantee to appeal to. Read
+    the 3-way probe in 05, not the method's name.
+    """
+    pooled = np.cov(x, rowvar=False)
+    _, pooled_sqrt = _inv_sqrt(pooled, eps)
+    per_site = {}
+    for site in np.unique(sites):
+        part = x[sites == site]
+        if part.shape[0] <= part.shape[1]:
+            # fewer rows than dimensions: the sample covariance is singular and
+            # its inverse square root is noise. Shrunk toward the pooled one
+            # rather than inverted as-is.
+            weight = part.shape[0] / (part.shape[0] + part.shape[1])
+            covariance = weight * np.cov(part, rowvar=False) + (1 - weight) * pooled
+        else:
+            covariance = np.cov(part, rowvar=False)
+        inv_sqrt, _ = _inv_sqrt(covariance, eps)
+        per_site[site] = (part.mean(axis=0), inv_sqrt @ pooled_sqrt)
+    return AffineCorrection(
+        name="coral", centre=x.mean(axis=0), per_site=per_site
     )
 
 
@@ -234,10 +309,12 @@ def fit(
         return fit_identity(x)
     if method == "site-standardized":
         return fit_site_standardize(x, sites)
+    if method == "coral":
+        return fit_coral(x, sites)
     if method == "leace":
         levels = order if order is not None else sorted(set(np.unique(sites)))
         return fit_leace(x, site_indicator(sites, levels))
     raise ValueError(f"unknown correction {method!r}")
 
 
-METHODS = ("raw", "site-standardized", "leace")
+METHODS = ("raw", "site-standardized", "coral", "leace")
