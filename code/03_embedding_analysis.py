@@ -1347,7 +1347,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--corrected",
-        choices=("site-standardized", "leace"),
+        choices=("site-standardized", "coral", "leace"),
         default=None,
         help="project 05's site-corrected embeddings instead of the raw ones; "
         "figures go to figures/<model>/anchor-<anchor>/corrected-<method>/ so "

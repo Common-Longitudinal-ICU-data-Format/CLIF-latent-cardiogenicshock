@@ -2441,13 +2441,19 @@ def main() -> None:
     )
     parser.add_argument(
         "--correction",
-        choices=("none", "leace", "site-standardized"),
-        default="leace",
+        choices=("none", "coral", "leace", "site-standardized"),
+        default="coral",
         help="apply an affine site correction to every grid point before "
-        "projecting. Defaults to leace: site dominates this geometry at 97%% "
+        "projecting. Defaults to coral: site dominates this geometry at 97%% "
         "neighbour purity, so an uncorrected flow field is substantially a "
-        "picture of the hospitals. The map is loaded from the one 05 fitted "
-        "at the anchor -- run 05 --save-map first. `none` draws the raw field.",
+        "picture of the hospitals. CORAL whitens each site by its own "
+        "covariance and recolours it with the pooled one, and on the "
+        "cardiogenic grid takes 3-way site recoverability from 0.9688 to "
+        "0.5340 against a 0.5486 majority share -- chance. `leace` reaches the "
+        "same place and retains slightly more clinical signal, but needs the "
+        "site concept at full rank; see clifcs.correction. The map is loaded "
+        "from the one 05 fitted at the anchor -- run 05 --save-map first. "
+        "`none` draws the raw field.",
     )
     parser.add_argument(
         "--correction-anchor",

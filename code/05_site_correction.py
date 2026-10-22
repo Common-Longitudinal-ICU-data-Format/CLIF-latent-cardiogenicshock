@@ -97,6 +97,71 @@ def site_purity(x: np.ndarray, sites: np.ndarray) -> tuple[float, float]:
     return purity, float((proportions**2).sum())
 
 
+#: what a correction has to leave behind to be worth applying, as
+#: (column, label, positive level or None for multiclass). A correction is only
+#: as good as the gap between how much site it removes and how much of this it
+#: costs -- the site probe alone cannot tell a good correction from a map that
+#: collapsed every embedding onto a point, which would score perfectly on it.
+RETENTION_TARGETS = (
+    ("in_hospital_mortality", "mortality", True),
+    ("shock_type", "cardiogenic vs rest", "cardiogenic"),
+    ("shock_type", "septic vs rest", "septic"),
+    ("cs_phenotype", "Zweck phenotype", None),
+)
+
+
+def retention(
+    name: str,
+    train_r: np.ndarray,
+    test_r: np.ndarray,
+    train_frame: "pl.DataFrame",
+    test_frame: "pl.DataFrame",
+    anchor: str,
+    logger,
+) -> dict:
+    """
+    how much clinical signal survives a correction
+
+    Read against the uncorrected row, never on its own. Some loss here is the
+    variance site and outcome share -- the case mix differs by hospital, so
+    site is itself partly predictive of shock type and mortality, and removing
+    the site channel takes that shared part with it. What would condemn a
+    correction is a large drop here beside a small drop in site
+    recoverability.
+    """
+    scores = {}
+    for column, label, positive in RETENTION_TARGETS:
+        if column not in train_frame.columns:
+            continue
+        train_y = train_frame[column]
+        test_y = test_frame[column]
+        if positive is None:
+            keep_train = train_y.is_not_null().to_numpy()
+            keep_test = test_y.is_not_null().to_numpy()
+            yt = np.asarray([str(v) for v in train_y.to_list()])[keep_train]
+            ye = np.asarray([str(v) for v in test_y.to_list()])[keep_test]
+            if len(np.unique(yt)) < 2 or keep_test.sum() == 0:
+                continue
+            model = LinearDiscriminantAnalysis(
+                solver="lsqr", shrinkage="auto"
+            ).fit(train_r[keep_train], yt)
+            score = accuracy_score(ye, model.predict(test_r[keep_test]))
+            unit = "acc"
+        else:
+            yt = (train_y == positive).fill_null(False).to_numpy().astype(int)
+            ye = (test_y == positive).fill_null(False).to_numpy().astype(int)
+            if len(np.unique(yt)) < 2 or len(np.unique(ye)) < 2:
+                continue
+            model = LinearDiscriminantAnalysis(
+                solver="lsqr", shrinkage="auto"
+            ).fit(train_r, yt)
+            score = roc_auc_score(ye, model.decision_function(test_r))
+            unit = "auc"
+        scores[f"retain_{label.replace(' ', '_')}"] = score
+        logger.info(f"[{anchor}] {name:<18}   retains {label:<20} {unit} {score:.4f}")
+    return scores
+
+
 def evaluate(
     name: str,
     train_x: np.ndarray,
@@ -106,6 +171,8 @@ def evaluate(
     reference: str,
     anchor: str,
     logger,
+    train_frame=None,
+    test_frame=None,
 ) -> dict:
     """
     site recoverability after a correction, linearly and non-linearly
@@ -150,7 +217,7 @@ def evaluate(
         f"3-way acc {multi_accuracy:.4f} (majority {majority:.4f})  "
         f"site purity {purity:.1%} (chance {chance:.1%}, {purity / chance:.2f}x)"
     )
-    return {
+    row = {
         "anchor": anchor,
         "correction": name,
         "linear_probe_auc": linear_auc,
@@ -161,6 +228,11 @@ def evaluate(
         "purity_chance": chance,
         "purity_lift": purity / chance,
     }
+    if train_frame is not None and test_frame is not None:
+        row.update(
+            retention(name, train_r, test_r, train_frame, test_frame, anchor, logger)
+        )
+    return row
 
 
 def main() -> None:
@@ -206,6 +278,24 @@ def main() -> None:
             continue
         reference = present[0]
         x = embedding_matrix(frame)
+        # labels for the retention probe. Joined from the cohort rather than
+        # read off the bundle, because a pooled-role run holds whichever
+        # columns each site chose to export and the retention row has to mean
+        # the same thing at every site.
+        labels = frame.select("hospitalization_id", "site")
+        cohort_file = paths.cohort_home / "cohort.parquet"
+        if cohort_file.is_file():
+            wanted = ["hospitalization_id", "site"] + [
+                c for c, _, _ in RETENTION_TARGETS
+            ]
+            cohort = pl.read_parquet(cohort_file)
+            labels = labels.join(
+                cohort.select(
+                    [c for c in dict.fromkeys(wanted) if c in cohort.columns]
+                ),
+                on=["hospitalization_id", "site"],
+                how="left",
+            )
 
         # corrections are fitted on a training split and judged on held-out
         # patients; fitting and scoring on the same rows would let the eraser
@@ -233,6 +323,8 @@ def main() -> None:
                     reference,
                     anchor,
                     logger,
+                    train_frame=labels[index_train],
+                    test_frame=labels[index_test],
                 )
             )
             if args.save_map:
