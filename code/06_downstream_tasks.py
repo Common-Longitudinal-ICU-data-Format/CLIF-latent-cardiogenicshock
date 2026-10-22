@@ -230,7 +230,10 @@ def run_task(
         for name, train_mask, test_mask in splits:
             # the correction is fitted on this split's training patients only,
             # then reused by both heads so they see identical features
-            correction = fit(method, x[train_mask], sites[train_mask], reference)
+            correction = fit(
+                method, x[train_mask], sites[train_mask], reference,
+                order=present,
+            )
             train_c = correction.apply(x[train_mask], sites[train_mask])
             test_c = correction.apply(x[test_mask], sites[test_mask])
             for head in CLASSIFIERS:

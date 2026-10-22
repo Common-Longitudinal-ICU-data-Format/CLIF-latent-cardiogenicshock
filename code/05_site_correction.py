@@ -39,7 +39,7 @@ import polars as pl
 from sklearn.decomposition import PCA
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.ensemble import HistGradientBoostingClassifier
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import accuracy_score, roc_auc_score
 from sklearn.model_selection import train_test_split
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import StandardScaler
@@ -107,7 +107,17 @@ def evaluate(
     anchor: str,
     logger,
 ) -> dict:
-    """site recoverability after a correction, linearly and non-linearly"""
+    """
+    site recoverability after a correction, linearly and non-linearly
+
+    The binary `reference`-vs-rest contrast is reported alongside a 3-way
+    multinomial accuracy, and the second number is the one to read. With three
+    sites the binary probe shares a blind spot with a rank-1 eraser: both look
+    only at one site against the other two pooled, so an erasure that leaves
+    NU-vs-RUSH at 0.9968 AUROC still reports its linear probe at chance and
+    looks like a success. The 3-way accuracy has no such blind spot -- compare
+    it against the majority share printed beside it, not against 0.5.
+    """
     train_y = (train_sites == reference).astype(int)
     test_y = (test_sites == reference).astype(int)
 
@@ -124,10 +134,20 @@ def evaluate(
     ).fit(train_r, train_y)
     nonlinear_auc = roc_auc_score(test_y, nonlinear.predict_proba(test_r)[:, 1])
 
+    # the multinomial probe, which is what the figures are actually exposed to
+    multi = LinearDiscriminantAnalysis(solver="lsqr", shrinkage="auto").fit(
+        train_r, train_sites
+    )
+    multi_accuracy = accuracy_score(test_sites, multi.predict(test_r))
+    majority = max(
+        (test_sites == s).mean() for s in np.unique(test_sites)
+    )
+
     purity, chance = site_purity(test_x, test_sites)
     logger.info(
         f"[{anchor}] {name:<18} linear-probe AUC {linear_auc:.4f}  "
         f"non-linear AUC {nonlinear_auc:.4f}  "
+        f"3-way acc {multi_accuracy:.4f} (majority {majority:.4f})  "
         f"site purity {purity:.1%} (chance {chance:.1%}, {purity / chance:.2f}x)"
     )
     return {
@@ -135,6 +155,8 @@ def evaluate(
         "correction": name,
         "linear_probe_auc": linear_auc,
         "nonlinear_probe_auc": nonlinear_auc,
+        "multiclass_accuracy": multi_accuracy,
+        "multiclass_majority": majority,
         "site_purity": purity,
         "purity_chance": chance,
         "purity_lift": purity / chance,
@@ -197,7 +219,10 @@ def main() -> None:
         )
 
         for method in METHODS:
-            correction = fit(method, x[index_train], sites[index_train], reference)
+            correction = fit(
+                method, x[index_train], sites[index_train], reference,
+                order=present,
+            )
             rows.append(
                 evaluate(
                     correction.name,

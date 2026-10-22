@@ -142,10 +142,11 @@ def fit_leace(x: np.ndarray, z: np.ndarray, eps: float = 1e-6) -> AffineCorrecti
 
     Returns the affine map that removes all linearly-decodable information
     about `z` while changing the representation as little as possible in the
-    least-squares sense. For a binary site indicator the erased subspace is
-    rank 1: a single direction, found in the whitened space so that the
-    deletion is orthogonal with respect to the data's own covariance rather
-    than to the raw axes.
+    least-squares sense. The erased subspace has the rank of `z`, found in the
+    whitened space so that the deletion is orthogonal with respect to the
+    data's own covariance rather than to the raw axes. For three sites `z` must
+    be the rank-2 one-hot -- see `site_indicator`, which is where getting this
+    wrong cost us a correction that erased one contrast of three.
 
         r(x) = x - Sxx^(1/2) u u' Sxx^(-1/2) (x - mu),  u = unit(Sxx^(-1/2) Sxz)
 
@@ -178,14 +179,64 @@ def fit_leace(x: np.ndarray, z: np.ndarray, eps: float = 1e-6) -> AffineCorrecti
     return AffineCorrection(name="leace", centre=centre, transform=transform)
 
 
-def fit(method: str, x: np.ndarray, sites: np.ndarray, reference: str) -> AffineCorrection:
-    """dispatch by name; `reference` is the site treated as the positive class"""
+def site_indicator(sites: np.ndarray, order) -> np.ndarray:
+    """
+    the concept matrix for "which site is this", as one-hot minus one column
+
+    A k-level categorical spans k-1 dimensions, and LEACE erases exactly the
+    rank of the concept it is given. Handing it a single binary column
+    `sites == reference` therefore erased ONE contrast -- the reference site
+    against the other two pooled -- and left the contrast between those two
+    fully intact. Measured on the cardiogenic grid, with the map fitted on the
+    grid so that fitting is not the confound:
+
+        contrast          uncorrected   rank-1 binary   rank-2 one-hot
+        UCMC vs rest           0.9985          0.5106           0.5119
+        NU vs rest             0.9975          0.8875           0.5039
+        RUSH vs rest           0.9894          0.9901           0.4782
+        NU vs RUSH             0.9970          0.9968           0.4659
+        3-way accuracy         0.9688          0.7670           0.5340
+
+    The last column is chance: the 3-way majority share is 0.5486, so 0.5340 is
+    no better than always guessing the largest site. The rank-1 column is not a
+    weaker correction, it is a correction of one third of the problem.
+
+    The dropped column is redundant rather than discarded -- the k columns sum
+    to one, so k-1 of them span the same subspace and the QR basis comes out
+    rank k-1 either way. Dropping it keeps the concept matrix full rank, which
+    is what the whitened cross-covariance wants.
+    """
+    present = [s for s in order if (sites == s).any()]
+    if len(present) < 2:
+        raise ValueError("need two sites to correct between")
+    return np.column_stack(
+        [(sites == s).astype(np.float64) for s in present[:-1]]
+    )
+
+
+def fit(
+    method: str,
+    x: np.ndarray,
+    sites: np.ndarray,
+    reference: str,
+    order=None,
+) -> AffineCorrection:
+    """
+    dispatch by name
+
+    `reference` is the site treated as the positive class, which only
+    `site-standardized` still uses to pick its target moments; LEACE erases
+    every site contrast at once and so has no privileged site. `order` fixes
+    which level is dropped from the one-hot, so the same data always yields the
+    same map; it defaults to the sorted levels present.
+    """
     if method == "raw":
         return fit_identity(x)
     if method == "site-standardized":
         return fit_site_standardize(x, sites)
     if method == "leace":
-        return fit_leace(x, (sites == reference).astype(np.float64))
+        levels = order if order is not None else sorted(set(np.unique(sites)))
+        return fit_leace(x, site_indicator(sites, levels))
     raise ValueError(f"unknown correction {method!r}")
 
 
