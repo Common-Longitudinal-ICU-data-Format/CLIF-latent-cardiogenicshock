@@ -75,7 +75,9 @@ from clifcs import sepsis_phenotype
 from clifcs.phenotype import (
     add_egfr,
     apply_phenotype_model,
+    assign_phenotype_variants,
     assign_phenotypes,
+    variant_model_path,
     nearest_labs,
     save_phenotype_model,
     summarize,
@@ -435,12 +437,24 @@ def stage_cohort(
     # set of clusters. A site that cannot pool (a remote institution running
     # this on its own data) instead applies a model fitted elsewhere, so that
     # "phenotype II" means the same thing in every contributing cohort.
-    centroids = None
-    if phenotype_model:
-        cohort = apply_phenotype_model(cohort, phenotype_model, logger)
-    else:
-        cohort, centroids, model = assign_phenotypes(cohort, cfg)
-        save_phenotype_model(paths.cohort_home / "phenotype_model.json", **model)
+    #
+    # Fitted once per cardiogenic denominator, not once over everyone. Zweck
+    # derived I/II/III in cardiogenic shock; fitting on the full cohort
+    # clusters a population that is 75% non-cardiogenic and then names the
+    # clusters after his. See PHENOTYPE_VARIANTS.
+    cohort, centroid_tables, models = assign_phenotype_variants(
+        cohort, cfg, logger, model_base=phenotype_model
+    )
+    for column, model in models.items():
+        save_phenotype_model(
+            variant_model_path(
+                paths.cohort_home / "phenotype_model.json", column
+            ),
+            **model,
+        )
+    for column, table in centroid_tables.items():
+        table.write_csv(paths.cohort_home / f"phenotype_centroids_{column}.csv")
+    centroids = centroid_tables.get("cs_phenotype")
     phenotype_summary = summarize(cohort, logger)
     shock_type_summary = summarize_shock_type(cohort, logger)
 

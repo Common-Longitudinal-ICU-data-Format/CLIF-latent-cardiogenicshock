@@ -122,7 +122,16 @@ TOKEN_LABELS: tuple[Permitted, ...] = (
 # codebook identical at every site, so none carries site-specific information
 # beyond the assignment itself.
 LABELS: tuple[Permitted, ...] = (
-    Permitted("cs_phenotype", "Zweck 2021 I/II/III, transferred centroids"),
+    # Three Zweck variants, one per cardiogenic denominator. The bare name is
+    # the all-shock fit, kept for continuity; the two suffixed ones are fitted
+    # on the ICD-coded and cardiac-origin cohorts respectively and are null for
+    # patients outside those. Null here means "not defined for this patient",
+    # not "not assigned", which is why none of them is filled downstream.
+    Permitted("cs_phenotype", "Zweck 2021 I/II/III, fitted on all shock"),
+    Permitted("cs_phenotype_coded",
+              "Zweck I/II/III, fitted on ICD-coded cardiogenic shock only"),
+    Permitted("cs_phenotype_cardiac_origin",
+              "Zweck I/II/III, fitted on the cardiac-origin cohort only"),
     Permitted("seymour_phenotype", "Seymour 2016 alpha/beta/gamma/delta"),
     Permitted("bhavani_phenotype", "Bhavani 2022 vital-trajectory group A-D"),
     Permitted("shock_type", "coded mechanism; a labelling, never a filter"),
