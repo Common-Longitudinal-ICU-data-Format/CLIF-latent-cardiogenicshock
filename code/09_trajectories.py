@@ -2396,6 +2396,200 @@ def plot_last_token_single(frame, px, py, variable, home, logger) -> None:
     )
 
 
+
+# ========================================================== perfusion state
+
+
+#: MAP must EXCEED this to enter the adequate state, and fall BELOW `MAP_LOW`
+#: to leave it. The gap is the hysteresis band: a patient sitting on 65 with
+#: normal measurement noise would otherwise change group at almost every grid
+#: point, and a transition matrix built from that measures the noise rather
+#: than the patient. Inside the band the previous state is carried forward.
+MAP_HIGH = 65.0
+MAP_LOW = 55.0
+
+#: the four groups, drawn largest-first so the most acute lands on top. The
+#: palette encodes the 2x2 directly: warm means vasopressors are running, dark
+#: means the MAP is low, so "low and on pressors" is the darkest warm colour
+#: and reads as the worst cell without needing the legend.
+PERFUSION_ORDER = (
+    "MAP >65, no vasopressors",
+    "MAP >65, on vasopressors",
+    "MAP <65, no vasopressors",
+    "MAP <65, on vasopressors",
+)
+PERFUSION_COLORS = {
+    "MAP >65, no vasopressors": "#7fb3c8",
+    "MAP >65, on vasopressors": "#e8a33d",
+    "MAP <65, no vasopressors": "#9b6a8f",
+    "MAP <65, on vasopressors": "#8f2230",
+}
+
+
+def perfusion_state(frame: pl.DataFrame, logger) -> pl.DataFrame:
+    """
+    MAP adequacy (with hysteresis) crossed with whether pressors are running
+
+    The MAP side is a Schmitt trigger, not a threshold. Crossing up needs
+    MAP > 65, crossing down needs MAP < 55, and between the two the patient
+    keeps whatever state they were last in. A plain cut at 65 makes a patient
+    hovering there oscillate every 6 h, which would dominate a transition
+    matrix with measurement noise.
+
+    Consequences of that, both deliberate:
+
+      - the state is PATH-DEPENDENT. Two patients with identical MAP at some
+        grid point can be in different groups, because they arrived from
+        different sides. That is the point of a trigger and it is why this
+        cannot be computed per row.
+      - a NULL MAP carries the previous state forward rather than breaking the
+        run. A missing measurement is not evidence that perfusion changed.
+
+    The pressor side gets no hysteresis. Starting or stopping a vasopressor is
+    a recorded clinical action, not a noisy measurement, so there is nothing to
+    debounce -- `n_vasopressors` is built up from per-agent rates and is a true
+    zero when nothing is running, never null.
+
+    Seeding: the run starts at the first UNAMBIGUOUS observation (above 65 or
+    below 55) and that state is carried backwards over any leading timepoints
+    inside the band, since the alternative is to invent a state for them from
+    the very measurement the band says is uninformative. A patient whose MAP
+    never leaves [55, 65] has no unambiguous observation at all and falls back
+    to the plain cut; the count is logged because it is the one group whose
+    assignment the hysteresis did not decide.
+    """
+    needed = {"map", "n_vasopressors"}
+    missing = needed - set(frame.columns)
+    if missing:
+        logger.warning(
+            f"perfusion state needs {sorted(missing)}: skipping the panels"
+        )
+        return frame
+
+    ordered = frame.sort(["hospitalization_id", "offset_hours"])
+    ids = ordered["hospitalization_id"].to_list()
+    maps = ordered["map"].to_list()
+
+    # forward pass, per patient
+    states: list[bool | None] = [None] * len(ids)
+    previous_id = None
+    state: bool | None = None
+    for i, (pid, value) in enumerate(zip(ids, maps)):
+        if pid != previous_id:
+            state = None
+            previous_id = pid
+        if value is not None:
+            if value > MAP_HIGH:
+                state = True
+            elif value < MAP_LOW:
+                state = False
+        states[i] = state
+
+    # backward fill of the leading run, per patient, from the first resolved
+    # state. Walked in reverse so a whole leading block fills in one pass.
+    following: bool | None = None
+    previous_id = None
+    for i in range(len(ids) - 1, -1, -1):
+        if ids[i] != previous_id:
+            following = None
+            previous_id = ids[i]
+        if states[i] is None:
+            states[i] = following
+        else:
+            following = states[i]
+
+    unresolved = sum(1 for s in states if s is None)
+    ordered = ordered.with_columns(
+        map_adequate=pl.Series(states, dtype=pl.Boolean)
+    ).with_columns(
+        # the fallback for a patient who never left the band
+        map_adequate=pl.when(pl.col("map_adequate").is_not_null())
+        .then(pl.col("map_adequate"))
+        .otherwise(pl.col("map") >= MAP_HIGH)
+    )
+    if unresolved:
+        logger.info(
+            f"perfusion state: {unresolved:,} of {len(ids):,} patient-timepoints "
+            f"({unresolved / len(ids):.1%}) never left the {MAP_LOW:g}-"
+            f"{MAP_HIGH:g} band and fall back to the plain cut"
+        )
+
+    ordered = ordered.with_columns(
+        perfusion_state=pl.concat_str([
+            pl.when(pl.col("map_adequate")).then(pl.lit("MAP >65"))
+            .otherwise(pl.lit("MAP <65")),
+            pl.when(pl.col("n_vasopressors") > 0)
+            .then(pl.lit(", on vasopressors"))
+            .otherwise(pl.lit(", no vasopressors")),
+        ])
+    )
+
+    counts = ordered["perfusion_state"].value_counts(sort=True)
+    logger.info("perfusion state, patient-timepoints:")
+    for level, n in zip(counts["perfusion_state"].to_list(),
+                        counts["count"].to_list()):
+        logger.info(f"    {level:<28} {n:>8,}  {n / ordered.height:>6.1%}")
+    return ordered
+
+
+def perfusion_transitions(frame: pl.DataFrame, out, title, logger) -> None:
+    """
+    where patients go next, as a row-normalised state-to-state matrix
+
+    One row per consecutive pair of grid points for one patient, so the
+    diagonal is "stayed" and the off-diagonal is "moved". Row-normalised
+    because the four groups differ in size by an order of magnitude and the
+    raw counts would say only which group is biggest; the count is printed in
+    each cell so the denominator is never hidden.
+    """
+    pairs = (
+        frame.sort(["hospitalization_id", "offset_hours"])
+        .select("hospitalization_id", "offset_hours", "perfusion_state")
+        .with_columns(
+            next_state=pl.col("perfusion_state").shift(-1).over("hospitalization_id"),
+            next_offset=pl.col("offset_hours").shift(-1).over("hospitalization_id"),
+        )
+        .filter(pl.col("next_state").is_not_null())
+    )
+    if pairs.is_empty():
+        logger.warning("no consecutive pairs for the transition matrix")
+        return
+
+    levels = [l for l in PERFUSION_ORDER if (frame["perfusion_state"] == l).any()]
+    index = {level: i for i, level in enumerate(levels)}
+    counts = np.zeros((len(levels), len(levels)))
+    for a, b in zip(pairs["perfusion_state"].to_list(),
+                    pairs["next_state"].to_list()):
+        if a in index and b in index:
+            counts[index[a], index[b]] += 1
+    totals = counts.sum(axis=1, keepdims=True)
+    rates = np.divide(counts, totals, out=np.zeros_like(counts), where=totals > 0)
+
+    figure, ax = plt.subplots(figsize=(6.4, 5.0))
+    ax.imshow(rates, cmap=continuous_cmap(), vmin=0, vmax=1, aspect="auto")
+    for i in range(len(levels)):
+        for j in range(len(levels)):
+            ax.text(j, i, f"{rates[i, j]:.0%}\n{int(counts[i, j]):,}",
+                    ha="center", va="center", fontsize=7,
+                    color="#ffffff" if rates[i, j] > 0.45 else INK_PRIMARY)
+    short = [l.replace(", ", "\n") for l in levels]
+    ax.set_xticks(range(len(levels)), short, fontsize=7)
+    ax.set_yticks(range(len(levels)), short, fontsize=7)
+    ax.set_xlabel(f"state at the next grid point")
+    ax.set_ylabel("state now")
+    ax.set_title(title, loc="left", pad=8)
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    save_figure(figure, out)
+    plt.close(figure)
+
+    stayed = np.trace(counts) / max(counts.sum(), 1)
+    logger.info(
+        f"wrote {out} ({int(counts.sum()):,} transitions, "
+        f"{stayed:.1%} stayed in the same group)"
+    )
+
+
 # =================================================================== driver
 
 
@@ -2610,6 +2804,30 @@ def main() -> None:
                   })
 
     frame = attach_state(paths, frame, logger)
+
+    # MAP adequacy crossed with pressor exposure, as a four-state variable with
+    # a hysteresis band on the MAP side. Needs the state table, so it cannot be
+    # derived with the other hues above.
+    frame = perfusion_state(frame, logger)
+    if "perfusion_state" in frame.columns and args.subset in ("all", "septic"):
+        plot_flow(
+            frame, px, py, home / "trajectory_flow_septic_perfusion.png",
+            f"{paths.model_key}: perfusion state",
+            f"MAP adequacy with a {MAP_LOW:g}-{MAP_HIGH:g} mmHg hysteresis band, "
+            "crossed with whether vasopressors are running",
+            logger, labels=proj_labels(),
+            colour_by={
+                "key": "perfusion_state",
+                "colors": PERFUSION_COLORS,
+                "order": list(PERFUSION_ORDER),
+            },
+        )
+        perfusion_transitions(
+            frame, home / "trajectory_perfusion_transitions.png",
+            f"{paths.model_key}: where patients go next, {args.step_hours:g}h later",
+            logger,
+        )
+
     if "on_imv" in frame.columns:
         frame = frame.join(
             frame.group_by("hospitalization_id").agg(
