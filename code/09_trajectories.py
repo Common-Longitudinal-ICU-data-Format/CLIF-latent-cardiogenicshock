@@ -2820,11 +2820,39 @@ def main() -> None:
                  list(paths.sites),
                  f"{paths.model_key}: patient-timepoints by site",
                  "", home / "trajectory_site.png", logger)
-    plot_scatter(frame.filter(pl.col("cs_phenotype").is_not_null()),
-                 px, py, "cs_phenotype", phenotype_colors(),
-                 list(PHENOTYPES),
-                 f"{paths.model_key}: patient-timepoints by phenotype",
-                 "", home / "trajectory_phenotype.png", logger)
+    # One panel per Zweck denominator. The phenotypes were derived in
+    # cardiogenic shock, so the all-shock fit clusters a mostly
+    # non-cardiogenic population and names the result after Zweck's; the two
+    # restricted fits are the ones that mean what the name says, and they
+    # disagree with each other often enough to be worth seeing side by side.
+    for column, tag in (
+        ("cs_phenotype", "phenotype"),
+        ("cs_phenotype_coded", "phenotype_coded"),
+        ("cs_phenotype_cardiac_origin", "phenotype_cardiac_origin"),
+    ):
+        if column not in frame.columns:
+            continue
+        labelled = frame.filter(pl.col(column).is_not_null())
+        if labelled.is_empty():
+            logger.info(f"no patient-timepoints carry {column}; panel skipped")
+            continue
+        plot_scatter(labelled, px, py, column, phenotype_colors(),
+                     list(PHENOTYPES),
+                     f"{paths.model_key}: patient-timepoints by "
+                     f"{column.replace('cs_phenotype', 'Zweck').replace('_', ' ')}",
+                     "", home / f"trajectory_{tag}.png", logger)
+        plot_flow(
+            labelled, px, py, home / f"trajectory_flow_{tag}.png",
+            f"{paths.model_key}: {column}",
+            f"{labelled['hospitalization_id'].n_unique():,} patients carry this "
+            "fit; the field is computed over them alone",
+            logger, labels=proj_labels(),
+            colour_by={
+                "key": column,
+                "colors": phenotype_colors(),
+                "order": list(PHENOTYPES),
+            },
+        )
 
     # Shock type, only where the cohort still has more than one of them. In
     # the cardiogenic subset this column separates coded-cardiogenic from

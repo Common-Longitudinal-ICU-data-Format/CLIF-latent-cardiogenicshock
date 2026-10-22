@@ -75,8 +75,10 @@ from clifcs import sepsis_phenotype
 from clifcs.phenotype import (
     add_egfr,
     apply_phenotype_model,
+    PHENOTYPE_VARIANTS,
     assign_phenotype_variants,
     assign_phenotypes,
+    variant_agreement,
     variant_model_path,
     nearest_labs,
     save_phenotype_model,
@@ -85,6 +87,8 @@ from clifcs.phenotype import (
 
 STAGES = (
     "cohort",
+    # cheap, and depends only on cohort.parquet
+    "phenotypes",
     "subset",
     "derive",
     "collate",
@@ -900,6 +904,58 @@ def stage_tokencounts(paths, sites, logger, min_cell: int) -> None:
 # ======================================================== stage: baseline
 
 
+def stage_phenotypes(paths, logger) -> None:
+    """
+    per-denominator Zweck summaries, from the cohort table alone
+
+    Separate from `cohort` because it needs nothing but cohort.parquet: the
+    three fits are already stored there as columns, and regenerating their
+    summary tables should not cost a re-read of every site's raw CLIF. The
+    report reads these CSVs, so a change to how a summary is presented is a
+    seconds-long rerun rather than an hour.
+    """
+    cohort_file = paths.cohort_home / "cohort.parquet"
+    if not cohort_file.is_file():
+        logger.error(f"{cohort_file} not found; run --stage cohort first")
+        return
+    cohort = pl.read_parquet(cohort_file)
+
+    present = [c for c, _ in PHENOTYPE_VARIANTS if c in cohort.columns]
+    if not present:
+        logger.error(
+            "cohort.parquet carries no phenotype columns; it predates the "
+            "per-denominator fit. Re-run --stage cohort."
+        )
+        return
+
+    logger.info("Zweck phenotype variants and their denominators:")
+    for column, description in PHENOTYPE_VARIANTS:
+        if column not in cohort.columns:
+            continue
+        labelled = int(cohort[column].is_not_null().sum())
+        logger.info(
+            f"  {column:<32} {labelled:>7,} patients  ({description})"
+        )
+        summary = summarize(cohort, logger, column=column)
+        if summary.is_empty():
+            continue
+        summary.write_csv(paths.cohort_home / f"phenotype_summary_{column}.csv")
+
+    # the bare name keeps writing phenotype_summary.csv too, so anything still
+    # reading the old filename is not silently left with nothing
+    if "cs_phenotype" in cohort.columns:
+        base = summarize(cohort, logger, column="cs_phenotype")
+        if not base.is_empty():
+            base.write_csv(paths.cohort_home / "phenotype_summary.csv")
+
+    agreement = variant_agreement(cohort, logger)
+    if not agreement.is_empty():
+        agreement.write_csv(paths.cohort_home / "phenotype_variant_agreement.csv")
+        logger.info(
+            f"wrote {paths.cohort_home / 'phenotype_variant_agreement.csv'}"
+        )
+
+
 def stage_baseline(paths, sites, logger, min_cell: int) -> None:
     """
     median [IQR] and n (%) for each coded shock type
@@ -1451,6 +1507,9 @@ def main() -> None:
             elif stage == "tokencounts":
                 run_stage(stage, position, total, logger,
                           stage_tokencounts, paths, sites, logger, args.min_cell)
+            elif stage == "phenotypes":
+                run_stage(stage, position, total, logger,
+                          stage_phenotypes, paths, logger)
             elif stage == "baseline":
                 run_stage(stage, position, total, logger,
                           stage_baseline, paths, sites, logger, args.min_cell)

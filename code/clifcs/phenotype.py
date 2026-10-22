@@ -295,7 +295,7 @@ def assign_phenotypes(df: pl.DataFrame, cfg) -> tuple[pl.DataFrame, pl.DataFrame
     return out, centroid_frame, model
 
 
-def summarize(df: pl.DataFrame, logger) -> pl.DataFrame:
+def summarize(df: pl.DataFrame, logger, column: str = "cs_phenotype") -> pl.DataFrame:
     """
     per-phenotype size and in-hospital mortality
 
@@ -307,9 +307,15 @@ def summarize(df: pl.DataFrame, logger) -> pl.DataFrame:
     # pair this used to build: a federated run has however many sites sent a
     # bundle, and naming two of them meant a third was silently omitted from
     # its own breakdown table.
+    # A variant is null outside its own denominator, and those patients are
+    # not members of a phenotype that was never defined for them.
+    df = df.filter(pl.col(column).is_not_null())
+    if df.is_empty():
+        logger.warning(f"no patients carry {column}; no summary written")
+        return pl.DataFrame()
     sites = sorted(df["site"].unique().drop_nulls().to_list())
     summary = (
-        df.group_by("cs_phenotype")
+        df.group_by(column)
         .agg(
             n=pl.len(),
             *[
@@ -319,19 +325,19 @@ def summarize(df: pl.DataFrame, logger) -> pl.DataFrame:
             mortality=pl.col("in_hospital_mortality").mean(),
             median_icu_los_days=pl.col("icu_los_days").median(),
         )
-        .sort("cs_phenotype")
+        .sort(column)
     )
-    logger.info("cardiogenic shock phenotypes (Zweck et al. 2021, refit):")
+    logger.info(f"cardiogenic shock phenotypes (Zweck et al. 2021, refit) [{column}]:")
     for row in summary.iter_rows(named=True):
         per_site = ", ".join(f"{site} {row[f'n_{site}']}" for site in sites)
         logger.info(
-            f"  {row['cs_phenotype']:<22} n={row['n']:<6} "
+            f"  {row[column]:<22} n={row['n']:<6} "
             f"({per_site})  "
             f"in-hospital mortality {row['mortality']:.1%}  "
             f"median ICU LOS {row['median_icu_los_days']:.1f}d"
         )
 
-    mortality = summary.sort("cs_phenotype")["mortality"].to_list()
+    mortality = summary.sort(column)["mortality"].to_list()
     if not all(a <= b for a, b in zip(mortality, mortality[1:])):
         logger.warning(
             "mortality does not increase monotonically across I -> II -> III; "
@@ -464,3 +470,58 @@ def assign_phenotype_variants(df: pl.DataFrame, cfg, logger, model_base=None):
             f"({share:.1%} of the cohort)"
         )
     return df, centroids, models
+
+
+def variant_agreement(df: pl.DataFrame, logger) -> pl.DataFrame:
+    """
+    do the three Zweck fits put the same patients in the same phenotype?
+
+    Compared only on patients BOTH variants label, since a variant is null
+    outside its denominator and scoring a null against a label would measure
+    the denominators rather than the partitions.
+
+    Adjusted Rand, not raw agreement. The three phenotypes are very unequal in
+    size -- I non-congested is the large majority -- so two partitions that
+    both just put most people in I would agree on most patients while sharing
+    no structure. ARI is corrected for that: 0 is chance agreement given the
+    marginals, 1 is identical.
+
+    What this is for: the two cardiogenic readings overlap on 24.4% of their
+    union, so if the three fits disagree then a published Zweck replication
+    depends on a cohort definition its authors never had to state. That is
+    worth knowing either way, which is why all three fits are kept.
+    """
+    from itertools import combinations
+
+    from sklearn.metrics import adjusted_rand_score
+
+    rows = []
+    columns = [c for c, _ in PHENOTYPE_VARIANTS if c in df.columns]
+    for left, right in combinations(columns, 2):
+        both = df.filter(
+            pl.col(left).is_not_null() & pl.col(right).is_not_null()
+        )
+        if both.is_empty():
+            continue
+        a = [str(v) for v in both[left].to_list()]
+        b = [str(v) for v in both[right].to_list()]
+        identical = sum(1 for x, y in zip(a, b) if x == y)
+        rows.append({
+            "left": left,
+            "right": right,
+            "n_both_labelled": both.height,
+            "same_phenotype": identical / both.height,
+            "adjusted_rand": adjusted_rand_score(a, b),
+        })
+    if not rows:
+        return pl.DataFrame()
+
+    table = pl.DataFrame(rows)
+    logger.info("agreement between the Zweck fits, on patients both label:")
+    for row in table.iter_rows(named=True):
+        logger.info(
+            f"  {row['left']:<30} vs {row['right']:<30} "
+            f"n={row['n_both_labelled']:>6,}  "
+            f"same {row['same_phenotype']:>6.1%}  ARI {row['adjusted_rand']:+.3f}"
+        )
+    return table

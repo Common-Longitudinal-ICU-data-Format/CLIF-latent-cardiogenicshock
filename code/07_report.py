@@ -520,15 +520,28 @@ def section_cohort(paths, cfg, out: list) -> None:
 
     # --------------------------------------------------------- the phenotypes
     phenotype_tabs = []
-    summary_file = paths.cohort_home / "phenotype_summary.csv"
-    if summary_file.is_file():
-        phenotype_tabs.append(("Zweck (cardiogenic)", table(
-            pl.read_csv(summary_file),
+    # One tab per cardiogenic denominator. Zweck derived I/II/III in
+    # cardiogenic shock, so fitting on the whole shock cohort clusters a
+    # population that is 75% non-cardiogenic and then names the clusters after
+    # his; all three fits are shown because the two cardiogenic readings agree
+    # on only 24.4% of their union, which makes the denominator a finding.
+    for column, label in (
+        ("cs_phenotype_coded", "Zweck (ICD-coded CS)"),
+        ("cs_phenotype_cardiac_origin", "Zweck (cardiac origin)"),
+        ("cs_phenotype", "Zweck (all shock)"),
+    ):
+        variant_file = paths.cohort_home / f"phenotype_summary_{column}.csv"
+        if not variant_file.is_file():
+            continue
+        frame = pl.read_csv(variant_file)
+        phenotype_tabs.append((label, table(
+            frame,
             {
-                "n": thousands, "n_ucmc": thousands, "n_nu": thousands,
+                "n": thousands,
+                **{c: thousands for c in frame.columns if c.startswith("n_")},
                 "mortality": pct, "median_icu_los_days": num(1),
             },
-            key_column="cs_phenotype",
+            key_column=column,
         )))
     seymour_file = paths.cohort_home / "seymour_summary.csv"
     if seymour_file.is_file():
@@ -564,7 +577,43 @@ def section_cohort(paths, cfg, out: list) -> None:
             "and <b>Bhavani</b> are sepsis schemes and are computed only on the "
             "sepsis subcohort, which is why their totals are smaller.</p>"
         )
+        out.append(
+            "<p><b>Zweck appears three times, once per cardiogenic "
+            "denominator.</b> The phenotypes were derived in cardiogenic "
+            "shock, so fitting them on the whole shock cohort clusters a "
+            "population that is 75% non-cardiogenic and then gives the "
+            "clusters Zweck's names by matching centroid lab profiles. This "
+            "pipeline did exactly that until recently. Each tab is now an "
+            "independent fit &mdash; its own median and scale, its own "
+            "k-means, its own centroid naming &mdash; on its own cohort: "
+            "3,105 ICD-coded, 9,133 meeting the computed cardiac-origin "
+            "criterion, 39,819 all shock. The first two agree on only 2,397 "
+            "patients, 24.4% of their union, so which one a replication uses "
+            "is a choice that changes the answer.</p>"
+        )
         out.append(tabs(phenotype_tabs))
+
+        agreement_file = paths.cohort_home / "phenotype_variant_agreement.csv"
+        if agreement_file.is_file():
+            out.append(
+                "<p>How far the three fits put the same patient in the same "
+                "phenotype, scored only on patients both fits label &mdash; a "
+                "variant is null outside its own denominator, and scoring a "
+                "null against a label would measure the denominators instead "
+                "of the partitions. Adjusted Rand rather than raw agreement, "
+                "because phenotype I is the large majority and two fits that "
+                "both put most patients there would agree on most patients "
+                "while sharing no structure: 0 is chance given the marginals, "
+                "1 is identical.</p>"
+            )
+            out.append(table(
+                pl.read_csv(agreement_file),
+                {
+                    "n_both_labelled": thousands,
+                    "same_phenotype": pct,
+                    "adjusted_rand": num(3),
+                },
+            ))
 
 
 #: token families, in the order their figures are stacked
@@ -1937,6 +1986,40 @@ def section_flow(paths, out: list) -> None:
             "physiology rather than as provenance.</p>"
         )
         out.append(tabs(site_panels))
+
+    # Zweck under each denominator, in whichever projection is the primary
+    # one. Three fits of the same published scheme on three different cohorts:
+    # the two restricted ones are what the name actually refers to, the
+    # all-shock one is what this pipeline used to produce.
+    zweck_panels = [
+        (label, figure(home / f"trajectory_flow_{tag}.png", note))
+        for tag, label, note in (
+            ("phenotype_coded", "ICD-coded CS",
+             "Fitted on the 3,105 patients with a coded cardiogenic shock "
+             "diagnosis -- closest to Zweck's own derivation cohort"),
+            ("phenotype_cardiac_origin", "Cardiac origin",
+             "Fitted on the 9,133 patients meeting the computed cardiac-origin "
+             "criterion"),
+            ("phenotype", "All shock",
+             "Fitted on all 39,819 shock patients, 75% of them not cardiogenic "
+             "by either reading -- shown because it is what the earlier "
+             "versions of this report displayed as 'Zweck'"),
+        )
+    ]
+    zweck_panels = [(label, body) for label, body in zweck_panels if body]
+    if zweck_panels:
+        out.append('<h3>Zweck, by cardiogenic denominator</h3>')
+        out.append(
+            "<p>The same published scheme fitted three times, on three "
+            "cohorts. Each panel's flow field is computed over only the "
+            "patients that fit labels, so the arrows differ between tabs as "
+            "well as the hue &mdash; unlike every other tab group in this "
+            "section, where one field carries several hues. The ICD-coded and "
+            "cardiac-origin cohorts overlap on 2,397 patients, 24.4% of their "
+            "union, so these are substantially different populations wearing "
+            "the same three phenotype names.</p>"
+        )
+        out.append(tabs(zweck_panels))
 
     # The flow field itself, once per projection. The tab group above is the
     # cardiogenic field with the cohort-specific hues on it; this one is the
