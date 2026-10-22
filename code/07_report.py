@@ -736,6 +736,21 @@ PROJECTION_PANELS = [
 #: 09's patient subsets, in reading order. A subset with no figures is skipped.
 SUBSET_ORDER = ("cardiogenic", "septic", "all")
 
+#: the four projections in reading order: the whole cohort either side of the
+#: correction first, since that pair is the control, then the two cohort-
+#: specific embeddings. Distinct from SUBSET_ORDER, which is a *preference*
+#: order for picking one representative projection and leads with cardiogenic.
+PROJECTION_ORDER = ("all", "cardiogenic", "septic")
+
+#: how each subset is named in a heading. "cardiogenic" is the union of the two
+#: readings of cardiogenic shock, not the ICD code alone, and saying so in the
+#: heading is cheaper than a footnote under every panel.
+SUBSET_TITLES = {
+    "cardiogenic": "cardiogenic shock",
+    "septic": "septic shock",
+    "all": "the whole shock cohort",
+}
+
 #: the physiology underlays 09 draws one figure each for, label as shown.
 #: Mirrors clifcs.state.VARIABLES; a variable 09 could not populate is dropped
 #: by the `if body` filter rather than leaving an empty tab.
@@ -760,56 +775,104 @@ CORRECTIONS = [
 ]
 
 
+def projection_tag(label: str) -> str:
+    """
+    a projection label short enough for a tab
+
+    "cardiogenic shock" -> "Cardiogenic"; "the whole shock cohort,
+    uncorrected" -> "All shock (raw)". Tabs sit in a single row, so the full
+    heading does not fit once a variable name follows it.
+    """
+    raw = ", uncorrected" in label
+    stem = label.split(",")[0].replace("the whole shock cohort", "all shock")
+    stem = stem.replace(" shock", "") if stem != "all shock" else "All shock"
+    return f"{stem.capitalize()} (raw)" if raw else stem.capitalize()
+
+
 def trajectory_home(paths) -> pathlib.Path:
     """
-    where 09 actually put its figures
+    the directory the cardiogenic flow panels come from
 
-    09 writes into `trajectory/corrected-<method>/` when it applies a site
-    correction, and correcting is its default -- site dominates that geometry at
-    ~1.9x neighbour purity, so an uncorrected field is largely a picture of
-    three hospitals. Looking only in the base directory found nothing for every
-    corrected run, and because each panel is wrapped in `figure()`, which drops
-    a missing file rather than failing, the section rendered with no figures in
-    it at all.
-
-    Prefers the uncorrected directory when both exist, since that is the one a
-    reader would assume unless told otherwise.
+    Not "the first projection 09 drew". The panels this returns a home for are
+    `trajectory_flow_cardiogenic_*`, which only the cardiogenic run writes, so
+    resolving to whichever projection happened to sort first put the section's
+    headline figures in a directory that does not contain them. Falls back
+    through the other cohorts only so that a partial run still renders.
     """
-    base = paths.output_home / "figures" / "GEM-all" / "trajectory"
-    for home in trajectory_homes(paths).values():
-        return home
-    return base
+    homes = trajectory_homes(paths)
+    for subset in ("cardiogenic", "septic", "all"):
+        for info in homes.values():
+            if info["subset"] == subset and info["correction"] is not None:
+                return info["home"]
+        for info in homes.values():
+            if info["subset"] == subset:
+                return info["home"]
+    return paths.output_home / "figures" / "GEM-all" / "trajectory"
 
 
 def trajectory_homes(paths) -> dict:
     """
-    every subset 09 has drawn, as {subset: directory}
+    every projection 09 has drawn, as {label: {home, subset, correction}}
 
-    09 scopes its figures by subset now -- cardiogenic and septic both write
-    trajectory_flow_pacmap.png, so sharing one directory meant the second run
-    silently overwrote the first and the report showed one labelled as the
-    other. Returned in SUBSET_ORDER so the report tabs read the same way every
-    time rather than in whatever order the filesystem offers.
+    There are four, and they are four different embeddings -- not one embedding
+    shown four ways. Each is a PaCMAP fitted on its own set of
+    patient-timepoints, so a coordinate in one says nothing about a coordinate
+    in another:
+
+        all shock, uncorrected      what the model does untouched, site effect
+                                    and all -- the control for the other three
+        all shock, corrected        the same cohort after the affine site map
+        cardiogenic, corrected      the union of the two cardiogenic readings
+        septic, corrected           the coded-septic denominator
+
+    Keyed by label rather than by subset, because subset alone no longer
+    identifies a projection: the all-shock cohort appears twice, once either
+    side of the correction, and the point of that pair is to be compared.
+    Returned in a fixed order so the tabs read the same way every time rather
+    than in whatever order the filesystem offers.
     """
     base = paths.output_home / "figures" / "GEM-all" / "trajectory"
     found = {}
-    for subset in SUBSET_ORDER:
+    for subset in PROJECTION_ORDER:
         home = base / subset
         if not home.is_dir():
             continue
+        # An uncorrected run writes into the subset directory itself, a
+        # corrected one into corrected-<method>/ beside it. Both can exist, and
+        # for the all-shock cohort both are wanted.
+        candidates = []
         if (home / "trajectory_flow_pacmap.png").is_file():
-            found[subset] = home
-            continue
-        corrected = sorted(home.glob("corrected-*"))
-        if corrected:
-            found[subset] = corrected[0]
+            candidates.append((None, home))
+        for corrected in sorted(home.glob("corrected-*")):
+            if (corrected / "trajectory_flow_pacmap.png").is_file():
+                candidates.append(
+                    (corrected.name.removeprefix("corrected-"), corrected)
+                )
+        for correction, directory in candidates:
+            label = SUBSET_TITLES[subset]
+            if correction is None:
+                label = f"{label}, uncorrected"
+            found[label] = {
+                "home": directory,
+                "subset": subset,
+                "correction": correction,
+            }
     if found:
         return found
     # a run from before figures were scoped by subset
+    legacy = None
     if (base / "trajectory_flow_pacmap.png").is_file():
-        return {"all": base}
-    corrected = sorted(base.glob("corrected-*"))
-    return {"all": corrected[0]} if corrected else {}
+        legacy = base
+    else:
+        corrected = sorted(base.glob("corrected-*"))
+        legacy = corrected[0] if corrected else None
+    if legacy is None:
+        return {}
+    return {
+        SUBSET_TITLES["all"]: {
+            "home": legacy, "subset": "all", "correction": None,
+        }
+    }
 
 
 def trajectory_coverage(paths, logger=None) -> tuple[str, str]:
@@ -1747,7 +1810,18 @@ def section_flow(paths, out: list) -> None:
     # panel sets in every run, so the cardiogenic directory held
     # septic-named figures drawn over the cardiogenic grid, and the fallback
     # found them and presented them as the septic cohort.
-    septic_home = homes.get("septic", home / "no-septic-grid")
+    # Resolved by subset, not by label, so a rename of the heading cannot
+    # quietly repoint these four panels at another cohort. Falls back to a path
+    # that cannot exist, so the septic tabs come up empty and are dropped by
+    # the `if body` filter when no septic grid has been extracted -- falling
+    # back to `home` was wrong, because 09 used to draw both panel sets in
+    # every run and the fallback found the cardiogenic directory's
+    # septic-named figures and presented them as the septic cohort.
+    septic_home = next(
+        (info["home"] for info in homes.values()
+         if info["subset"] == "septic" and info["correction"] is not None),
+        home / "no-septic-grid",
+    )
     alignment_file = paths.output_home / "tables" / "GEM-all" / "trajectory_flow_alignment.csv"
     # 09 names the flow figure after whichever projection it drew, so that a
     # field can never be shown under the wrong axis labels. Prefer PaCMAP,
@@ -1811,25 +1885,139 @@ def section_flow(paths, out: list) -> None:
                 "The same field, coloured by in-hospital mortality")),
     ]))
 
+    # Who is where, before any flow. Site first, because site is the largest
+    # single structure in this geometry -- 1.9x neighbour purity uncorrected --
+    # and these projections have had LEACE applied, so the panel is the
+    # evidence that the correction worked rather than decoration. Residual
+    # separation here is residual confounding in every panel below it.
+    site_panels = [
+        (label.capitalize(),
+         figure(info["home"] / "trajectory_site.png",
+                "Patient-timepoints coloured by contributing site"))
+        for label, info in homes.items()
+    ]
+    site_panels = [(label, body) for label, body in site_panels if body]
+    if site_panels:
+        out.append('<h3>Where the sites sit</h3>')
+        out.append(
+            "<p>Each cohort's own projection, coloured by contributing site. "
+            "These are the <b>corrected</b> coordinates: the site effect has "
+            "already been removed by LEACE, which drove a linear site probe "
+            "from 0.9972 to 0.5040. Three hospitals still overlapping here is "
+            "what licenses reading any other panel in this section as "
+            "physiology rather than as provenance.</p>"
+        )
+        out.append(tabs(site_panels))
+
+    # The flow field itself, once per projection. The tab group above is the
+    # cardiogenic field with the cohort-specific hues on it; this one is the
+    # four fields side by side, which is the only place the uncorrected
+    # all-shock geometry can be compared against its corrected counterpart.
+    field_panels = [
+        (projection_tag(label),
+         figure(info["home"] / "trajectory_flow_pacmap.png",
+                f"Mean displacement between consecutive timepoints, {label}"))
+        for label, info in homes.items()
+    ]
+    field_panels = [(label, body) for label, body in field_panels if body]
+    if len(field_panels) > 1:
+        out.append('<h3>The field in each projection</h3>')
+        out.append(
+            "<p>Four separate PaCMAPs, each fitted on its own set of "
+            "patient-timepoints. <b>Coordinates do not correspond between "
+            "them</b> and neither do the arrow directions &mdash; a vector "
+            "pointing right in one panel has no relation to one pointing right "
+            "in another. What is comparable is the <i>structure</i>: whether "
+            "the field is coherent, and whether the correction destroyed it.</p>"
+        )
+        out.append(tabs(field_panels))
+
+    # Shock type, which only the all-shock projections can show: in the
+    # cardiogenic subset this column separates coded-cardiogenic from
+    # cardiac-origin-only, and in the septic subset it is nearly constant.
+    type_panels = [
+        (projection_tag(label),
+         figure(info["home"] / "trajectory_shock_type.png",
+                "Patient-timepoints coloured by coded shock type"))
+        for label, info in homes.items()
+    ]
+    type_panels = [(label, body) for label, body in type_panels if body]
+    if type_panels:
+        out.append('<h3>Where the shock types sit</h3>')
+        out.append(
+            "<p>The whole cohort, coloured by coded shock type. 21,462 of the "
+            "39,819 have no shock type coded at all and are drawn first, "
+            "underneath; cardiogenic is drawn last so that 3,105 patients are "
+            "not buried under seven times as many. This is the panel that says "
+            "whether the shock types occupy distinct regions of the embedding "
+            "or overlap &mdash; and the two cardiogenic definitions agree on "
+            "only 24.4% of their union, so a clean separation here would be "
+            "surprising.</p>"
+        )
+        out.append(tabs(type_panels))
+
+    # Every projection, coloured by the decile bin of whatever the model read
+    # last. This asks a different question from the physiology underlays below:
+    # those colour a patient by a value we computed, these colour them by the
+    # token the model actually consumed. A gradient means the projection
+    # separates a last-recorded high value from a low one.
+    token_panels = []
+    for label, info in homes.items():
+        for png in sorted(info["home"].glob("trajectory_last_token_*.png")):
+            # 09 slugs `VTL//map` to `vtl_map`; read the family back out so
+            # the tab says which table the variable came from.
+            family, _, rest = png.stem.removeprefix(
+                "trajectory_last_token_").partition("_")
+            body = figure(png, "")
+            if body:
+                token_panels.append(
+                    (f"{projection_tag(label)} &middot; {family.upper()} "
+                     f"{rest.replace('_', ' ')}".strip(), body)
+                )
+    if token_panels:
+        out.append('<h3>What the model read last</h3>')
+        out.append(
+            "<p>One panel per most common last token before a grid point, "
+            "coloured by that token's decile bin &mdash; the tokenizer numbers "
+            "these Q0 to Q9, and dark is the highest decile. One ramp is shared "
+            "across every panel, so a dark point means the same decile in each. "
+            "Grey is every patient-timepoint whose last token was some "
+            "other variable, kept so each panel shows what share of the cloud "
+            "it accounts for. A visible gradient means the embedding encodes "
+            "the <i>value</i>, not just that the measurement was taken; a "
+            "uniform scatter of bins means it does not.</p>"
+        )
+        out.append(tabs(token_panels))
+
     # Physiology, one variable per tab. The combined grid is kept as an
     # overview, but eleven panels at 3.6 inches each is unreadable as evidence
     # -- the colour ramp spans a few hundred pixels and the streamlines are
     # hairlines. The flow field is identical in every one of these, so a
     # difference between two tabs is a difference in the underlay, never in
     # the arrows.
-    state_panels = [
-        (label, figure(home / f"trajectory_flow_state_{name}.png",
-                       f"Flow over {label}"))
-        for name, label in STATE_VARIABLES
-    ]
-    state_panels = [(label, body) for label, body in state_panels if body]
-    overview = figure(home / "trajectory_flow_state.png",
-                      "Every variable at once; the flow field is the same in each")
-    if overview:
-        state_panels.append(("All together", overview))
-    if state_panels:
-        out.append('<h3>What changes as patients move</h3>')
-        out.append(tabs(state_panels))
+    # One section per cohort, not one tab strip over both. 09 fits a separate
+    # projection per subset, so the cardiogenic MAP panel and the septic MAP
+    # panel are not the same axes -- interleaving them in a single strip of
+    # twenty-four tabs invites exactly the comparison that cannot be made.
+    for projection, info in homes.items():
+        state_panels = [
+            (label,
+             figure(info["home"] / f"trajectory_flow_state_{name}.png",
+                    f"Flow over {label}"))
+            for name, label in STATE_VARIABLES
+        ]
+        state_panels = [(label, body) for label, body in state_panels if body]
+        overview = figure(
+            info["home"] / "trajectory_flow_state.png",
+            "Every variable at once; the flow field is the same in each",
+        )
+        if overview:
+            state_panels.append(("All together", overview))
+        if state_panels:
+            out.append(
+                f'<h3>What changes as patients move &mdash; {projection}</h3>'
+            )
+            out.append(tabs(state_panels))
 
     # And the unsmoothed version: individual patients, in time order. A flow
     # field through a cell where half the patients move each way still draws an
@@ -1841,12 +2029,20 @@ def section_flow(paths, out: list) -> None:
     # Drawn per subset, because 09 fits a separate projection per subset and a
     # patient's path is only interpretable against the one it was placed in.
     # Reading only the cardiogenic home hid the septic paths entirely.
+    # Cohort-specific projections only. 09 draws flow followers for every
+    # projection it fits, but a single patient's path through the whole-cohort
+    # embedding is a path through a cloud that is 54% patients with no shock
+    # type coded -- the field it is being compared against is not about them.
     patient_panels = []
-    for subset, subset_home in homes.items():
+    for label, info in homes.items():
+        if info["subset"] == "all":
+            continue
         for index in range(1, 13):
-            body = figure(subset_home / f"patient_path_{index:02d}.png", "")
+            body = figure(info["home"] / f"patient_path_{index:02d}.png", "")
             if body:
-                patient_panels.append((f"{subset.capitalize()} {index}", body))
+                patient_panels.append(
+                    (f"{projection_tag(label)} {index}", body)
+                )
     if patient_panels:
         out.append('<h3>Individual patients</h3>')
         out.append(
@@ -1867,11 +2063,15 @@ def section_flow(paths, out: list) -> None:
     # to their prefix and re-embedded. Present only when 09 ran with
     # --counterfactuals.
     cf_panels = []
-    for subset, subset_home in homes.items():
+    for label, info in homes.items():
+        if info["subset"] == "all":
+            continue
         for index in range(1, 13):
-            body = figure(subset_home / f"counterfactual_path_{index:02d}.png", "")
+            body = figure(
+                info["home"] / f"counterfactual_path_{index:02d}.png", ""
+            )
             if body:
-                cf_panels.append((f"{subset.capitalize()} {index}", body))
+                cf_panels.append((f"{projection_tag(label)} {index}", body))
     if cf_panels:
         out.append('<h3>Where one more event would move them</h3>')
         out.append(

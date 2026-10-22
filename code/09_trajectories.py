@@ -58,6 +58,7 @@ from clifcs.figures import key_string, quantile_colour, save_figure
 from clifcs.palette import (
     husl_colors,
     mortality_colors,
+    CONTEXT,
     GRID,
     INK_PRIMARY,
     INK_SECONDARY,
@@ -67,6 +68,7 @@ from clifcs.palette import (
     site_colors,
 )
 from clifcs.phenotype import PHENOTYPES
+from clifcs.tokens import vocabulary
 from clifcs.sepsis_phenotype import BHAVANI_LABELS, SEYMOUR_LABELS
 from clifcs.state import (
     VARIABLES,
@@ -111,6 +113,20 @@ def offsets(args) -> list[float]:
 #: single consumer GPU -- and the figure this analysis exists for is the flow
 #: among cardiogenic shock patients, who are a quarter of that.
 SUBSETS = ("all", "cardiogenic", "septic")
+
+
+#: shock types in drawing order, largest first so the smallest lands on top.
+#: "none coded" is 21,462 of 39,819 and a single pooled scatter buries
+#: everything else under it; cardiogenic is drawn last because it is what this
+#: analysis is about.
+SHOCK_TYPE_ORDER = (
+    "none coded",
+    "other shock",
+    "septic",
+    "mixed",
+    "hypovolemic",
+    "cardiogenic",
+)
 
 
 def subset_filter(name: str) -> "pl.Expr | None":
@@ -2111,6 +2127,275 @@ def plot_flow(frame, x, y, out, title, subtitle, logger, labels=None,
     return coherence
 
 
+
+# ============================================================== last tokens
+
+
+#: how many of the most common last-token variables get their own panel
+LAST_TOKEN_PANELS = 6
+
+
+def last_token_table(paths, args, logger) -> pl.DataFrame:
+    """
+    the final token the model read before each grid point
+
+    Recovered from the site's token stream rather than from the extract. The
+    winnower's rule is exactly
+
+        last_valid = (times <= cs_onset_dttm + offset).sum()
+
+    and the prefix handed to the model is `tokens[:last_valid]`, so the last
+    token read is `tokens[last_valid - 1]` -- computable from
+    `tokens_times.parquet` and the onset table alone, with no model and no
+    re-winnowing. The extract's `*_for_inference.parquet`, which carries
+    `tokens_past` directly, is deleted once the embeddings are written, and
+    re-winnowing every grid point to recover one column per row costs hours of
+    GPU time for something a minute of polars reconstructs exactly.
+
+    Subset-independent, because the winnowing never saw the subset: it is
+    applied afterwards, when the shards are filtered against the cohort. So
+    this is cached once per model and both subsets read the same file.
+
+    Returns hospitalization_id, site, offset_hours, last_token_id. Patients the
+    grid dropped for `min_tokens_past` are absent from the embeddings and fall
+    away in the join, so no filter for them is needed here.
+    """
+    cache = paths.scratch_home / "trajectory" / paths.model_key / "last_tokens.parquet"
+    if cache.is_file() and not args.force:
+        frame = pl.read_parquet(cache)
+        logger.info(f"last tokens: {frame.height:,} patient-timepoints from cache")
+        return frame
+
+    onset = (
+        pl.read_parquet(paths.cohort_home / "cs_onset.parquet")
+        .select(
+            subject_id=pl.col("hospitalization_id").cast(pl.String),
+            onset=pl.col("cs_onset_dttm").cast(pl.Datetime("us")),
+        )
+        .unique(subset="subject_id")
+        .lazy()
+    )
+    horizon = max(offsets(args)) * 3600.0
+
+    parts = []
+    for site in paths.sites:
+        # Lazy, streamed, and cut to the horizon before anything is
+        # materialised. Exploding a site's whole stream eagerly is 34M rows for
+        # Rush and more for NU; everything after the last grid point is
+        # irrelevant to a question about the token BEFORE a cutoff, and for a
+        # long admission that tail is most of the record.
+        #
+        # The list order IS the time order, so the row index taken after the
+        # explode is what makes "the last token at or before the cutoff" well
+        # defined without sorting on `times` -- which ties constantly, since a
+        # whole panel of labs shares one resulted-at timestamp and the tie
+        # would otherwise break arbitrarily.
+        events = (
+            pl.scan_parquet(paths.processed(site) / "tokens_times.parquet")
+            .join(onset, on="subject_id", how="inner")
+            .select("subject_id", "onset", "tokens", "times")
+            .explode(["tokens", "times"])
+            .with_row_index("ord")
+            .with_columns(
+                elapsed=(pl.col("times") - pl.col("onset")).dt.total_seconds()
+            )
+            .filter(pl.col("elapsed") <= horizon)
+            .select("subject_id", "ord", "tokens", "elapsed")
+            .collect(engine="streaming")
+        )
+        logger.info(
+            f"[{site}] {events.height:,} token events within the grid horizon"
+        )
+        for offset in offsets(args):
+            at = (
+                events.filter(pl.col("elapsed") <= offset * 3600.0)
+                .group_by("subject_id")
+                .agg(last_token_id=pl.col("tokens").sort_by("ord").last())
+                .with_columns(site=pl.lit(site), offset_hours=pl.lit(float(offset)))
+            )
+            parts.append(at.rename({"subject_id": "hospitalization_id"}))
+        del events
+
+    frame = pl.concat(parts)
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    frame.write_parquet(cache)
+    logger.info(f"wrote {cache} ({frame.height:,} patient-timepoints)")
+    return frame
+
+
+def split_quantile(name: str) -> tuple[str, int | None]:
+    """
+    a decile-binned token name into (variable, bin)
+
+    `VTL//map_Q8` -> ("VTL//map", 8); `RESP//imv` -> ("RESP//imv", None).
+    An unbinned token is still a real last token and is still counted as one;
+    it just cannot carry a gradient.
+    """
+    base, sep, tail = name.rpartition("_Q")
+    if sep and tail.isdigit():
+        return base, int(tail)
+    return name, None
+
+
+def token_slug(name: str) -> str:
+    """a token variable as a filename fragment: `VTL//map` -> `vtl_map`"""
+    return name.replace("//", "_").replace("-", "_").replace(" ", "_").lower()
+
+
+def attach_last_tokens(frame, paths, args, logger):
+    """
+    join the last token onto the projection and decode it
+
+    Returns None when there is no tokenizer to decode ids against, or when
+    nothing matched -- both are reasons to skip the panels, not to fail the
+    run.
+    """
+    if paths.tokenizer_yaml_or_none is None:
+        logger.warning("no tokenizer in paths.yaml: skipping the last-token panels")
+        return None
+    names, _families = vocabulary(str(paths.tokenizer_yaml))
+
+    table = last_token_table(paths, args, logger)
+    frame = frame.join(
+        table, on=["hospitalization_id", "site", "offset_hours"], how="left"
+    )
+    matched = int(frame["last_token_id"].is_not_null().sum())
+    logger.info(
+        f"last tokens: matched {matched:,} of {frame.height:,} patient-timepoints "
+        f"({matched / max(frame.height, 1):.1%})"
+    )
+    if not matched:
+        logger.warning("no last token matched the grid: skipping the panels")
+        return None
+
+    frame = frame.with_columns(
+        last_token=pl.col("last_token_id")
+        .cast(pl.Int64)
+        .replace_strict(names, default="<unmapped>", return_dtype=pl.String)
+    )
+    # A left join leaves a null wherever a grid point had no token stream to
+    # recover from -- a patient present in the embeddings but absent from this
+    # site's tokens_times.parquet, which should not happen and did not, but
+    # decoding None would fail on .rpartition rather than say so.
+    decoded = [
+        split_quantile(v) if v is not None else ("<no token>", None)
+        for v in frame["last_token"].to_list()
+    ]
+    return frame.with_columns(
+        token_variable=pl.Series([b for b, _ in decoded], dtype=pl.String),
+        token_bin=pl.Series([q for _, q in decoded], dtype=pl.Int64),
+    )
+
+
+def plot_last_tokens(frame, px, py, home, paths, args, logger) -> None:
+    """
+    where patients sit whose last recorded event was a high vs a low value
+
+    One panel per most-common last-token variable, coloured by that token's
+    decile bin on a sequential ramp. The gradient is the point: if the bins
+    order along some direction in the embedding then the model is reading the
+    value, not merely the fact that a measurement was taken.
+
+    Patients whose last token belongs to some other variable are drawn as
+    context, so every panel carries the whole cloud and the reader can see what
+    share of it the variable accounts for.
+    """
+    frame = attach_last_tokens(frame, paths, args, logger)
+    if frame is None:
+        return
+
+    counts = frame["last_token"].value_counts(sort=True)
+    logger.info("most common last tokens before a grid point:")
+    for name, n in list(
+        zip(counts["last_token"].to_list(), counts["count"].to_list())
+    )[:12]:
+        logger.info(f"    {name:<34} {n:>8,}  {n / frame.height:>6.1%}")
+
+    # Only binned variables can carry a gradient. `RESP//imv` is a frequent
+    # last token and has no bin -- it belongs in the log above, not on a ramp.
+    binned = frame.filter(
+        pl.col("token_bin").is_not_null()
+        & (pl.col("token_variable") != "<no token>")
+    )
+    if binned.is_empty():
+        logger.warning("no decile-binned last tokens: skipping the panels")
+        return
+    ranked = binned["token_variable"].value_counts(sort=True)
+    top = ranked["token_variable"].to_list()[:LAST_TOKEN_PANELS]
+    covered = sum(ranked["count"].to_list()[: len(top)])
+    logger.info(
+        f"panelling the {len(top)} most common binned last-token variables, "
+        f"covering {covered:,} of {frame.height:,} patient-timepoints "
+        f"({covered / max(frame.height, 1):.1%})"
+    )
+    for variable in top:
+        plot_last_token_single(frame, px, py, variable, home, logger)
+
+
+def plot_last_token_single(frame, px, py, variable, home, logger) -> None:
+    """one variable's decile bins over the projection"""
+    subset = frame.filter(pl.col("token_variable") == variable)
+    if subset.is_empty():
+        return
+    context = frame.filter(pl.col("token_variable") != variable)
+
+    figure, (ax, legend_ax) = plt.subplots(
+        1, 2, figsize=(6.4, 4.6),
+        gridspec_kw={"width_ratios": [4.0, 1.25], "wspace": 0.04},
+    )
+    legend_ax.axis("off")
+
+    ax.scatter(context[px].to_numpy(), context[py].to_numpy(), s=1.2,
+               c=CONTEXT, linewidths=0, alpha=0.8, rasterized=True, zorder=1)
+
+    # Shuffled so the bin drawn last is not systematically on top. Unlike the
+    # phenotype panels there is no level worth privileging -- the bins are a
+    # ramp, and layering one end of it above the other would read as density.
+    rng = np.random.default_rng(0)
+    shuffled = subset.with_columns(
+        _o=pl.Series(rng.permutation(subset.height))
+    ).sort("_o")
+    bins = shuffled["token_bin"].to_numpy()
+    # The vocabulary numbers the bins Q0 to Q9, not Q1 to Q10. Pinning the
+    # scale rather than letting it follow the data is deliberate: every panel
+    # in the section then shares one ramp, so a dark point means the same
+    # decile in the MAP panel as in the FiO2 panel. A variable whose last
+    # values happen to occupy only the top few bins should look like it does.
+    points = ax.scatter(
+        shuffled[px].to_numpy(), shuffled[py].to_numpy(), s=2.5, c=bins,
+        cmap=continuous_cmap(), vmin=0, vmax=9, linewidths=0, alpha=0.8,
+        rasterized=True, zorder=2,
+    )
+    bar = figure.colorbar(points, cax=legend_ax.inset_axes([0.08, 0.34, 0.16, 0.56]))
+    bar.set_label("decile bin of the last value (Q0-Q9)",
+                  color=INK_SECONDARY, fontsize=7)
+    bar.ax.tick_params(labelsize=6, color=GRID, labelcolor=INK_SECONDARY)
+    bar.outline.set_visible(False)
+    legend_ax.text(
+        0.08, 0.24,
+        f"n={subset.height:,}\n{subset.height / frame.height:.1%} of all\n"
+        "patient-timepoints",
+        transform=legend_ax.transAxes, fontsize=7, color=INK_SECONDARY, va="top",
+    )
+
+    ax.set_title(f"last token before the grid point: {variable}", loc="left", pad=8)
+    ax.set_xlabel(proj_labels()[0])
+    ax.set_ylabel(proj_labels()[1])
+    ax.grid(True, color=GRID, linewidth=0.4, alpha=0.7)
+    ax.set_axisbelow(True)
+    ax.set_aspect("equal", adjustable="datalim")
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+
+    out = home / f"trajectory_last_token_{token_slug(variable)}.png"
+    save_figure(figure, out)
+    plt.close(figure)
+    logger.info(
+        f"wrote {out} ({subset.height:,} points, bins "
+        f"{int(np.nanmin(bins))}-{int(np.nanmax(bins))})"
+    )
+
+
 # =================================================================== driver
 
 
@@ -2248,6 +2533,26 @@ def main() -> None:
                  list(PHENOTYPES),
                  f"{paths.model_key}: patient-timepoints by phenotype",
                  "", home / "trajectory_phenotype.png", logger)
+
+    # Shock type, only where the cohort still has more than one of them. In
+    # the cardiogenic subset this column separates coded-cardiogenic from
+    # cardiac-origin-only, which is exactly what
+    # trajectory_flow_cardiogenic_definition.png already shows with the arrows
+    # on it; drawing it again here would be the same split without the field.
+    if args.subset == "all":
+        present = [
+            level for level in SHOCK_TYPE_ORDER
+            if (frame["shock_type"] == level).any()
+        ]
+        plot_scatter(frame, px, py, "shock_type", husl_colors(present), present,
+                     f"{paths.model_key}: patient-timepoints by shock type",
+                     "", home / "trajectory_shock_type.png", logger)
+
+    # What the model read last before each grid point, by decile bin. Drawn
+    # here rather than beside the flow panels because it is a property of the
+    # input, not of the movement: the question is whether the projection
+    # separates a last-recorded high value from a last-recorded low one.
+    plot_last_tokens(frame, px, py, home, paths, args, logger)
 
     plot_flow(frame, px, py, home / f"trajectory_flow_{PROJECTION}.png",
               f"{paths.model_key}: latent flow around shock onset",
