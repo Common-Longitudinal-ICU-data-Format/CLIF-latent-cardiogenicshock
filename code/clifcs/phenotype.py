@@ -338,3 +338,129 @@ def summarize(df: pl.DataFrame, logger) -> pl.DataFrame:
             "the refit clusters may not correspond to the published phenotypes"
         )
     return summary
+
+
+#: The Zweck phenotypes, fitted once per cardiogenic denominator.
+#:
+#: Zweck derived I/II/III in cardiogenic shock. Fitting them on the whole shock
+#: cohort -- which is what this pipeline did until now -- clusters a population
+#: that is 75% non-cardiogenic and then assigns Zweck's names to the result by
+#: centroid profile, which imports his vocabulary onto a partition his
+#: population never saw. The sepsis phenotypes a few lines away in 01 were
+#: always scoped to `sepsis_cohort`; this is the same scoping, applied where it
+#: was missing.
+#:
+#: Three fits rather than one because the repo carries two readings of
+#: "cardiogenic shock" that agree on only 24.4% of their union (2,397 of
+#: 9,841), so which denominator you pick is itself a finding. Keeping the
+#: all-shock fit alongside them makes the comparison available rather than
+#: assumed: if the three partitions broadly agree, the denominator did not
+#: matter; if they do not, every published Zweck replication is sensitive to a
+#: choice its authors did not have to make.
+#:
+#: Each variant is fitted INDEPENDENTLY -- its own median and scale for the
+#: z-scoring, its own k-means, its own centroid-profile naming. Sharing any of
+#: those across denominators would re-centre one cohort's space on another's
+#: and move patients between phenotypes for a reason that is not about them.
+PHENOTYPE_VARIANTS = (
+    ("cs_phenotype", "all shock patients"),
+    ("cs_phenotype_coded", "ICD-coded cardiogenic shock"),
+    ("cs_phenotype_cardiac_origin", "cardiac-origin criterion"),
+)
+
+
+def variant_predicate(column: str) -> "pl.Expr | None":
+    """the denominator a phenotype variant is fitted on, or None for everyone"""
+    if column == "cs_phenotype":
+        return None
+    if column == "cs_phenotype_coded":
+        return pl.col("shock_type") == "cardiogenic"
+    if column == "cs_phenotype_cardiac_origin":
+        return pl.col("cardiac_origin").fill_null(False)
+    raise ValueError(f"unknown phenotype variant {column!r}")
+
+
+def variant_model_path(base, column: str):
+    """`phenotype_model.json` -> `phenotype_model_coded.json` for a variant"""
+    base = pathlib.Path(base)
+    if column == "cs_phenotype":
+        return base
+    suffix = column.removeprefix("cs_phenotype_")
+    return base.with_name(f"{base.stem}_{suffix}{base.suffix}")
+
+
+def assign_phenotype_variants(df: pl.DataFrame, cfg, logger, model_base=None):
+    """
+    fit (or apply) the Zweck phenotypes once per denominator
+
+    Returns the cohort with one column per variant, plus the centroid tables
+    and the fitted models keyed by column name. A patient outside a variant's
+    denominator gets a null in that column -- null meaning "this phenotype
+    system is not defined for this patient", which is different from "not
+    assigned" and is why it is not filled.
+    """
+    key = [c for c in ("hospitalization_id", "site") if c in df.columns]
+    centroids, models = {}, {}
+
+    for column, description in PHENOTYPE_VARIANTS:
+        predicate = variant_predicate(column)
+        part = df if predicate is None else df.filter(predicate)
+        floor = int(cfg.phenotype.n_clusters) * 10
+        if part.height < floor:
+            logger.warning(
+                f"phenotype [{column}]: {part.height:,} patients in the "
+                f"{description} denominator is under the {floor} floor; "
+                "leaving this variant null"
+            )
+            df = df.with_columns(
+                pl.lit(None, dtype=pl.Enum(PHENOTYPES)).alias(column)
+            )
+            continue
+
+        source = (
+            variant_model_path(model_base, column) if model_base else None
+        )
+        if source is not None and source.is_file():
+            labelled = apply_phenotype_model(part, source, logger)
+            centroid_frame = None
+            model = None
+        elif source is not None:
+            logger.warning(
+                f"phenotype [{column}]: no model at {source.name}; "
+                "leaving this variant null"
+            )
+            df = df.with_columns(
+                pl.lit(None, dtype=pl.Enum(PHENOTYPES)).alias(column)
+            )
+            continue
+        else:
+            labelled, centroid_frame, model = assign_phenotypes(part, cfg)
+
+        logger.info(
+            f"phenotype [{column}]: fitted on {part.height:,} patients "
+            f"({description})"
+        )
+        df = df.join(
+            labelled.select(key + ["cs_phenotype"]).rename(
+                {"cs_phenotype": column}
+            ),
+            on=key,
+            how="left",
+        )
+        if centroid_frame is not None:
+            centroids[column] = centroid_frame.rename({"cs_phenotype": column})
+        if model is not None:
+            models[column] = model
+
+    # The all-shock variant keeps the bare name for continuity, so anything
+    # still reading `cs_phenotype` gets what it always got rather than a null
+    # column it will silently drop.
+    for column, description in PHENOTYPE_VARIANTS:
+        if column not in df.columns:
+            continue
+        share = df[column].is_not_null().mean()
+        logger.info(
+            f"    {column:<32} labelled {int(df[column].is_not_null().sum()):>7,} "
+            f"({share:.1%} of the cohort)"
+        )
+    return df, centroids, models
