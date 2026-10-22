@@ -875,6 +875,35 @@ def trajectory_homes(paths) -> dict:
     }
 
 
+def projection_sizes(paths) -> dict:
+    """
+    how many patients each projection was fitted on, as {label: count}
+
+    One number cannot describe section 6 any more. The four projections have
+    four denominators -- the whole cohort twice, then the cardiogenic union and
+    the coded-septic set -- and the grid thins each of them differently, since a
+    patient is dropped at any offset where they have too little record before
+    it. Reporting the cardiogenic figure as though it covered the section was
+    wrong in both directions at once: too small for the all-shock panels, and
+    the wrong cohort for the septic ones.
+    """
+    home = paths.output_home / "patient_level_data" / "GEM-all"
+    sizes = {}
+    for label, info in trajectory_homes(paths).items():
+        name = f"trajectory_projections_{info['subset']}"
+        if info["correction"]:
+            name = f"{name}_corrected-{info['correction']}"
+        parquet = home / f"{name}.parquet"
+        if not parquet.is_file():
+            continue
+        try:
+            ids = pl.read_parquet(parquet, columns=["hospitalization_id"])
+        except Exception:
+            continue
+        sizes[label] = ids["hospitalization_id"].n_unique()
+    return sizes
+
+
 def trajectory_coverage(paths, logger=None) -> tuple[str, str]:
     """
     whether 09's trajectory artifacts describe the cohort 01 last wrote
@@ -1971,7 +2000,7 @@ def section_flow(paths, out: list) -> None:
             body = figure(png, "")
             if body:
                 token_panels.append(
-                    (f"{projection_tag(label)} &middot; {family.upper()} "
+                    (f"{projection_tag(label)} · {family.upper()} "
                      f"{rest.replace('_', ' ')}".strip(), body)
                 )
     if token_panels:
@@ -2889,17 +2918,26 @@ def main() -> None:
     if coverage in ("current", "subset"):
         section_patient_embeddings(paths, out)
         if coverage == "subset":
+            sizes = projection_sizes(paths)
+            rows = "".join(
+                f"<li><b>{html.escape(label)}</b> &mdash; {n:,} patients</li>"
+                for label, n in sizes.items()
+            )
             out.append(callout(
-                f"<b>Sections 4 to 6 cover {html.escape(note)}.</b> 09 drops a "
-                "patient at any grid point where they have too little record "
-                "before it, and the flow field needs a patient seen at "
-                "consecutive timepoints to have a displacement at all, so "
-                "requiring presence across all thirteen offsets from "
-                "&minus;24 h to +48 h is what thins the set. Every patient "
-                "shown is still in the cohort. They are by construction the "
-                "ones with the longest records, so read these three sections "
-                "as describing longer-staying patients rather than the "
-                "cohort."))
+                "<b>Sections 4 to 6 cover fewer patients than the cohort "
+                "table.</b> 09 drops a patient at any grid point where they "
+                "have too little record before it, and the flow field needs a "
+                "patient seen at consecutive timepoints to have a displacement "
+                "at all, so requiring presence across all thirteen offsets "
+                "from &minus;24 h to +48 h is what thins the set. Every "
+                "patient shown is still in the cohort. They are by "
+                "construction the ones with the longest records, so read "
+                "these sections as describing longer-staying patients rather "
+                "than the cohort."
+                + (f"<ul>{rows}</ul>" if rows else "")
+                + "<p>Each projection has its own denominator and its own "
+                "fitted PaCMAP, so these counts are not nested and the "
+                "coordinates do not correspond between panels.</p>"))
         section_patient_paths(paths, out)
         section_flow(paths, out)
     else:
