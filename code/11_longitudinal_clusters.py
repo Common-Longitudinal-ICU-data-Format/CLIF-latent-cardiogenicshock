@@ -483,6 +483,43 @@ def main() -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
     assignments.write_parquet(out)
     logger.info(f"wrote {out} ({assignments.height:,} patients)")
+
+    # The same labels in long form, keyed by (patient, window), which is what
+    # anything wanting to colour a per-timepoint figure needs to join on.
+    #
+    # Note which label lives at which grain. The CARE STATE is per
+    # (patient, window) -- it is the thing that changes as a patient moves. The
+    # cluster is per patient and is carried down every row of their trajectory,
+    # constant along it by construction.
+    #
+    # This is a label table and nothing more. The clustering and the embedding
+    # are separate analyses that share only the (patient, time) key: the
+    # embedding reads every token in the cumulative prefix with no site filter,
+    # this reads 366 site-balanced tokens counted inside one six-hour window.
+    # Same patient, same instant, two different views of it -- which is the
+    # whole reason colouring one by the other says anything.
+    long = pl.DataFrame({
+        "hospitalization_id": np.repeat(patients, len(OFFSETS)),
+        "offset_hours": np.tile(np.array(OFFSETS, dtype=np.float64), len(patients)),
+        "care_state": [
+            "nothing recorded" if int(v) == 0 else f"state {int(v)}"
+            for v in states.reshape(-1)
+        ],
+    }).join(
+        assignments.select(
+            "hospitalization_id", "sequence_cluster", "growth_cluster"
+        ),
+        on="hospitalization_id", how="left",
+    )
+    long_out = (
+        paths.patient_level_home
+        / f"longitudinal_states_{args.subset}.parquet"
+    )
+    long.write_parquet(long_out)
+    logger.info(
+        f"wrote {long_out} ({long.height:,} patient-windows, "
+        f"{len(OFFSETS)} per patient)"
+    )
     logger.info("11 done")
 
 

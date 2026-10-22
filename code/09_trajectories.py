@@ -2590,6 +2590,98 @@ def perfusion_transitions(frame: pl.DataFrame, out, title, logger) -> None:
     )
 
 
+
+# ======================================================= longitudinal labels
+
+
+def attach_clusters(paths, frame: pl.DataFrame, subset: str, logger):
+    """
+    join 11's longitudinal labels onto the grid, on (patient, time)
+
+    The clustering and the embedding are SEPARATE analyses. They share only
+    this key. The embedding at +24h reads every token in the patient's
+    cumulative prefix up to +24h, with no site filter, capped at the model's
+    4096-token context. The label at +24h comes from 366 site-balanced tokens
+    counted inside the six hours ending at +24h. Same patient, same instant,
+    two different views of it -- which is exactly why colouring one by the
+    other is informative rather than circular. Nothing is shared but the key,
+    and nothing should be.
+
+    Two grains arrive. `care_state` is per (patient, timepoint) and is the
+    thing that moves. `sequence_cluster` and `growth_cluster` are per patient
+    and are constant along a trajectory, so a figure coloured by one of those
+    shows where a whole stratum's trajectories live, not where a patient is now.
+
+    11 clusters over seven days while the grid stops at +48h, so the join is a
+    left join and the later windows simply have no point to colour. Returns the
+    frame unchanged, with a warning, when 11 has not been run -- the panels are
+    then skipped rather than the run failing.
+    """
+    source = paths.patient_level_home / f"longitudinal_states_{subset}.parquet"
+    if not source.is_file():
+        logger.info(
+            f"no {source.name}: skipping the longitudinal-cluster panels. "
+            f"Run `python code/11_longitudinal_clusters.py --subset {subset}` "
+            "to produce them."
+        )
+        return frame
+
+    labels = pl.read_parquet(source)
+    before = frame.height
+    frame = frame.join(
+        labels, on=["hospitalization_id", "offset_hours"], how="left"
+    )
+    if frame.height != before:
+        raise RuntimeError(
+            f"joining {source.name} changed the row count {before:,} -> "
+            f"{frame.height:,}; the label table is not unique on "
+            "(hospitalization_id, offset_hours)"
+        )
+    matched = int(frame["care_state"].is_not_null().sum())
+    logger.info(
+        f"longitudinal labels: matched {matched:,} of {frame.height:,} "
+        f"grid points ({matched / max(frame.height, 1):.1%}); "
+        f"{frame['sequence_cluster'].drop_nulls().n_unique()} strata"
+    )
+    return frame
+
+
+def plot_cluster_panels(frame, px, py, home, paths, args, logger) -> None:
+    """the care state and the severity strata, each over the flow field"""
+    for column, filename, subtitle in (
+        (
+            "care_state",
+            "trajectory_flow_septic_care_state.png",
+            "the care state 11 assigned this six-hour window, from "
+            "site-balanced token counts -- a label on each timepoint, not on "
+            "the patient",
+        ),
+        (
+            "sequence_cluster",
+            "trajectory_flow_septic_stratum.png",
+            "the severity stratum the patient's whole seven-day sequence fell "
+            "into -- constant along each trajectory, so this shows where a "
+            "stratum lives rather than where a patient is",
+        ),
+    ):
+        if column not in frame.columns:
+            continue
+        present = frame.filter(pl.col(column).is_not_null())
+        if present.is_empty():
+            continue
+        levels = sorted(present[column].unique().to_list())
+        plot_flow(
+            present, px, py, home / filename,
+            f"{paths.model_key}: {column.replace('_', ' ')}",
+            subtitle, logger, labels=proj_labels(),
+            colour_by={
+                "key": column,
+                "colors": husl_colors(levels),
+                "order": levels,
+            },
+        )
+
+
 # =================================================================== driver
 
 
@@ -2809,6 +2901,12 @@ def main() -> None:
     # a hysteresis band on the MAP side. Needs the state table, so it cannot be
     # derived with the other hues above.
     frame = perfusion_state(frame, logger)
+
+    # 11's labels, joined on (patient, time) and nothing else. Separate
+    # analysis, separate token requirements, same key.
+    frame = attach_clusters(paths, frame, args.subset, logger)
+    if args.subset in ("all", "septic"):
+        plot_cluster_panels(frame, px, py, home, paths, args, logger)
     if "perfusion_state" in frame.columns and args.subset in ("all", "septic"):
         plot_flow(
             frame, px, py, home / "trajectory_flow_septic_perfusion.png",
