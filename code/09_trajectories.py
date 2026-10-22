@@ -2260,11 +2260,23 @@ def main() -> None:
               f"a cross-check on the {proj_labels()[0].rsplit('-', 1)[0]} field",
               logger, labels=("PC1", "PC2"))
 
-    # The figure this analysis exists for
-    logger.info("cardiogenic shock flow, both definitions:")
-    plot_cardiogenic_flow(frame, px, py, home, paths, args, logger)
-    logger.info("septic shock flow, by each phenotype system:")
-    plot_septic_flow(frame, px, py, home, paths, args, logger)
+    # The figures this analysis exists for. Each panel set is drawn only where
+    # its own cohort is the one the projection was fitted on. Drawing the
+    # cardiogenic panels inside the septic subset would plot the 2,352-patient
+    # intersection in septic-only coordinates under a filename that reads as
+    # though it were the cardiogenic cohort, and vice versa.
+    if args.subset in ("all", "cardiogenic"):
+        logger.info("cardiogenic shock flow, both definitions:")
+        plot_cardiogenic_flow(frame, px, py, home, paths, args, logger)
+    else:
+        logger.info("skipping the cardiogenic panels: subset %r is not their "
+                    "cohort", args.subset)
+    if args.subset in ("all", "septic"):
+        logger.info("septic shock flow, by each phenotype system:")
+        plot_septic_flow(frame, px, py, home, paths, args, logger)
+    else:
+        logger.info("skipping the septic panels: subset %r is not their "
+                    "cohort", args.subset)
 
     # Outcome as a COLOUR on one field, not two fields over two cohorts.
     # Splitting the cohort fits a separate field to each, so the two figures

@@ -1741,9 +1741,13 @@ def section_patient_paths(paths, out: list) -> None:
 def section_flow(paths, out: list) -> None:
     home = trajectory_home(paths)
     homes = trajectory_homes(paths)
-    # falls back to `home` so the tabs simply come up empty, and are dropped by
-    # the `if body` filter, when no septic grid has been extracted
-    septic_home = homes.get("septic", home)
+    # Falls back to a path that cannot exist, so the four septic tabs come up
+    # empty and are dropped by the `if body` filter when no septic grid has
+    # been extracted. Falling back to `home` was wrong: 09 used to draw both
+    # panel sets in every run, so the cardiogenic directory held
+    # septic-named figures drawn over the cardiogenic grid, and the fallback
+    # found them and presented them as the septic cohort.
+    septic_home = homes.get("septic", home / "no-septic-grid")
     alignment_file = paths.output_home / "tables" / "GEM-all" / "trajectory_flow_alignment.csv"
     # 09 names the flow figure after whichever projection it drew, so that a
     # field can never be shown under the wrong axis labels. Prefer PaCMAP,
@@ -1834,11 +1838,15 @@ def section_flow(paths, out: list) -> None:
     # One figure per patient, tabbed. Eight on a shared canvas gave each about
     # three inches and the hour labels overlapped whatever the spacing rule --
     # the constraint was the panel size, not the rule.
-    patient_panels = [
-        (f"Patient {index}", figure(home / f"patient_path_{index:02d}.png", ""))
-        for index in range(1, 13)
-    ]
-    patient_panels = [(label, body) for label, body in patient_panels if body]
+    # Drawn per subset, because 09 fits a separate projection per subset and a
+    # patient's path is only interpretable against the one it was placed in.
+    # Reading only the cardiogenic home hid the septic paths entirely.
+    patient_panels = []
+    for subset, subset_home in homes.items():
+        for index in range(1, 13):
+            body = figure(subset_home / f"patient_path_{index:02d}.png", "")
+            if body:
+                patient_panels.append((f"{subset.capitalize()} {index}", body))
     if patient_panels:
         out.append('<h3>Individual patients</h3>')
         out.append(
@@ -1848,19 +1856,22 @@ def section_flow(paths, out: list) -> None:
             "deliberately biased sample, picked to show what the arrows are an "
             "average of. A patient drawn at random is usually a few coincident "
             "dots and one long jump. Nothing is measured from these; the field "
-            "beside them carries any claim.</p>"
+            "beside them carries any claim. Each patient is placed in their own "
+            "cohort's projection &mdash; the cardiogenic tabs in the "
+            "cardiogenic-only PaCMAP, the septic tabs in the septic-only one "
+            "&mdash; so coordinates are not comparable between the two.</p>"
         )
         out.append(tabs(patient_panels))
 
     # Hypothetical next tokens: the same patients, with one more event appended
     # to their prefix and re-embedded. Present only when 09 ran with
     # --counterfactuals.
-    cf_panels = [
-        (f"Patient {index}",
-         figure(home / f"counterfactual_path_{index:02d}.png", ""))
-        for index in range(1, 13)
-    ]
-    cf_panels = [(label, body) for label, body in cf_panels if body]
+    cf_panels = []
+    for subset, subset_home in homes.items():
+        for index in range(1, 13):
+            body = figure(subset_home / f"counterfactual_path_{index:02d}.png", "")
+            if body:
+                cf_panels.append((f"{subset.capitalize()} {index}", body))
     if cf_panels:
         out.append('<h3>Where one more event would move them</h3>')
         out.append(
