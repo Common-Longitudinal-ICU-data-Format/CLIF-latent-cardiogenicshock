@@ -108,6 +108,11 @@ MAX_PLOTTED_SITES = 3
 #: split is that the coordinating analysis cannot depend on record-level data,
 #: and the way to keep that true is to make the attempt fail rather than to
 #: document that it should not happen.
+#: used for output subdirectories and the manifest when no `models:` block
+#: is configured. Matches `default_model` in paths.example.yaml so that a site
+#: which omits the block and one which fills it in agree.
+DEFAULT_MODEL_KEY = "GEM-all"
+
 ROLES: tuple[str, ...] = ("site", "pooled")
 
 
@@ -148,6 +153,11 @@ class Paths:
         A raised FileNotFoundError is not cached, so a site that fixes its glob
         mid-session does not have to reload paths.
         """
+        if not self.model_home_glob:
+            raise FileNotFoundError(
+                "no `models:` block is configured in paths.yaml, so there is no "
+                "checkpoint to resolve. 01_site_tables.py does not need one."
+            )
         matches = sorted(glob.glob(self.model_home_glob))
         if len(matches) != 1:
             raise FileNotFoundError(
@@ -568,18 +578,33 @@ def load_paths(
             "`sites` block legitimate and raw-data access an error."
         )
 
-    available = tuple(cfg.models)
-    if not available:
-        raise ValueError(f"no models configured in {path}")
-    key = model or cfg.get("default_model") or available[0]
-    if key not in available:
-        raise KeyError(f"model {key!r} not in paths.yaml; have {available}")
+    # The `models:` block is optional. 01 never resolves it, and a paths.yaml
+    # that omits it entirely is the minimal working configuration.
+    #
+    # `model_key` still has to be SOMETHING, because it names output
+    # subdirectories and is recorded in the manifest, where bundles are checked
+    # against each other for agreement. It defaults to DEFAULT_MODEL_KEY rather
+    # than to a placeholder so that a site which omits the block and a site
+    # which configures it land on the same key and still pool.
+    configured_models = cfg.get("models") or {}
+    available = tuple(configured_models)
+    key = model or cfg.get("default_model") or (
+        available[0] if available else DEFAULT_MODEL_KEY
+    )
+    if available and key not in available:
+        raise KeyError(
+            f"model {key!r} is not in {path}; it has: {', '.join(available)}"
+        )
 
     # the weights directory names contain a non-ASCII character, so they are
     # globbed rather than written out literally. The glob is NOT resolved here
     # -- see `Paths.model_home`, which resolves it on access so that a tier-1
     # site, which never loads the weights, is not blocked by their absence.
-    pattern = str(cfg.models[key].home_glob)
+    pattern = (
+        str(configured_models[key].home_glob)
+        if key in configured_models and configured_models[key].get("home_glob")
+        else ""
+    )
 
     # Recorded, not checked -- see `Paths.tokenizer_yaml`, which checks it on
     # access. A missing tokenizer stops the token stages and all of tier 2; it

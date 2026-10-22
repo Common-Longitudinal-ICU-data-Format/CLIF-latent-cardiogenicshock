@@ -5,6 +5,29 @@
 # every site and should not be published.
 #
 #   cp code/config/paths.example.yaml code/config/paths.yaml
+#
+# ONE KEY IS REQUIRED: `sites.<NAME>.data_dir`. Everything else below either
+# defaults or degrades, so the shortest working paths.yaml is four lines:
+#
+#   role: site
+#   sites:
+#     YOURSITE:
+#       data_dir: /path/that/actually/exists/CLIF_YOURSITE_2_1
+#
+# What you give up by leaving the rest alone:
+#
+#   tokenizer_yaml           01 skips the `tokenize`, `winnow` and
+#                            `tokencounts` stages, so the bundle carries no
+#                            token-prevalence tables and this site does not
+#                            appear in the token-space decomposition of the
+#                            site effect. The cohort, the three phenotype
+#                            breakdowns, the baseline tables and the entire
+#                            trial and guideline analysis are unaffected.
+#   models.<key>.home_glob   tier 2 (02_site_embeddings.py) and
+#                            08_token_space.py refuse to start. Tier 1 never
+#                            loads the weights.
+#   scratch_home             defaults to ./scratch
+#   output_home              defaults to ./output
 
 # Which side of the federation this machine is.
 #
@@ -61,9 +84,15 @@ models:
 default_model: GEM-all
 
 # The fitted cocoa tokenizer the models were TRAINED with, shared by all of
-# them. REQUIRED FOR EVERY TIER, including tier 1 -- the token-prevalence
-# tables in the bundle are token ids, and they are only comparable across sites
-# under one mapping.
+# them. OPTIONAL: needed by the three token stages and by tier 2, and by
+# nothing else in 01. Leave it out and those stages are skipped with a warning
+# and the rest of the bundle exports normally.
+#
+# When it IS set it has to be the training-time one. The token-prevalence
+# tables are token ids, comparable across sites only under one mapping, and the
+# manifest records this file's hash so the coordinating site can check that.
+# A bundle with no tokenizer hash ships no token tables -- deliberately, since
+# counts in an unidentified mapping are worse than no counts.
 #
 # This is not interchangeable. A model's embedding table has one row per token
 # id and the numeric bin edges are baked into the token names, so a tokenizer
@@ -72,10 +101,15 @@ default_model: GEM-all
 # does not match the model's.
 tokenizer_yaml: /path/to/GEM-weights-FL-manuscript/tokenizer.yaml
 
+# OPTIONAL, defaults to ./output
 output_home: ./output
 
 # Intermediates: cohort-restricted CLIF tables, token streams, raw feature
-# shards. Large (hundreds of GB for a big cohort) and fully regenerable, so put
-# this on fast scratch -- never on a synced drive (Box, Dropbox, OneDrive),
-# which will both sync it and lock the files.
+# shards. Large (hundreds of GB for a big cohort) and fully regenerable.
+#
+# OPTIONAL, defaults to ./scratch -- which gets a run working with no setup and
+# is the wrong answer for a real cohort. Point it at fast scratch, and NEVER at
+# a synced drive (Box, Dropbox, OneDrive): those will both replicate hundreds of
+# GB of regenerable data and hold locks on the files, after which the directory
+# cannot even be deleted. The resolved location is printed on every run.
 scratch_home: /path/to/fast/scratch/clif-cs

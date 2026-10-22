@@ -1,47 +1,43 @@
 #!/usr/bin/env python3
 
 """
-01 -- site tier 1: everything a site can send without argument
+01 -- build this site's cohort and write the tables it sends back
 
-The first of two scripts that run inside a contributing institution, and the
-one every site runs. It builds the cohort and writes the **aggregate** bundle:
-patient flow, cohort sizes, the phenotype breakdowns, the coded shock types,
-the trial comparison, and how differently this site charts.
+Runs on one machine, against this site's own CLIF-2.1 extract. Reads the raw
+tables, identifies the shock cohort, labels it, and writes a directory of
+summary tables to `output/upload_to_box_<SITE>/`.
 
-Nothing it exports is patient-level. Every number is a count or an average over
-at least `--min-cell` patients, so it travels under a consortium's ordinary
-terms rather than needing a patient-level data use agreement.
+Nothing it writes to that directory is patient-level. Every number is a count,
+a share or a median over at least `--min-cell` patients.
 
-**It does not need a GPU, and it never loads the GEM weights.** It loads the
-*tokenizer*, because the token-prevalence table is built from the token stream,
-but the model itself is not needed until `02_site_embeddings.py`. A site with no
-GPU, or with no agreement permitting patient-level transfer, runs this and
-stops -- and that is a complete contribution.
-
-Stages, each rerunnable on its own with --stage, which matters because `derive`
-and `collate` are the slow ones:
+Ten stages. Each is rerunnable on its own, which matters because `derive` and
+`collate` are slow:
 
   cohort       identify shock, print the filter ledger, attach outcomes, coded
                shock type, and the Zweck, Seymour and Bhavani phenotypes
-  subset       cut each site's CLIF tables down to the cohort -> scratch/data-raw/
-  derive       clifpy: respiratory-support waterfall, dose conversion, SOFA
-  collate      cocoa collate                                  -> scratch/processed/
-  tokenize     cocoa tokenize, under the model's frozen tokenizer
+  subset       cut this site's CLIF tables down to the cohort
+  derive       respiratory-support waterfall, dose conversion, SOFA
+  collate      assemble one timeline per patient
+  tokenize     encode each timeline
   winnow       cut each timeline at both anchors (24h, onset)
-  tokencounts  per-token and per-family prevalence            -> output/cohort/
-  trials       eligibility, IQR position and concordance, as aggregates
-  export       assemble the aggregate bundle           -> output/upload_to_box_<SITE>/
+  tokencounts  per-token and per-family prevalence
+  baseline     median physiology and shares by coded mechanism
+  trials       eligibility, position against published IQRs, guideline fit
+  export       assemble the directory to send
 
 Usage
-    python code/01_site_tables.py                          # all stages
-    python code/01_site_tables.py --stage cohort           # just the cohort
-    python code/01_site_tables.py --from-stage tokencounts  # resume
-    python code/01_site_tables.py --site NU --force         # redo one site
 
-At a contributing site the three phenotype models are required, so that a label
-means the same thing everywhere:
+    python code/01_site_tables.py --check        # verify setup, run nothing
+    python code/01_site_tables.py                # all ten stages
+    python code/01_site_tables.py --from-stage collate   # resume after a failure
+    python code/01_site_tables.py --stage cohort --force # redo one stage
 
-    python code/01_site_tables.py         --phenotype-model <...>/phenotype_model.json         --seymour-model   <...>/seymour_model.json         --bhavani-model   <...>/bhavani_model.json
+`--check` reads configuration and lists directories. It opens no data file and
+is safe to run first, anywhere.
+
+Every stage prints when it starts, when it finishes, and how long it took. If
+one fails, the run stops and prints the stage that failed, the line it failed
+on, and the command to resume from there.
 """
 
 from __future__ import annotations
@@ -49,9 +45,11 @@ from __future__ import annotations
 import argparse
 import json
 import pathlib
+import platform
 import shutil
 import sys
 import time
+import traceback
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
@@ -91,7 +89,7 @@ STAGES = (
     "tokenize",
     "winnow",
     # the token stream is tokenizer-only, so the one comparison that needs no
-    # model at all -- how differently the sites chart -- belongs in tier 1.
+    # model at all -- how differently the sites chart -- belongs here.
     # 04 draws its tornado from this table, which is why that figure now
     # survives for a site that shares nothing patient-level.
     "tokencounts",
@@ -139,6 +137,250 @@ REQUIRED_TABLES = (
     # without going back to the full extract.
     "clif_hospital_diagnosis",
 )
+
+
+#: absent, these do not stop the run -- they quietly change what it reports, so
+#: each gets a line of its own saying what goes wrong
+DEGRADES_QUIETLY: dict[str, str] = {
+    "clif_hospital_diagnosis": (
+        "every diagnosis-based criterion reads as not met, so coded shock type "
+        "and trial eligibility are understated rather than errored"
+    ),
+    "clif_patient_procedures": (
+        "IABP, ECMO and microaxial flags all read false, so device concordance "
+        "is silently wrong rather than absent"
+    ),
+    "clif_crrt_therapy": "renal support is invisible",
+    "clif_code_status": "limitation-of-treatment context is lost",
+}
+
+
+def preflight(paths, sites, logger) -> bool:
+    """
+    check this machine can do the run, before anything expensive starts
+
+    Reads configuration and lists directories. Opens no data file, so it is
+    safe anywhere and takes a second. Returns True if the run can proceed.
+
+    Runs automatically at the start of every invocation, and on its own with
+    `--check`. Automatically, because the two failures it catches -- a path
+    that does not resolve and a table that is absent -- otherwise surface
+    hours in, somewhere in the middle of `derive`, as an error about a column.
+    """
+    ok = True
+
+    def line(label, value, good, note=""):
+        nonlocal ok
+        if not good:
+            ok = False
+        # failures at ERROR, so they survive a log filtered to warnings and
+        # above -- which is how anyone reads a log they were sent
+        emit = logger.info if good else logger.error
+        emit(f"  [{'ok  ' if good else 'FAIL'}] {label:<16} {value}")
+        if note:
+            emit(f"         {note}")
+
+    logger.info("--- checking this machine ---")
+    logger.info(f"  python           {sys.version.split()[0]}")
+    logger.info(f"  platform         {platform.system()} {platform.machine()}")
+
+    logger.info("sites")
+    for site in sites:
+        directory = paths.site_data[site]
+        if not directory.is_dir():
+            line(site, directory, False, "directory not found")
+            continue
+        present = {f.stem for f in directory.glob("clif_*.parquet")}
+        missing = [t for t in REQUIRED_TABLES if t not in present]
+        line(
+            site,
+            directory,
+            not missing,
+            f"all {len(REQUIRED_TABLES)} required tables present "
+            f"({len(present)} clif_* files in the directory)"
+            if not missing
+            else f"MISSING {len(missing)} of {len(REQUIRED_TABLES)} required tables",
+        )
+        for table in missing:
+            logger.info(f"           - {table}.parquet")
+            note = DEGRADES_QUIETLY.get(table)
+            if note:
+                logger.info(f"               {note}")
+        # A count is not the check. Sites ship different extras, so the union is
+        # larger than the required set at every site and matching on a count
+        # would pass a directory missing a required table and holding two it
+        # never reads.
+        extra = sorted(present - set(REQUIRED_TABLES))
+        if extra:
+            logger.info(f"         also present, never read: {', '.join(extra)}")
+
+    logger.info("where this run will write")
+    for label, target in (
+        ("output_home", paths.output_home),
+        ("scratch_home", paths.scratch_home),
+    ):
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            probe = target / ".write-probe"
+            probe.touch()
+            probe.unlink()
+            line(label, target, True)
+        except Exception as exc:
+            line(label, target, False, f"not writable: {exc}")
+
+    if not ok:
+        logger.error("--- check FAILED; fix the lines marked FAIL above ---")
+        logger.error(
+            "    paths come from code/config/paths.yaml. Copy "
+            "code/config/paths.example.yaml to it if you have not."
+        )
+    else:
+        logger.info("--- check passed ---")
+    return ok
+
+#: one line per stage, printed when it starts. A reader watching a long run
+#: should be able to tell what is happening without opening this file.
+STAGE_PURPOSE: dict[str, str] = {
+    "cohort": "identifying the shock cohort and attaching labels",
+    "subset": "cutting the CLIF tables down to the cohort",
+    "derive": "deriving respiratory support, dose equivalents and SOFA (slow)",
+    "collate": "assembling one timeline per patient (slow)",
+    "tokenize": "encoding each timeline",
+    "winnow": "cutting each timeline at the 24h and onset anchors",
+    "tokencounts": "counting token prevalence",
+    "baseline": "summarising physiology by coded mechanism",
+    "trials": "scoring trial eligibility, IQR position and guideline fit",
+    "export": "assembling the directory to send",
+}
+
+#: what a reader should look at first when a given stage fails. Keyed by stage,
+#: appended to the failure report -- a traceback says where the code broke, and
+#: this says where the *cause* usually is, which is rarely the same place.
+STAGE_HINT: dict[str, str] = {
+    "cohort": (
+        "check that clif_hospitalization, clif_adt, clif_vitals and "
+        "clif_labs are populated and not just present. Run --check."
+    ),
+    "subset": (
+        "usually a disk or permissions problem under scratch_home, or a CLIF "
+        "table with an unexpected column type."
+    ),
+    "derive": (
+        "the most memory-hungry stage. If the process was killed rather than "
+        "raising, it ran out of memory -- rerun with more, or one site at a "
+        "time with --site."
+    ),
+    "collate": (
+        "also memory-hungry, and it reads what `derive` wrote: if `derive` "
+        "half-finished, rerun it with --stage derive --force first."
+    ),
+    "tokenize": (
+        "reads what `collate` wrote. Rerun --stage collate --force if its "
+        "output looks truncated."
+    ),
+    "winnow": (
+        "reads what `tokenize` wrote into scratch. Rerun --stage tokenize "
+        "--force first."
+    ),
+    "tokencounts": "reads the winnowed timelines; rerun --stage winnow --force.",
+    "baseline": (
+        "reads raw CLIF for physiology at onset, so a missing or empty "
+        "clif_vitals or clif_labs shows up here."
+    ),
+    "trials": (
+        "reads raw CLIF plus what `derive` wrote. A missing "
+        "clif_hospital_diagnosis or clif_patient_procedures degrades this "
+        "stage rather than failing it, so a hard failure here is usually a "
+        "column type."
+    ),
+    "export": (
+        "every table is re-checked against the minimum cell size before it is "
+        "written. A failure naming a column and a cell count means a table "
+        "reached export unsuppressed -- that is a bug, not a configuration "
+        "problem; report it with the column name."
+    ),
+}
+
+
+class StageFailed(Exception):
+    """a stage raised; carries what is needed to report it usefully"""
+
+    def __init__(self, stage: str, cause: BaseException):
+        super().__init__(f"stage {stage!r} failed: {cause}")
+        self.stage = stage
+        self.cause = cause
+
+
+def _origin(cause: BaseException) -> str:
+    """
+    the deepest frame inside this repository, as file:line in function
+
+    Not the deepest frame overall: that is usually inside polars or pandas and
+    says nothing actionable. The last frame under `code/` is the line in this
+    pipeline that led there, which is the one worth printing.
+    """
+    here = pathlib.Path(__file__).resolve().parent
+    frames = [
+        frame
+        for frame in traceback.extract_tb(cause.__traceback__)
+        if (
+            here in pathlib.Path(frame.filename).resolve().parents
+            or pathlib.Path(frame.filename).resolve().parent == here
+        )
+        # `run_stage` is in this file and is always in the chain, so without
+        # excluding it a failure that happened entirely inside a dependency
+        # would be reported at the line that called the stage -- which looks
+        # like an answer and is not one.
+        and frame.name != "run_stage"
+    ]
+    if not frames:
+        return "no frame inside code/ -- the failure is in a dependency"
+    frame = frames[-1]
+    rel = pathlib.Path(frame.filename).resolve().relative_to(here.parent)
+    return f"{rel.as_posix()}:{frame.lineno} in {frame.name}()"
+
+
+def run_stage(name, position, total, logger, fn, *args, **kwargs):
+    """
+    run one stage, announcing it and timing it, and label any failure with it
+
+    The announcement is the checkpoint: a run that dies leaves a log whose last
+    `started` line names the stage, so the resume point is readable without a
+    traceback. The timing is there because `derive` and `collate` take long
+    enough that a reader needs to know whether a quiet run is working or hung.
+    """
+    logger.info(f"=== [{position}/{total}] {name}: {STAGE_PURPOSE.get(name, '')}")
+    started = time.monotonic()
+    try:
+        result = fn(*args, **kwargs)
+    except Exception as cause:
+        raise StageFailed(name, cause) from cause
+    logger.info(
+        f"=== [{position}/{total}] {name} finished in "
+        f"{time.monotonic() - started:,.0f}s"
+    )
+    return result
+
+
+def report_failure(failure: StageFailed, logger) -> None:
+    """print what failed, where, and how to pick up from there"""
+    stage = failure.stage
+    cause = failure.cause
+    logger.error("=" * 70)
+    logger.error(f"STAGE FAILED: {stage} -- {STAGE_PURPOSE.get(stage, '')}")
+    logger.error("")
+    logger.error(f"  {type(cause).__name__}: {cause}")
+    logger.error(f"  raised at   {_origin(cause)}")
+    hint = STAGE_HINT.get(stage)
+    if hint:
+        logger.error(f"  look at     {hint}")
+    logger.error("")
+    logger.error("  resume from this stage once it is fixed:")
+    logger.error(f"      python code/01_site_tables.py --from-stage {stage}")
+    logger.error("")
+    logger.error("  earlier stages are not redone unless you pass --force.")
+    logger.error("=" * 70)
+    logger.error("full traceback follows", exc_info=cause)
 
 
 # ============================================================ stage: cohort
@@ -414,13 +656,13 @@ def stage_collate(paths, sites, logger, force: bool) -> None:
 
 def stage_tokenize(paths, sites, logger, force: bool) -> None:
     """
-    cocoa tokenize under the model's own frozen tokenizer
+    encode each timeline under the shared frozen encoding
 
-    Loading the training-time tokenizer (rather than learning a new one) is the
-    whole point: the model's 1344-row embedding table is only meaningful under
-    that exact token -> id mapping, and the decile bin edges have to be the ones
-    the numeric values were binned with during training. Codes the training data
-    never contained map to UNK (id 0).
+    Applying the shared encoding rather than learning a local one is the whole
+    point: the decile bin edges have to be the ones every site is using, or the
+    same clinical event gets a different id here than elsewhere and the
+    prevalence tables stop being comparable. Codes the encoding does not contain
+    map to UNK (id 0).
     """
     from cocoa.tokenizer import Tokenizer
 
@@ -437,7 +679,8 @@ def stage_tokenize(paths, sites, logger, force: bool) -> None:
         if tokenizer.is_training:
             raise RuntimeError(
                 "tokenizer is still in training mode; it would relearn the "
-                "vocabulary and invalidate the model's embeddings"
+                "vocabulary, which would make the token ids local to this "
+                "site and not comparable with any other"
             )
         tokenizer.save_all()
         logger.info(f"[{site}] vocabulary size {len(tokenizer)}")
@@ -872,13 +1115,10 @@ def stage_trials(paths, sites, logger, min_cell: int) -> None:
 
 def stage_export(paths, sites, logger, min_cell: int) -> None:
     """
-    assemble the aggregate bundle each site sends
+    assemble the directory this site sends
 
-    No purity here any more. Phenotype coherence in the embedding space needs
-    the embeddings, so it moved to 02 along with the rest of the GPU work --
-    which means a tier-1-only site no longer reports it. That is a real loss:
-    it was the one substantive thing tier 1 said beyond counts. It is the price
-    of tier 1 being runnable without a GPU and without an agreement.
+    Every table is re-checked against `min_cell` on the way in, so a table
+    assembled by some other route cannot reach the directory unsuppressed.
     """
     from clifcs.export import contract, writer
 
@@ -902,11 +1142,9 @@ def stage_export(paths, sites, logger, min_cell: int) -> None:
         )
 
     logger.info(
-        "01 done. output/upload_to_box_<SITE>/ holds summary tables only -- "
-        "aggregate, suppressed, and safe to upload. No GPU was needed and the "
-        "GEM weights were never loaded. Run 02_site_embeddings.py only if your "
-        "consortium permits patient-level transfer; without it this bundle is "
-        "already a complete contribution."
+        "the directory holds summary tables only -- every number a count, a "
+        f"share or a median over at least {min_cell} patients, re-checked on "
+        "the way in."
     )
 
 
@@ -914,7 +1152,12 @@ def stage_export(paths, sites, logger, min_cell: int) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        # the docstring is a stage table and two command blocks; the default
+        # formatter reflows it into a single paragraph and loses both
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument(
         "--stage", choices=("all", *STAGES), default="all", help="run a single stage"
     )
@@ -929,6 +1172,18 @@ def main() -> None:
     )
     parser.add_argument(
         "--force", action="store_true", help="redo stages whose outputs already exist"
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="verify configuration and input tables, then exit without running "
+        "anything. Opens no data file; safe to run first",
+    )
+    parser.add_argument(
+        "--skip-check",
+        action="store_true",
+        help="do not run the startup check. Only useful if a check is wrong "
+        "about something you know to be fine",
     )
     parser.add_argument(
         "--phenotype-model",
@@ -969,7 +1224,31 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    paths = load_paths()
+    # Configuration first, and on its own, because it is the most common thing
+    # to be wrong and a bare traceback from inside the loader does not say that
+    # it IS configuration. No logger yet -- the log file lives under a path this
+    # has to resolve before it can be opened.
+    try:
+        paths = load_paths()
+    except Exception as exc:
+        print("=" * 70, file=sys.stderr)
+        print("COULD NOT READ THE CONFIGURATION", file=sys.stderr)
+        print("", file=sys.stderr)
+        print(f"  {type(exc).__name__}: {exc}", file=sys.stderr)
+        print("", file=sys.stderr)
+        print(
+            "  Configuration lives in code/config/paths.yaml. If you have not "
+            "made one yet:",
+            file=sys.stderr,
+        )
+        print(
+            "      cp code/config/paths.example.yaml code/config/paths.yaml",
+            file=sys.stderr,
+        )
+        print("  then set the path to this site's CLIF directory.", file=sys.stderr)
+        print("=" * 70, file=sys.stderr)
+        raise SystemExit(1) from exc
+
     paths.mkdirs()
     cfg = load_cohort_cfg()
     sepsis_cfg = OmegaConf.load(CONFIG_HOME / "phenotypes_sepsis.yaml")
@@ -982,6 +1261,19 @@ def main() -> None:
         if path
     }
     logger = get_logger("01_site_tables", paths.log_home / "01_site_tables.log")
+
+    if args.site and args.site not in paths.sites:
+        parser.error(
+            f"--site {args.site} is not in paths.yaml, which has: "
+            f"{', '.join(paths.sites) or '(none)'}"
+        )
+
+    # --check: verify and stop, before any of the phenotype bookkeeping below.
+    if args.check:
+        raise SystemExit(
+            0 if preflight(paths, (args.site,) if args.site else paths.sites, logger)
+            else 1
+        )
 
     # ------------------------------------------------------------------
     # Refusing to refit by accident.
@@ -1068,67 +1360,110 @@ def main() -> None:
         todo = STAGES
     else:
         todo = (args.stage,)
-    if args.site and args.site not in paths.sites:
-        parser.error(f"--site {args.site} is not configured; have {paths.sites}")
     sites = (args.site,) if args.site else paths.sites
     logger.info(f"stages: {', '.join(todo)} | sites: {', '.join(sites)}")
+    logger.info(f"  output_home   {paths.output_home}")
+    logger.info(f"  scratch_home  {paths.scratch_home}")
+    logger.info(
+        f"  tokenizer     {paths.tokenizer_yaml_or_none or 'NONE -- token stages will be skipped'}"
+    )
 
-    cohort_file = paths.cohort_home / "cohort.parquet"
-    cohort = None
-
-    if "cohort" in todo:
-        cohort = stage_cohort(
-            paths,
-            cfg,
-            logger,
-            args.phenotype_model,
-            sepsis_cfg=sepsis_cfg,
-            sepsis_models=sepsis_models,
+    # The same check `--check` runs, on every invocation. It costs a second and
+    # catches the two failures that otherwise surface hours later from inside
+    # `derive` as an error about a column.
+    if not args.skip_check and not preflight(paths, sites, logger):
+        logger.error(
+            "startup check failed, so nothing was run. Fix the lines above, or "
+            "pass --skip-check if you are certain the check is wrong."
         )
-    if "subset" in todo:
-        if cohort is None:
-            if not cohort_file.is_file():
-                parser.error(f"{cohort_file} not found; run --stage cohort first")
-            cohort = pl.read_parquet(cohort_file)
-        stage_subset(paths, cohort, sites, logger, args.force)
-    if "derive" in todo:
-        stage_derive(paths, sites, logger, args.force)
-    if "collate" in todo:
-        stage_collate(paths, sites, logger, args.force)
+        raise SystemExit(1)
+
     # The token stages, or an explanation of why they are not running. One
     # message for the group rather than three, and at WARNING so it survives a
-    # long log -- a bundle silently missing token_prevalence is the kind of gap
-    # the coordinating site finds out about weeks later.
+    # long log.
     wanted_token_stages = [stage for stage in TOKEN_STAGES if stage in todo]
     if wanted_token_stages and not paths.has_tokenizer:
         logger.warning(
-            f"SKIPPING {', '.join(wanted_token_stages)}: no training-time "
-            "tokenizer on this machine. Set `tokenizer_yaml` in paths.yaml to "
+            f"SKIPPING {', '.join(wanted_token_stages)}: no tokenizer is "
+            "configured on this machine. Set `tokenizer_yaml` in paths.yaml to "
             "include them."
         )
         logger.warning(
-            "  the bundle will carry no token_prevalence, no token_families "
-            "and no token_levels, so this site will not appear in the "
-            "token-space decomposition of the site effect. Everything else -- "
-            "cohort, phenotypes, baseline, trials and guidelines -- is "
-            "unaffected and is still a complete contribution."
+            "  the output directory will carry no token_prevalence, no "
+            "token_families and no token_levels. Everything else -- cohort, "
+            "phenotypes, baseline, trials and guidelines -- is unaffected."
         )
         todo = tuple(stage for stage in todo if stage not in TOKEN_STAGES)
 
-    if "tokenize" in todo:
-        stage_tokenize(paths, sites, logger, args.force)
-    if "winnow" in todo:
-        stage_winnow(paths, sites, logger, args.force)
-    if "tokencounts" in todo:
-        stage_tokencounts(paths, sites, logger, args.min_cell)
-    if "baseline" in todo:
-        stage_baseline(paths, sites, logger, args.min_cell)
-    if "trials" in todo:
-        stage_trials(paths, sites, logger, args.min_cell)
+    cohort_file = paths.cohort_home / "cohort.parquet"
+    cohort = None
+    total = len(todo)
+
+    try:
+        for position, stage in enumerate(todo, start=1):
+            if stage == "cohort":
+                cohort = run_stage(
+                    stage, position, total, logger,
+                    stage_cohort,
+                    paths, cfg, logger, args.phenotype_model,
+                    sepsis_cfg=sepsis_cfg, sepsis_models=sepsis_models,
+                )
+            elif stage == "subset":
+                if cohort is None:
+                    if not cohort_file.is_file():
+                        logger.error(
+                            f"{cohort_file} does not exist, and the `subset` "
+                            "stage reads it. Run the cohort stage first:\n"
+                            "    python code/01_site_tables.py --stage cohort"
+                        )
+                        raise SystemExit(1)
+                    cohort = pl.read_parquet(cohort_file)
+                run_stage(
+                    stage, position, total, logger,
+                    stage_subset, paths, cohort, sites, logger, args.force,
+                )
+            elif stage == "derive":
+                run_stage(stage, position, total, logger,
+                          stage_derive, paths, sites, logger, args.force)
+            elif stage == "collate":
+                run_stage(stage, position, total, logger,
+                          stage_collate, paths, sites, logger, args.force)
+            elif stage == "tokenize":
+                run_stage(stage, position, total, logger,
+                          stage_tokenize, paths, sites, logger, args.force)
+            elif stage == "winnow":
+                run_stage(stage, position, total, logger,
+                          stage_winnow, paths, sites, logger, args.force)
+            elif stage == "tokencounts":
+                run_stage(stage, position, total, logger,
+                          stage_tokencounts, paths, sites, logger, args.min_cell)
+            elif stage == "baseline":
+                run_stage(stage, position, total, logger,
+                          stage_baseline, paths, sites, logger, args.min_cell)
+            elif stage == "trials":
+                run_stage(stage, position, total, logger,
+                          stage_trials, paths, sites, logger, args.min_cell)
+            elif stage == "export":
+                run_stage(stage, position, total, logger,
+                          stage_export, paths, sites, logger, args.min_cell)
+    except StageFailed as failure:
+        report_failure(failure, logger)
+        raise SystemExit(1) from failure
+
     if "export" in todo:
-        stage_export(paths, sites, logger, args.min_cell)
+        logger.info("")
+        logger.info("=" * 70)
+        logger.info("DONE. Send this directory:")
+        for site in sites:
+            logger.info(f"    {paths.upload_home(site)}")
+        logger.info("")
+        logger.info(
+            "Everything in it is a count, a share or a median over at least "
+            f"{args.min_cell} patients."
+        )
+        logger.info("=" * 70)
     else:
-        logger.info("01 done")
+        logger.info(f"done: {', '.join(todo)}")
 
 
 if __name__ == "__main__":

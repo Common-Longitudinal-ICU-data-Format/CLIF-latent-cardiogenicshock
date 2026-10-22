@@ -372,7 +372,19 @@ def write_counts(paths, bundle: pathlib.Path, min_cell: int, logger, site=None) 
             table.write_csv(out / name)
             logger.info(f"  counts/{name} ({table.height} rows)")
 
-        for pattern in ("token_prevalence", "token_families"):
+        # Gated on the tokenizer, not merely on what is lying in cohort_home.
+        # These tables are token ids, and the manifest's `tokenizer_sha256` is
+        # what makes them comparable across sites -- so shipping them with a
+        # null hash would be worse than not shipping them, since the
+        # coordinator has no way to tell which mapping they are in.
+        #
+        # The glob alone was not enough: on a machine that HAD a tokenizer for
+        # an earlier run, last run's token tables are still in cohort_home and
+        # were picked up by a run that had skipped the token stages entirely.
+        token_patterns = (
+            ("token_prevalence", "token_families") if paths.has_tokenizer else ()
+        )
+        for pattern in token_patterns:
             for source in sorted(
                 paths.cohort_home.glob(f"{pattern}_{site}_anchor-*.csv")
             ):

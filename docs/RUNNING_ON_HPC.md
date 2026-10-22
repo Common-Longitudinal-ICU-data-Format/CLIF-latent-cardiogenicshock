@@ -18,11 +18,21 @@ Job scripts referenced here are in [`hpc/`](../hpc/).
 ## The GPU is tier 2 only
 
 **Tier 1 never loads the GEM weights**, and does not need them on disk.
-`01_site_tables.py` runs ten stages, all CPU. It loads the frozen *tokenizer*,
-which is a different file. `models.<key>.home_glob` in `paths.yaml` is resolved
-on access, so for a tier-1 run it may point at nothing. Only
-`02_site_embeddings.py` touches the GPU, and only a site with a patient-level
-agreement runs it at all.
+`01_site_tables.py` runs ten stages, all CPU. Three of them -- `tokenize`,
+`winnow`, `tokencounts` -- load the frozen *tokenizer*, which is a different
+file from the weights; the other seven read CLIF and the published literature
+and see no token at all.
+
+Both are resolved on access rather than at config load, so **neither can stop a
+tier-1 run**:
+
+| `paths.yaml` key | absent means |
+|---|---|
+| `models.<key>.home_glob` | `02_site_embeddings.py` and `08_token_space.py` refuse to start. `01` is unaffected |
+| `tokenizer_yaml` | `01` skips the three token stages with a warning and exports everything else. The bundle carries no token tables and a null tokenizer hash |
+
+Only `02_site_embeddings.py` touches the GPU, and only a site with a
+patient-level agreement runs it at all.
 
 | script | stage | resource | what it does |
 |---|---|---|---|
@@ -53,8 +63,9 @@ The phenotype models are in git, at [`models/`](../models/) — cloning the repo
 is enough. These are not, and must be copied in by whatever route the
 consortium uses:
 
-- `tokenizer.yaml` — **the one the model was trained with**. Required for tier
-  1 as well as tier 2
+- `tokenizer.yaml` — **the one the model was trained with**. Needed by the
+  three token stages and by tier 2, and **optional**: without it `01` skips
+  `tokenize`, `winnow` and `tokencounts` and exports everything else
 - the checkpoint directory `mdl-cotorra/` (`config.json`, `model.safetensors`)
   — **tier 2 only**. A site asked for the aggregate tables alone does not need
   it, and tier 1 runs without it

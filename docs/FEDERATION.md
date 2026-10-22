@@ -100,9 +100,16 @@ patients. This is the classic CLIF federated contribution.
 
 **It needs no GPU and never loads the GEM weights** — they need not be on the
 machine at all, since `models.<key>.home_glob` is resolved on access rather than
-at config load. It loads the *tokenizer*, which is a different file, because the
-token-prevalence table is built from the token stream. A site with no GPU, or
-with no agreement permitting patient-level transfer, runs this and stops.
+at config load. Three of its ten stages load the *tokenizer*, which is a
+different file, because the token-prevalence table is built from the token
+stream; **that too is optional**, and without it those three are skipped and the
+other seven export normally. A site with no GPU, no tokenizer, or no agreement
+permitting patient-level transfer runs this and stops.
+
+The one key with no fallback is `sites.<NAME>.data_dir`. Weights, tokenizer,
+scratch and output all either degrade or default, which is deliberate: every
+prerequisite that fails at config load is a site that contributes nothing rather
+than almost everything.
 
 A bundle produced without the weights carries a null model hash in its manifest,
 which is correct: nothing was loaded, so there is nothing for the coordinator to

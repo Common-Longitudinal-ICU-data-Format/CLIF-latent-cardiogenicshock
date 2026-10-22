@@ -63,16 +63,25 @@ python code/clifcs/export/contract.py
 | | |
 |---|---|
 | CLIF 2.1 tables | `clif_adt, clif_code_status, clif_crrt_therapy, clif_hospital_diagnosis, clif_hospitalization, clif_labs, clif_medication_admin_continuous, clif_medication_admin_intermittent, clif_patient, clif_patient_assessments, clif_patient_procedures, clif_position, clif_respiratory_support, clif_vitals` |
-| **Tokenizer** | `tokenizer.yaml` — the one the model was **trained** with. Required |
+| **Tokenizer** | `tokenizer.yaml` — the one the model was **trained** with. **Optional**: without it the token stages are skipped and everything else still exports |
 | Phenotype models | shipped in [`models/`](../models/). Nothing to fetch |
 | Hardware | CPU only. No GPU, and the GEM weights are not needed |
 | Python | 3.11 or newer |
 | Disk | roughly 40× the size of the cohort's raw tables, on scratch |
 
-The tokenizer is the part people get wrong. The numeric bin edges are baked into
-the token names, so a tokenizer learned locally maps the same clinical event to
-a different id and the token-prevalence tables stop being comparable across
-sites. Ship `tokenizer.yaml` with the weights even if you only run tier 1.
+The tokenizer is the part people get wrong, which is why it is no longer
+required. The numeric bin edges are baked into the token names, so a tokenizer
+learned locally maps the same clinical event to a different id and the
+token-prevalence tables stop being comparable across sites. Either ship the
+training-time `tokenizer.yaml` or leave `tokenizer_yaml` unset -- `01` then
+skips `tokenize`, `winnow` and `tokencounts` with a warning and exports
+everything else. A bundle with no tokenizer hash carries no token tables at all,
+deliberately: counts in an unidentified mapping are worse than no counts.
+
+What you lose is the token-prevalence comparison, which is what the site effect
+is decomposed with. What you keep is the cohort, the three phenotype
+breakdowns, the baseline tables and the whole trial and guideline analysis --
+none of which read a token.
 
 Four of the CLIF tables **degrade the run quietly rather than stopping it** if
 they are present but unpopulated, so check them rather than assuming:
