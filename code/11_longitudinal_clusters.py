@@ -39,7 +39,7 @@ from clifcs.longitudinal import (
     growth_clusters,
     growth_coefficients,
     sequence_clusters,
-    shuffled_null,
+    state_movement,
     split_half_stability,
 )
 from clifcs.tokens import vocabulary
@@ -49,10 +49,21 @@ from clifcs.windows import (
     window_token_counts,
 )
 
-#: +0h to +48h in six-hour steps. The -24h to -6h points are excluded on
-#: purpose: a patient only has them if they were admitted before shock onset,
-#: so including them would cluster partly on admission timing.
-OFFSETS = [float(h) for h in range(0, 49, 6)]
+#: +0h to +168h in six-hour steps -- seven days, 29 window positions. The
+#: -24h to -6h points are excluded on purpose: a patient only has them if they
+#: were admitted before shock onset, so including them would cluster partly on
+#: admission timing.
+#:
+#: Seven days changes what absence means. Over 48h nearly every enrolled
+#: patient is still being charted, so an empty window is a recording gap. Over
+#: seven days most are not -- median ICU stay in these strata runs 1.8 to 11.4
+#: days -- so a trailing run of empty windows is mostly discharge or death.
+#: That is informative, and it is also partly the outcome, so `--min-windows`
+#: fixes how much of the acute phase a patient must have before they can be
+#: clustered at all, and the share of each cluster's windows that are empty is
+#: reported so the contribution of record length is visible rather than
+#: assumed away.
+OFFSETS = [float(h) for h in range(0, 169, 6)]
 STEP_HOURS = 6.0
 
 
@@ -142,6 +153,133 @@ def site_composition(frame: pl.DataFrame, label: str, sites, logger) -> None:
         logger.info(f"    {row[label]}  n={n:>6,}  {spread}")
 
 
+def differential_within_cluster(
+    counts, labels_frame, token_ids, names, label: str, logger,
+    min_cell: int = 11, top: int = 8,
+):
+    """
+    within each severity stratum, what separates the patients who died
+
+    The clusters stratify by severity, so a token enriched among deaths across
+    the whole cohort tells you mainly that sicker patients die. Asking the
+    question INSIDE a stratum holds severity roughly fixed and asks what
+    distinguishes outcome among patients who look similarly sick -- which is
+    the question worth asking of a severity stratification, rather than a
+    reason to discard it.
+
+    Prevalence is per PATIENT (did this token ever appear in their windows),
+    not per window, so a patient charted twice as often does not count twice.
+    Cells below `min_cell` patients are not reported, on the same CMS
+    small-cell rule the rest of the pipeline uses.
+
+    Bonferroni is over every token-by-stratum test performed, not per stratum,
+    because the strata are examined together and correcting within each would
+    under-correct the family that is actually being looked at.
+    """
+    from scipy.stats import chi2_contingency
+
+    patients = labels_frame.select("hospitalization_id", label, "in_hospital_mortality")
+    patients = patients.filter(pl.col("in_hospital_mortality").is_not_null())
+    present = (
+        counts.filter(pl.col("token_id").is_in(list(token_ids)))
+        .select("hospitalization_id", "token_id")
+        .unique()
+        .join(patients, on="hospitalization_id", how="inner")
+    )
+    if present.is_empty():
+        logger.warning("no tokens to test within clusters")
+        return pl.DataFrame()
+
+    strata = sorted(patients[label].unique().to_list())
+    denominators = (
+        patients.group_by(label, "in_hospital_mortality").len()
+        .pivot(on="in_hospital_mortality", index=label, values="len")
+        .fill_null(0)
+    )
+    died_col = "true" if "true" in denominators.columns else "True"
+    alive_col = "false" if "false" in denominators.columns else "False"
+    if died_col not in denominators.columns or alive_col not in denominators.columns:
+        logger.warning(f"mortality column not two-valued: {denominators.columns}")
+        return pl.DataFrame()
+    totals = {
+        row[label]: (row[died_col], row[alive_col])
+        for row in denominators.iter_rows(named=True)
+    }
+
+    hits = (
+        present.group_by(label, "token_id", "in_hospital_mortality").len()
+        .pivot(on="in_hospital_mortality", index=[label, "token_id"], values="len")
+        .fill_null(0)
+    )
+
+    rows = []
+    for row in hits.iter_rows(named=True):
+        stratum = row[label]
+        died_n, alive_n = totals.get(stratum, (0, 0))
+        died_hit, alive_hit = row.get(died_col, 0), row.get(alive_col, 0)
+        if min(died_hit, alive_hit) < min_cell:
+            continue
+        table = np.array([
+            [died_hit, died_n - died_hit],
+            [alive_hit, alive_n - alive_hit],
+        ])
+        # Both marginals, not just the rows. A token present in every patient
+        # of one outcome group leaves a zero column marginal, and chi2 then
+        # divides by a zero expected frequency. Such a token is also
+        # uninformative by construction -- it does not vary within the stratum.
+        if (
+            (table < 0).any()
+            or table.sum(axis=1).min() == 0
+            or table.sum(axis=0).min() == 0
+        ):
+            continue
+        chi2, p, _, _ = chi2_contingency(table, correction=False)
+        died_rate = died_hit / max(died_n, 1)
+        alive_rate = alive_hit / max(alive_n, 1)
+        rows.append({
+            label: stratum,
+            "token": names.get(int(row["token_id"]), str(row["token_id"])),
+            "died_prevalence": died_rate,
+            "survived_prevalence": alive_rate,
+            "log2_ratio": float(np.log2(max(died_rate, 1e-9) / max(alive_rate, 1e-9))),
+            "p": float(p),
+        })
+
+    if not rows:
+        logger.warning("every token-by-stratum cell fell below the small-cell floor")
+        return pl.DataFrame()
+
+    table = pl.DataFrame(rows)
+    table = table.with_columns(
+        p_adjusted=(pl.col("p") * table.height).clip(upper_bound=1.0)
+    ).sort("p")
+    significant = table.filter(pl.col("p_adjusted") < 0.05)
+    logger.info(
+        f"  died vs survived within {label}: {table.height:,} tests, "
+        f"{significant.height:,} significant after Bonferroni"
+    )
+    for stratum in strata:
+        part = significant.filter(pl.col(label) == stratum)
+        if part.is_empty():
+            logger.info(f"    {stratum}: nothing survives correction")
+            continue
+        up = part.filter(pl.col("log2_ratio") > 0).sort("log2_ratio", descending=True)
+        down = part.filter(pl.col("log2_ratio") < 0).sort("log2_ratio")
+        died_n, alive_n = totals.get(stratum, (0, 0))
+        logger.info(
+            f"    {stratum} ({died_n:,} died, {alive_n:,} survived), "
+            f"{part.height} tokens differ:"
+        )
+        for direction, rows_ in (("enriched in deaths", up), ("enriched in survivors", down)):
+            for r in rows_.head(top).iter_rows(named=True):
+                logger.info(
+                    f"      {direction:<22} {r['token']:<32} "
+                    f"{r['died_prevalence']:>6.1%} vs {r['survived_prevalence']:>6.1%}  "
+                    f"log2 {r['log2_ratio']:+.2f}"
+                )
+    return table
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--subset", default="septic",
@@ -154,6 +292,12 @@ def main() -> None:
                         help="largest allowed between-site prevalence ratio for "
                              "a token to enter the feature space")
     parser.add_argument("--min-prevalence", type=float, default=0.01)
+    parser.add_argument(
+        "--min-windows", type=int, default=8,
+        help="how many of the EARLIEST windows a patient must be charted in to "
+             "be clustered; 8 is the first 48h. Trailing windows may be empty, "
+             "which over seven days mostly means discharge or death.",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--model", default=None)
     parser.add_argument("--role", choices=("site", "pooled"), default=None)
@@ -188,11 +332,17 @@ def main() -> None:
         counts, token_ids, OFFSETS, logger
     )
 
-    # a patient needs something recorded in most windows to have a trajectory
-    enough = (volume > 0).sum(axis=1) >= len(OFFSETS) - 2
+    # A patient needs a complete enough ACUTE phase to be comparable, and is
+    # then allowed to run out of record. Requiring coverage across all 29
+    # windows would keep only patients who stayed a week, which is survivorship
+    # selection that removes the fulminant group entirely -- the one with the
+    # highest mortality.
+    early = int(args.min_windows)
+    enough = (volume[:, :early] > 0).sum(axis=1) >= early - 1
     logger.info(
         f"{int(enough.sum()):,} of {len(patients):,} patients have tokens in at "
-        f"least {len(OFFSETS) - 2} of {len(OFFSETS)} windows"
+        f"least {early - 1} of the first {early} windows "
+        f"(through {OFFSETS[early - 1]:+.0f}h)"
     )
     patients = [p for p, k in zip(patients, enough) if k]
     matrix, volume = matrix[enough], volume[enough]
@@ -226,40 +376,15 @@ def main() -> None:
     agreement = adjusted_rand_score(sequence_labels, growth_labels)
     logger.info(f"  the two methods agree: ARI {agreement:.3f}")
 
-    # the temporal null: same pipeline, windows permuted within each patient
-    null_matrix = shuffled_null(matrix, args.states, args.clusters, args.seed, logger)
-    null_states, _nt, _nm = care_states(
-        null_matrix, args.states, args.seed, logger
-    )
-    null_labels, null_one_hot = sequence_clusters(
-        null_states, args.clusters, args.seed, logger
-    )
-    null_growth_features = np.column_stack([
-        growth_coefficients(_nt, logger),
-        growth_coefficients(volume[:, :, None], logger),
-    ])
-    null_growth_labels, null_growth_scaled, _nb = growth_clusters(
-        null_growth_features, args.clusters, args.seed, logger
-    )
-
-    def quality(x, labels):
-        return silhouette_score(
-            x, labels, sample_size=min(5000, len(x)), random_state=args.seed
+    state_movement(states, sequence_labels, logger)
+    empty = (volume == 0).mean(axis=1)
+    logger.info("  share of each cluster's windows with nothing recorded:")
+    for cluster in sorted(set(sequence_labels.tolist())):
+        mask = sequence_labels == cluster
+        logger.info(
+            f"    S{cluster + 1}: {empty[mask].mean():.1%} "
+            f"(a proxy for how much of the week the patient was still in record)"
         )
-
-    logger.info("  time-shuffled null, silhouette real vs shuffled:")
-    logger.info(
-        f"    state sequences      {quality(one_hot, sequence_labels):.3f}  vs  "
-        f"{quality(null_one_hot, null_labels):.3f}"
-    )
-    logger.info(
-        f"    latent class growth  {quality(growth_scaled, growth_labels):.3f}  vs  "
-        f"{quality(null_growth_scaled, null_growth_labels):.3f}"
-    )
-    logger.info(
-        "    a shuffled score close to the real one means the partition is of "
-        "which states a patient visits, not of the order they visit them in"
-    )
 
     # characterisation
     assignments = pl.DataFrame({
@@ -328,9 +453,28 @@ def main() -> None:
             "--stage plot first."
         )
 
+    names, _families = (
+        vocabulary(str(paths.tokenizer_yaml))
+        if paths.tokenizer_yaml_or_none is not None else ({}, {})
+    )
+    differential = []
     for label in ("sequence_cluster", "growth_cluster"):
         characterise(labels_frame, paths, label, logger)
         site_composition(labels_frame, label, list(paths.sites), logger)
+        table = differential_within_cluster(
+            counts, labels_frame, token_ids, names, label, logger
+        )
+        if not table.is_empty():
+            differential.append(table.with_columns(stratification=pl.lit(label)))
+
+    if differential:
+        out = (
+            paths.output_home / "tables" / paths.model_key
+            / f"cluster_mortality_tokens_{args.subset}.csv"
+        )
+        out.parent.mkdir(parents=True, exist_ok=True)
+        pl.concat(differential, how="diagonal_relaxed").write_csv(out)
+        logger.info(f"wrote {out}")
 
     out = (
         paths.patient_level_home

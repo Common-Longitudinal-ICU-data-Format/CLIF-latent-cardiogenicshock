@@ -202,19 +202,43 @@ def split_half_stability(features, n_clusters, seed, fit, logger, rounds: int = 
     return mean
 
 
-def shuffled_null(matrix, n_states, n_clusters, seed, logger):
+def state_movement(states, labels, logger) -> dict:
     """
-    the same pipeline on patients whose windows have been shuffled in time
+    how much patients actually move between states
 
-    Permuting each patient's windows destroys the ORDER while leaving every
-    other property -- which states a patient visits, how often, the marginal
-    composition -- untouched. So a partition that scores as well here is a
-    partition of the state mixture, not of the trajectory. This is the control
-    that distinguishes "we found longitudinal clusters" from "we found that
-    some patients are sicker".
+    This replaced a time-shuffled null, which was not a meaningful test here.
+    Two things were wrong with it. Silhouette mostly reports that k-means found
+    a compact partition, which it will in almost any feature space, so a high
+    score on shuffled data is not evidence that the real partition is empty.
+    And the windows are anchored to the patient's own shock onset on purpose --
+    that alignment is the design -- so permuting them does not produce a
+    plausible alternative cohort to compare against, it produces noise.
+
+    Counting transitions asks the question directly and the answer is
+    interpretable: if most patients never left their first state then order
+    cannot be carrying much, whatever a silhouette says.
     """
-    rng = np.random.default_rng(seed)
-    shuffled = matrix.copy()
-    for i in range(shuffled.shape[0]):
-        shuffled[i] = shuffled[i][rng.permutation(shuffled.shape[1])]
-    return shuffled
+    changes = (states[:, 1:] != states[:, :-1]).sum(axis=1)
+    distinct = np.array([len(set(row.tolist())) for row in states])
+    static = float((changes == 0).mean())
+    logger.info(
+        f"  state movement: {int((changes > 0).sum()):,} of {len(changes):,} "
+        f"patients ({1 - static:.1%}) change state at least once; "
+        f"median {np.median(changes):.0f} of {states.shape[1] - 1} possible "
+        f"transitions, mean {changes.mean():.2f}"
+    )
+    logger.info(
+        f"    distinct states visited: "
+        + ", ".join(
+            f"{k} in {int((distinct == k).sum()):,}"
+            for k in range(1, int(distinct.max()) + 1)
+        )
+    )
+    for cluster in sorted(set(labels.tolist())):
+        mask = labels == cluster
+        logger.info(
+            f"    cluster {cluster}: n={int(mask.sum()):,}  "
+            f"static {float((changes[mask] == 0).mean()):.1%}  "
+            f"mean changes {changes[mask].mean():.2f}"
+        )
+    return {"static_share": static, "mean_changes": float(changes.mean())}
