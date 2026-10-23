@@ -2404,6 +2404,51 @@ def section_longitudinal(paths, out: list) -> None:
             )
             out.append(tabs(cluster_views))
 
+    individual = []
+    if septic_home is not None:
+        individual.append((
+            "Over the class flow fields",
+            figure(septic_home / "trajectory_paths_over_growth.png", ""),
+        ))
+    individual.append((
+        "Through the 12 factors",
+        figure(
+            paths.output_home / "figures" / "GEM-all"
+            / "longitudinal_patient_factor_paths_septic.png", "",
+        ),
+    ))
+    individual = [(l, b) for l, b in individual if b]
+    if individual:
+        out.append('<h3>Individual patients against the latent classes</h3>')
+        out.append(
+            "<p>The class-level figures are averages over roughly two thousand "
+            "patients each. These are the unsmoothed version, and the point of "
+            "them is to show the gap: a flow field is a mean over tens of "
+            "thousands of six-hour displacements, so a single patient moving "
+            "against it is not a contradiction &mdash; it is what the mean is "
+            "a mean of.</p>"
+        )
+        out.append(
+            "<p>In the first tab each marker is filled white at the earliest "
+            "timepoint through black at the latest, and <b>outlined in the "
+            "colour of the patient's own class</b>, so a path can be matched to "
+            "the field it should be compared against without a legend lookup. "
+            "In the second, the same patients are shown as routes through the "
+            "12 NMF factors on the same circle and ordering as the class-level "
+            "graph; factors a patient never visited stay faint, each visited "
+            "node is outlined white-to-black by timepoint with the hour beside "
+            "it, and the arrows are the patient's own transitions in black.</p>"
+        )
+        out.append(callout(
+            "<b>Check the factors-visited count in each panel title.</b> If a "
+            "patient touches only three or four of the twelve, then the "
+            "class-level factor graph above is a <i>union across patients</i> "
+            "rather than a route anyone took, and 'the class moves through "
+            "these factors' has to be read as a statement about the group, not "
+            "about its members."
+        ))
+        out.append(tabs(individual))
+
     factor_tokens_file = tables_home / "nmf_factor_tokens_septic.csv"
     if factor_tokens_file.is_file():
         out.append('<h3>What each NMF factor is made of</h3>')
