@@ -2219,11 +2219,13 @@ def section_longitudinal(paths, out: list) -> None:
         state_views = [
             (label, figure(septic_home / f"trajectory_{tag}.png", note))
             for tag, label, note in (
-                ("care_state_hex_plurality", "Hexagons, plurality",
+                ("care_state_hex_plurality", "Plurality",
                  "Each hexagon's most common care state"),
-                ("care_state_hex_enrichment", "Hexagons, enrichment",
+                ("care_state_hex_plurality_noflow", "Plurality, no flow", ""),
+                ("care_state_hex_enrichment", "Enrichment",
                  "The care state most concentrated there relative to its own "
                  "total"),
+                ("care_state_hex_enrichment_noflow", "Enrichment, no flow", ""),
                 ("care_state_panels", "One state at a time",
                  "Each care state against the whole cloud"),
             )
@@ -2246,8 +2248,12 @@ def section_longitudinal(paths, out: list) -> None:
             for tag, label, note in (
                 ("nmf_factors", "All twelve factors",
                  "One panel per NMF factor, quantile-ranked"),
-                ("max_factor_hex_enrichment", "Dominant factor by hexagon",
+                ("max_factor_hex_enrichment", "Dominant factor, enrichment",
                  "Each window labelled by its single largest factor weight"),
+                ("max_factor_hex_enrichment_noflow",
+                 "Dominant factor, no flow", ""),
+                ("max_factor_hex_plurality", "Dominant factor, plurality",
+                 "The same partition by headcount rather than concentration"),
             )
         ]
         factor_views = [(l, b) for l, b in factor_views if b]
@@ -2272,6 +2278,42 @@ def section_longitudinal(paths, out: list) -> None:
                 "implies before any clustering.</p>"
             )
             out.append(tabs(factor_views))
+
+        out.append('<h3>Hexagon maps of the patient clusters</h3>')
+        out.append(
+            "<p>The same tiling applied to the three <b>per-patient</b> "
+            "clusterings rather than to per-timepoint states. The question "
+            "shifts accordingly: not 'what kind of care happens here' but "
+            "'whose trajectories pass through here'. A cluster that owns a "
+            "compact set of hexagons stays put; one scattered across the map "
+            "moves through it.</p>"
+        )
+        out.append(
+            "<p>Read plurality and enrichment against each other as before. "
+            "The clusters are closer in size than the perfusion states are "
+            "&mdash; the smallest is about a quarter of the largest rather "
+            "than a ninth &mdash; so the two modes should diverge less here. "
+            "If they diverge as much, that is a sign the tiling is picking up "
+            "density rather than membership.</p>"
+        )
+        for column, label in (
+            ("perfusion_cluster", "MAP/pressor clusters, P1&ndash;P4"),
+            ("sequence_cluster", "Care-state sequence clusters, S1&ndash;S4"),
+            ("growth_cluster", "Latent class growth, G1&ndash;G4"),
+        ):
+            panels = [
+                (name, figure(septic_home / f"trajectory_{column}_hex_{tag}.png", ""))
+                for tag, name in (
+                    ("plurality", "Plurality"),
+                    ("plurality_noflow", "Plurality, no flow"),
+                    ("enrichment", "Enrichment"),
+                    ("enrichment_noflow", "Enrichment, no flow"),
+                )
+            ]
+            panels = [(n, b) for n, b in panels if b]
+            if panels:
+                out.append(f"<p><b>{label}</b></p>")
+                out.append(tabs(panels))
 
         cluster_views = [
             (label, figure(septic_home / f"trajectory_{tag}_panels.png", note))
@@ -2606,11 +2648,14 @@ def section_flow(paths, out: list) -> None:
     hex_panels = [
         (label, figure(septic_home / f"trajectory_perfusion_{tag}.png", note))
         for tag, label, note in (
-            ("hex_plurality", "Hexagons, plurality",
+            ("hex_plurality", "Plurality",
              "Each hexagon coloured by its most common state"),
-            ("hex_enrichment", "Hexagons, enrichment",
+            ("hex_plurality_noflow", "Plurality, no flow",
+             "The same tiling without streamlines competing for the ink"),
+            ("hex_enrichment", "Enrichment",
              "Each hexagon coloured by the state most concentrated there "
              "relative to that state's own grand total"),
+            ("hex_enrichment_noflow", "Enrichment, no flow", ""),
             ("panels", "One state at a time",
              "Each state in colour against the whole cloud in grey"),
         )

@@ -2552,7 +2552,8 @@ def _hex_counts(ax, px, py, codes, n_levels, gridsize, extent):
 
 def plot_state_hexbin(frame, x, y, column, colors, order, out, title, subtitle,
                       logger, mode: str = "plurality", gridsize: int = 34,
-                      min_count: int = 10, step_hours: float | None = None) -> None:
+                      min_count: int = 10, step_hours: float | None = None,
+                      flow: bool = True) -> None:
     """
     the projection tiled into hexagons, each coloured by which state owns it
 
@@ -2634,17 +2635,22 @@ def plot_state_hexbin(frame, x, y, column, colors, order, out, title, subtitle,
     collection.set_array(None)
     collection.set_facecolor(faces)
 
-    # the flow field on top, from the same timepoints
-    cx, cy, vx, vy, cell_counts, n_vectors = displacement_field(
-        frame.filter(pl.Series(keep)), x, y, step_hours=step_hours
-    )
-    mask = cell_counts < 5
-    with np.errstate(invalid="ignore"):
-        ax.streamplot(
-            cx, cy, np.where(mask, np.nan, vx), np.where(mask, np.nan, vy),
-            color=INK_PRIMARY, linewidth=0.6, arrowsize=0.7, density=0.9,
-            zorder=5,
+    # The flow field on top, from the same timepoints. Optional, because
+    # streamlines and a filled hex map compete for the same ink: the field
+    # answers "which way next" and the tiling answers "who is here", and
+    # reading either one is easier when the other is absent.
+    n_vectors = 0
+    if flow:
+        cx, cy, vx, vy, cell_counts, n_vectors = displacement_field(
+            frame.filter(pl.Series(keep)), x, y, step_hours=step_hours
         )
+        mask = cell_counts < 5
+        with np.errstate(invalid="ignore"):
+            ax.streamplot(
+                cx, cy, np.where(mask, np.nan, vx), np.where(mask, np.nan, vy),
+                color=INK_PRIMARY, linewidth=0.6, arrowsize=0.7, density=0.9,
+                zorder=5,
+            )
 
     won = np.array([
         levels[winner[h]] if totals[h] >= min_count else None
@@ -3355,7 +3361,9 @@ def main() -> None:
     # on top.
     for column, filename, what in (
         ("sequence_cluster", "trajectory_flow_overlay_stratum.png",
-         "token-composition strata"),
+         "care-state sequence clusters"),
+        ("growth_cluster", "trajectory_flow_overlay_growth.png",
+         "latent class growth classes"),
         ("perfusion_cluster", "trajectory_flow_overlay_perfusion.png",
          "MAP-by-pressor sequence clusters"),
         ("care_state", "trajectory_flow_overlay_care_state.png",
@@ -3388,69 +3396,92 @@ def main() -> None:
                 "order": list(PERFUSION_ORDER),
             },
         )
-        # Same three views for the token-composition care states, plus the
-        # soft factor layer they were hardened from.
+        # Every grouping gets the hexagon treatment, in both modes, with and
+        # without the flow field. Per-TIMEPOINT groupings pass the step guard;
+        # per-PATIENT ones do not need it, since filtering by patient keeps
+        # their timepoints adjacent.
+        groupings = []
+        if "perfusion_state" in frame.columns:
+            groupings.append((
+                "perfusion_state", "perfusion", PERFUSION_COLORS,
+                list(PERFUSION_ORDER), True,
+                "MAP adequacy with hysteresis, crossed with pressor exposure",
+            ))
         if "care_state" in frame.columns:
-            present = [
-                f"state {i}" for i in range(1, 9)
-                if (frame["care_state"] == f"state {i}").any()
-            ]
-            if present:
-                state_colors = husl_colors(present)
-                for mode in ("plurality", "enrichment"):
-                    logger.info(f"care state hexagons, {mode}:")
-                    plot_state_hexbin(
-                        frame, px, py, "care_state", state_colors, present,
-                        home / f"trajectory_care_state_hex_{mode}.png",
-                        f"{paths.model_key}: care state by hexagon, {mode}",
-                        "token-composition states from 11, hardened from the "
-                        "12 NMF factors by k-means",
-                        logger, mode=mode, step_hours=args.step_hours,
+            present = sorted(frame["care_state"].drop_nulls().unique().to_list())
+            if len(present) > 1:
+                groupings.append((
+                    "care_state", "care_state", husl_colors(present), present,
+                    True,
+                    "token-composition states, k-means over the 12 NMF factors",
+                ))
+        if "max_factor" in frame.columns:
+            factors = sorted(frame["max_factor"].drop_nulls().unique().to_list())
+            if len(factors) > 1:
+                groupings.append((
+                    "max_factor", "max_factor", husl_colors(factors), factors,
+                    True,
+                    "each window given to its single largest NMF factor weight",
+                ))
+        for column, tag, what in (
+            ("perfusion_cluster", "perfusion_cluster",
+             "patients clustered on their MAP/pressor sequence"),
+            ("sequence_cluster", "sequence_cluster",
+             "patients clustered on their care-state sequence"),
+            ("growth_cluster", "growth_cluster",
+             "patients clustered on growth curves over the soft NMF factors"),
+        ):
+            if column not in frame.columns:
+                continue
+            levels = sorted(frame[column].drop_nulls().unique().to_list())
+            if len(levels) > 1:
+                groupings.append((
+                    column, tag, husl_colors(levels), levels, False, what,
+                ))
+
+        for column, tag, colours, levels, per_timepoint, what in groupings:
+            for mode in ("plurality", "enrichment"):
+                for flow in (True, False):
+                    suffix = "" if flow else "_noflow"
+                    logger.info(
+                        f"{column} hexagons, {mode}"
+                        f"{' with flow' if flow else ' without flow'}:"
                     )
-                logger.info("care state, one panel each:")
-                plot_state_small_multiples(
-                    frame, px, py, "care_state", state_colors, present,
-                    home / "trajectory_care_state_panels.png",
-                    f"{paths.model_key}: care states, one at a time",
-                    logger, step_hours=args.step_hours,
-                )
-                logger.info("care state graph:")
-                plot_state_dag(
-                    frame, px, py, "care_state", state_colors, present,
-                    home / "trajectory_care_state_dag.png",
-                    f"{paths.model_key}: paths between care states",
-                    logger, step_hours=args.step_hours,
-                )
+                    plot_state_hexbin(
+                        frame.filter(pl.col(column).is_not_null()), px, py,
+                        column, colours, levels,
+                        home / f"trajectory_{tag}_hex_{mode}{suffix}.png",
+                        f"{paths.model_key}: {column.replace('_', ' ')} by "
+                        f"hexagon, {mode}",
+                        what, logger, mode=mode, flow=flow,
+                        step_hours=args.step_hours if per_timepoint else None,
+                    )
+
         plot_factor_panels(
             frame, px, py, "topic_",
             home / "trajectory_nmf_factors.png",
             f"{paths.model_key}: the 12 NMF factors the care states harden",
             logger,
         )
-        if "max_factor" in frame.columns:
-            factors = sorted(frame["max_factor"].drop_nulls().unique().to_list())
-            if len(factors) > 1:
-                logger.info("dominant-factor hexagons, enrichment:")
-                plot_state_hexbin(
-                    frame, px, py, "max_factor", husl_colors(factors), factors,
-                    home / "trajectory_max_factor_hex_enrichment.png",
-                    f"{paths.model_key}: dominant NMF factor by hexagon",
-                    "each window labelled by its single largest factor weight "
-                    "-- the partition the soft layer implies, before k-means",
-                    logger, mode="enrichment", step_hours=args.step_hours,
-                )
+        logger.info("care state, one panel each:")
+        plot_state_small_multiples(
+            frame, px, py, "care_state",
+            husl_colors(sorted(frame["care_state"].drop_nulls().unique().to_list())),
+            sorted(frame["care_state"].drop_nulls().unique().to_list()),
+            home / "trajectory_care_state_panels.png",
+            f"{paths.model_key}: care states, one at a time",
+            logger, step_hours=args.step_hours,
+        ) if "care_state" in frame.columns else None
+        logger.info("care state graph:")
+        plot_state_dag(
+            frame, px, py, "care_state",
+            husl_colors(sorted(frame["care_state"].drop_nulls().unique().to_list())),
+            sorted(frame["care_state"].drop_nulls().unique().to_list()),
+            home / "trajectory_care_state_dag.png",
+            f"{paths.model_key}: paths between care states",
+            logger, step_hours=args.step_hours,
+        ) if "care_state" in frame.columns else None
 
-        for mode, tag in (("plurality", "vote"), ("enrichment", "mass")):
-            plot_state_hexbin(
-                frame, px, py, "perfusion_state", PERFUSION_COLORS,
-                list(PERFUSION_ORDER),
-                home / f"trajectory_perfusion_hex_{mode}.png",
-                f"{paths.model_key}: perfusion state by hexagon, {mode}",
-                "plurality = most common state in the hexagon; enrichment = "
-                "the state most concentrated here relative to its own total. "
-                "Opacity carries how decisively the hexagon was won.",
-                logger, mode=mode, step_hours=args.step_hours,
-            )
         logger.info("perfusion state, one panel each:")
         plot_state_small_multiples(
             frame, px, py, "perfusion_state", PERFUSION_COLORS,
