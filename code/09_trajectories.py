@@ -703,9 +703,16 @@ def displacement_field(
                           / np.maximum(smooth_counts, 1e-9), 0.0)
         mean_y = np.where(smooth_counts > 0, gaussian_filter(sum_y, smooth)
                           / np.maximum(smooth_counts, 1e-9), 0.0)
-    # the support each cell's vector actually rests on, for the caller to mask
-    # on; `counts` alone understates it for a cell whose neighbours are busy
-    counts = smooth_counts
+    # DELIBERATELY NOT the smoothed counts. Masking on those was a mistake:
+    # the blur pushes support into cells that are merely adjacent to busy ones,
+    # so a cell with no vectors of its own passes the threshold and draws an
+    # arrow, which is exactly the leakage the smoothing fix was meant to stop.
+    # Measured on the perfusion-state overlay it took the smallest group from
+    # 107 populated cells to 173 -- a wider field, not a tighter one.
+    #
+    # So: smoothed sums and counts set the DIRECTION, and the raw per-cell
+    # count decides whether there is anything local enough to draw. The two
+    # jobs are different and want different quantities.
 
     centres_x = 0.5 * (edges_x[:-1] + edges_x[1:])
     centres_y = 0.5 * (edges_y[:-1] + edges_y[1:])
