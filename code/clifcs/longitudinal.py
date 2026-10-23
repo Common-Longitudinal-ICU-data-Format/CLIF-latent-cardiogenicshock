@@ -242,3 +242,69 @@ def state_movement(states, labels, logger) -> dict:
             f"mean changes {changes[mask].mean():.2f}"
         )
     return {"static_share": static, "mean_changes": float(changes.mean())}
+
+
+#: Hypothesised meanings for the 12 NMF factors, each paired with the token we
+#: expect to dominate it.
+#:
+#: THESE ARE TIED TO ONE FIT. NMF numbers its components arbitrarily, so a
+#: refit -- a different seed, a different n_components, a changed cohort or a
+#: changed site filter -- will permute them and silently leave every label
+#: attached to the wrong factor. The anchor token is what makes that
+#: detectable: `check_factor_labels` compares each factor's actual top loading
+#: against the expected one and warns on mismatch rather than letting a
+#: mislabelled figure out.
+#:
+#: Eight of the twelve describe care delivery or documentation rather than the
+#: patient. That is a property of the token vocabulary, not a defect of the
+#: factorisation, and it is why these are "care-delivery trajectories" rather
+#: than "illness trajectories" wherever they are described.
+FACTOR_LABELS = {
+    "factor 01": ("Uninterpretable (UNK)", "UNK"),
+    "factor 02": ("Low-flow oxygen", "RESP//nasal_cannula"),
+    "factor 03": ("Ventilated & sedated", "RESP//imv"),
+    "factor 04": ("Record ends / ICU exit", "EOS"),
+    "factor 05": ("Ventilated, moderate FiO2", "RESP//fio2_set_Q5"),
+    "factor 06": ("Hypotension", "VTL//sbp_Q0"),
+    "factor 07": ("Ventilated, high FiO2", "RESP//fio2_set_Q8"),
+    "factor 08": ("Severe hypoxaemia", "RESP//fio2_set_Q9"),
+    "factor 09": ("Hypertension", "VTL//sbp_Q9"),
+    "factor 10": ("Routine lab ordering", "LAB-ORD//bicarbonate"),
+    "factor 11": ("Tachycardia & tachypnoea", "VTL//heart_rate_Q9"),
+    "factor 12": ("Well oxygenated", "VTL//spo2_Q9"),
+}
+
+
+def factor_label(key: str) -> str:
+    """the hypothesised meaning, falling back to the bare index"""
+    entry = FACTOR_LABELS.get(key)
+    return f"{key.replace('factor ', 'F')} {entry[0]}" if entry else key
+
+
+def check_factor_labels(model, token_ids, names, logger) -> bool:
+    """
+    warn if the fit no longer matches the labels
+
+    Returns True when every labelled factor's top-loading token is the one the
+    label was written against. A False here means the figures are captioned
+    from a different factorisation than the one they are drawn from, which is
+    worse than having no labels at all.
+    """
+    agree = True
+    for index in range(model.components_.shape[0]):
+        key = f"factor {index + 1:02d}"
+        entry = FACTOR_LABELS.get(key)
+        if entry is None:
+            continue
+        top = int(np.argmax(model.components_[index]))
+        actual = names.get(int(token_ids[top]), str(token_ids[top]))
+        if actual != entry[1]:
+            logger.warning(
+                f"{key} labelled {entry[0]!r} expecting {entry[1]!r} but its "
+                f"top token is {actual!r} -- the NMF has been refit and the "
+                "labels no longer correspond"
+            )
+            agree = False
+    if agree:
+        logger.info("factor labels check out against the current fit")
+    return agree

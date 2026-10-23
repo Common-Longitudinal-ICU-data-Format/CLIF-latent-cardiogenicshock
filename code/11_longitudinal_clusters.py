@@ -37,6 +37,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 from clifcs import get_logger, load_paths
 from clifcs.longitudinal import (
+    check_factor_labels,
     care_states,
     growth_clusters,
     growth_coefficients,
@@ -763,25 +764,24 @@ def plot_factor_dag(long, offsets, out, logger, min_share: float = 0.04):
     logger.info(f"wrote {out}")
 
 
-def plot_patient_factor_paths(long, offsets, patients, out, logger):
+def plot_patient_factor_paths(long, offsets, patients, out_dir, logger):
     """
-    one panel per patient: their own route through the 12 NMF factors
+    one figure per patient: their own route through the 12 NMF factors
 
-    The class-level factor graph is an average over two thousand patients and
-    tells you nothing about whether any one of them traced that route. These
-    are the unsmoothed version: the factors a single patient's windows actually
-    loaded highest on, in order.
+    Separate files rather than subplots, so the report can lay them out side by
+    side at whatever width it likes and each is legible at full size. A
+    six-panel grid put twelve labelled nodes into about three inches and
+    nothing could be read.
 
-    Shared layout with the class-level graph -- same circle, same ordering by
-    mean dominating window, same factor colours -- so the two can be held side
-    by side. A patient visits only a handful of the twelve, and the ones they
-    never touch stay faint.
+    Node fill is the factor's own colour at full opacity -- the same colour it
+    carries in the hexagon maps -- and the OUTLINE runs white at the earliest
+    window to black at the latest, so colour answers "which factor" and the ring
+    answers "when". The previous version had those the other way round, which
+    made the twelve factors indistinguishable from each other.
 
-    Each visited node is outlined on a white-to-black ramp by timepoint and
-    labelled with the hour beside it, so the order is readable without
-    following the arrows. Arrows are black rather than the factor colours,
-    because here the arrow is the patient and the colour is the destination;
-    colouring both would make the figure say the same thing twice.
+    Factors the patient never visited are drawn faint, so "never went there" is
+    visible rather than absent. Arrows are black: the arrow is the patient and
+    the colour is the destination.
     """
     import matplotlib
     matplotlib.use("Agg")
@@ -789,12 +789,13 @@ def plot_patient_factor_paths(long, offsets, patients, out, logger):
     import matplotlib.pyplot as plt
 
     from clifcs.figures import save_figure
+    from clifcs.longitudinal import check_factor_labels, factor_label
     from clifcs.palette import INK_PRIMARY, INK_SECONDARY, husl_colors
 
     frame = long.filter(pl.col("max_factor").is_not_null())
     if frame.is_empty():
         logger.warning("no max_factor rows; per-patient factor paths skipped")
-        return
+        return []
 
     factors = sorted(frame["max_factor"].unique().to_list())
     factor_colors = husl_colors(factors)
@@ -817,100 +818,75 @@ def plot_patient_factor_paths(long, offsets, patients, out, logger):
     nodes = {f: (np.cos(a), np.sin(a)) for f, a in angles.items()}
     ramp = mcolors.LinearSegmentedColormap.from_list("time", ["#ffffff", "#111111"])
 
-    chosen = [p for p in patients if frame.filter(
-        pl.col("hospitalization_id") == p).height >= 3][:6]
-    if not chosen:
-        logger.warning("none of the chosen patients have enough windows")
-        return
-
-    columns = 3
-    rows = int(np.ceil(len(chosen) / columns))
-    figure, axes = plt.subplots(
-        rows, columns, figsize=(3.8 * columns, 3.8 * rows), squeeze=False
-    )
-
-    for index, patient in enumerate(chosen):
-        ax = axes[index // columns][index % columns]
+    written = []
+    for patient in patients:
         track = (
             frame.filter(pl.col("hospitalization_id") == patient)
             .sort("offset_hours")
         )
+        if track.height < 3:
+            continue
         visited = track["max_factor"].to_list()
         hours = track["offset_hours"].to_list()
         cluster = track["growth_cluster"].drop_nulls().to_list()
 
-        # every factor faintly, so the unused ones are visible as unused
+        figure, ax = plt.subplots(figsize=(5.4, 5.4))
         for factor in order:
             nx_, ny_ = nodes[factor]
-            ax.scatter([nx_], [ny_], s=90, c=factor_colors[factor],
-                       alpha=0.22, linewidths=0, zorder=2)
+            ax.scatter([nx_], [ny_], s=150, c=factor_colors[factor],
+                       alpha=0.16, linewidths=0, zorder=2)
             ax.annotate(
-                factor.replace("factor ", "F"),
-                xy=(np.cos(angles[factor]) * 1.28,
-                    np.sin(angles[factor]) * 1.28),
+                factor_label(factor),
+                xy=(np.cos(angles[factor]) * 1.34,
+                    np.sin(angles[factor]) * 1.34),
                 ha="center", va="center", fontsize=5.5, color=INK_SECONDARY,
-                zorder=3,
+                zorder=3, wrap=True,
             )
 
         span = max(len(hours) - 1, 1)
         for step, (factor, hour) in enumerate(zip(visited, hours)):
             nx_, ny_ = nodes[factor]
-            if step + 1 < len(visited):
-                nxt = nodes[visited[step + 1]]
-                if visited[step + 1] != factor:
-                    ax.annotate(
-                        "", xy=nxt, xytext=(nx_, ny_),
-                        arrowprops=dict(
-                            arrowstyle="-|>", color=INK_PRIMARY, alpha=0.75,
-                            linewidth=1.0, shrinkA=9, shrinkB=11,
-                            connectionstyle="arc3,rad=0.16",
-                        ),
-                        zorder=4,
-                    )
-            ax.scatter([nx_], [ny_], s=150, c=[ramp(step / span)],
-                       edgecolors=factor_colors[factor], linewidths=1.8,
+            if step + 1 < len(visited) and visited[step + 1] != factor:
+                ax.annotate(
+                    "", xy=nodes[visited[step + 1]], xytext=(nx_, ny_),
+                    arrowprops=dict(
+                        arrowstyle="-|>", color=INK_PRIMARY, alpha=0.8,
+                        linewidth=1.1, shrinkA=11, shrinkB=13,
+                        connectionstyle="arc3,rad=0.16",
+                    ),
+                    zorder=4,
+                )
+            ax.scatter([nx_], [ny_], s=210, c=[factor_colors[factor]],
+                       edgecolors=[ramp(step / span)], linewidths=2.2,
                        zorder=5)
-            # the hour beside the node, nudged outward from the circle centre
             ax.annotate(
                 f"{hour:+.0f}h",
-                xy=(nx_ * 1.12, ny_ * 1.12), ha="center", va="center",
+                xy=(nx_ * 1.15, ny_ * 1.15), ha="center", va="center",
                 fontsize=5, color=INK_SECONDARY, zorder=6,
             )
 
-        label = f"{patient}"
+        title = f"{patient}"
         if cluster:
-            label = f"{label}  ({cluster[0]})"
+            title = f"{title}  ({cluster[0]})"
         ax.set_title(
-            f"{label}\n{len(set(visited))} of {len(order)} factors visited",
-            loc="left", fontsize=7, pad=4,
+            f"{title}\n{len(set(visited))} of {len(order)} factors "
+            "visited; node colour = factor, outline = time",
+            loc="left", fontsize=7.5, pad=6,
         )
-        ax.set_xlim(-1.5, 1.5)
-        ax.set_ylim(-1.5, 1.5)
+        ax.set_xlim(-1.62, 1.62)
+        ax.set_ylim(-1.62, 1.62)
         ax.set_aspect("equal")
         ax.axis("off")
+
+        target = out_dir / f"patient_factor_path_{len(written) + 1:02d}.png"
+        save_figure(figure, target)
+        plt.close(figure)
+        written.append(target)
         logger.info(
             f"  {patient}: {len(set(visited))} distinct factors over "
-            f"{len(visited)} windows"
+            f"{len(visited)} windows -> {target.name}"
         )
-
-    for index in range(len(chosen), rows * columns):
-        axes[index // columns][index % columns].axis("off")
-
-    figure.suptitle(
-        "Individual patients through the 12 NMF factors",
-        x=0.01, ha="left", fontsize=10,
-    )
-    figure.text(
-        0.01, 0.005,
-        "Same circle and ordering as the class-level graph. Node fill runs "
-        "white (earliest window) to black (latest); the outline is the "
-        "factor's colour; the hour sits beside the node. Black arrows are this "
-        "patient's own transitions. Faint nodes are factors never visited.",
-        fontsize=5.5, color=INK_SECONDARY,
-    )
-    save_figure(figure, out)
-    plt.close(figure)
-    logger.info(f"wrote {out} ({len(chosen)} patients)")
+    return written
 
 
 def main() -> None:
@@ -1349,11 +1325,11 @@ def main() -> None:
             ["hospitalization_id"].to_list()[:6]
         )
     logger.info("individual patients through the NMF factors:")
-    plot_patient_factor_paths(
-        long, OFFSETS, followers,
-        paths.figure_home / f"longitudinal_patient_factor_paths_{args.subset}.png",
-        logger,
-    )
+    if vocab:
+        check_factor_labels(nmf_model, token_ids, vocab, logger)
+    factor_dir = paths.figure_home / f"patient_factor_paths_{args.subset}"
+    factor_dir.mkdir(parents=True, exist_ok=True)
+    plot_patient_factor_paths(long, OFFSETS, followers, factor_dir, logger)
 
     logger.info("latent class paths through the NMF factors:")
     plot_factor_dag(

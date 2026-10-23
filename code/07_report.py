@@ -2404,20 +2404,22 @@ def section_longitudinal(paths, out: list) -> None:
             )
             out.append(tabs(cluster_views))
 
+    # One tab per patient, each carrying both views of that same patient: their
+    # path over the class flow fields, and their route through the 12 factors.
     individual = []
-    if septic_home is not None:
-        individual.append((
-            "Over the class flow fields",
-            figure(septic_home / "trajectory_paths_over_growth.png", ""),
-        ))
-    individual.append((
-        "Through the 12 factors",
-        figure(
-            paths.output_home / "figures" / "GEM-all"
-            / "longitudinal_patient_factor_paths_septic.png", "",
-        ),
-    ))
-    individual = [(l, b) for l, b in individual if b]
+    factor_dir = (
+        paths.output_home / "figures" / "GEM-all" / "patient_factor_paths_septic"
+    )
+    for index in range(1, 13):
+        panes = []
+        if septic_home is not None:
+            panes.append(
+                figure(septic_home / f"paths_over_growth_{index:02d}.png", "")
+            )
+        panes.append(figure(factor_dir / f"patient_factor_path_{index:02d}.png", ""))
+        panes = [pane for pane in panes if pane]
+        if panes:
+            individual.append((f"Patient {index}", "".join(panes)))
     if individual:
         out.append('<h3>Individual patients against the latent classes</h3>')
         out.append(
@@ -2437,7 +2439,10 @@ def section_longitudinal(paths, out: list) -> None:
             "12 NMF factors on the same circle and ordering as the class-level "
             "graph; factors a patient never visited stay faint, each visited "
             "node is outlined white-to-black by timepoint with the hour beside "
-            "it, and the arrows are the patient's own transitions in black.</p>"
+            "it, and the arrows are the patient's own transitions in black. "
+            "Node fill is the factor's own colour at full opacity and the "
+            "outline carries the time, so colour answers which factor and the "
+            "ring answers when.</p>"
         )
         out.append(callout(
             "<b>Check the factors-visited count in each panel title.</b> If a "

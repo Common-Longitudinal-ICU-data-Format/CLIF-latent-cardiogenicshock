@@ -3061,6 +3061,7 @@ def plot_factor_panels(frame, x, y, prefix, out, title, logger,
 
 def plot_paths_over_flow(frame, x, y, column, patients, out, title, logger,
                          step_hours: float | None = None) -> None:
+    """ONE patient per figure -- see the loop at the call site in main."""
     """
     the per-group flow fields with individual patients drawn on top
 
@@ -3120,12 +3121,16 @@ def plot_paths_over_flow(frame, x, y, column, patients, out, title, logger,
         edge = palette.get(level[0], INK_PRIMARY) if level else INK_PRIMARY
         ptx, pty = track[x].to_numpy(), track[y].to_numpy()
         hours = track["offset_hours"].to_numpy()
-        ax.plot(ptx, pty, color=edge, linewidth=1.0, alpha=0.9, zorder=20,
+        ax.plot(ptx, pty, color=edge, linewidth=1.2, alpha=0.95, zorder=20,
                 solid_capstyle="round")
         shade = (hours - hours.min()) / max(hours.max() - hours.min(), 1e-9)
-        ax.scatter(ptx, pty, s=38, c=shade, cmap=ramp, vmin=0, vmax=1,
-                   edgecolors=edge, linewidths=1.4, zorder=21)
+        ax.scatter(ptx, pty, s=44, c=shade, cmap=ramp, vmin=0, vmax=1,
+                   edgecolors=edge, linewidths=1.6, zorder=21)
         drawn += 1
+        ax.set_title(
+            f"{title} — {patient}" + (f" ({level[0]})" if level else ""),
+            loc="left", pad=8,
+        )
 
     handles = [
         plt.Line2D([], [], color=palette[level], linewidth=1.8,
@@ -3769,14 +3774,17 @@ def main() -> None:
     # cluster figures above.
     if "growth_cluster" in frame.columns and args.subset in ("all", "septic"):
         logger.info("patient paths over the latent-class fields:")
-        plot_paths_over_flow(
-            frame.filter(pl.col("growth_cluster").is_not_null()),
-            px, py, "growth_cluster", patients,
-            home / "trajectory_paths_over_growth.png",
-            f"{paths.model_key}: individual patients over the latent-class "
-            "flow fields",
-            logger, step_hours=None,
-        )
+        # One patient per figure. Several at once meant four coloured paths
+        # over four coloured fields, and no way to tell which path belonged to
+        # which field without tracing outlines.
+        followed = frame.filter(pl.col("growth_cluster").is_not_null())
+        for index, patient in enumerate(patients, start=1):
+            plot_paths_over_flow(
+                followed, px, py, "growth_cluster", [patient],
+                home / f"paths_over_growth_{index:02d}.png",
+                f"{paths.model_key}: patient over the latent-class fields",
+                logger, step_hours=None,
+            )
     if not patients:
         patients = pick_patients(frame)
         logger.warning(
