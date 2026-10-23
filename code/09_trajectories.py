@@ -58,6 +58,7 @@ from clifcs.config import CONFIG_HOME
 from clifcs.grid_winnower import GridWinnower
 from clifcs.figures import key_string, quantile_colour, save_figure
 from clifcs.palette import (
+    colors_for,
     husl_colors,
     mortality_colors,
     CONTEXT,
@@ -2549,7 +2550,7 @@ def plot_cluster_flow_overlay(frame, x, y, column, out, title, logger,
     if not levels:
         logger.info(f"no {column} levels to overlay")
         return
-    palette = husl_colors(levels)
+    palette = colors_for(column, levels)
 
     figure, (ax, legend_ax) = plt.subplots(
         1, 2, figsize=(6.8, 5.2),
@@ -3081,7 +3082,7 @@ def plot_paths_over_flow(frame, x, y, column, patients, out, title, logger,
     levels = sorted(frame[column].drop_nulls().unique().to_list())
     if not levels:
         return
-    palette = husl_colors(levels)
+    palette = colors_for(column, levels)
 
     figure, (ax, legend_ax) = plt.subplots(
         1, 2, figsize=(7.0, 5.4),
@@ -3650,7 +3651,8 @@ def main() -> None:
             levels = sorted(frame[column].drop_nulls().unique().to_list())
             if len(levels) > 1:
                 groupings.append((
-                    column, tag, husl_colors(levels), levels, False, what,
+                    column, tag, colors_for(column, levels), levels,
+                    False, what,
                 ))
 
         for column, tag, colours, levels, per_timepoint, what in groupings:
@@ -3722,7 +3724,7 @@ def main() -> None:
             logger.info(f"{column}, one panel each:")
             plot_state_small_multiples(
                 frame.filter(pl.col(column).is_not_null()), px, py, column,
-                husl_colors(levels), levels,
+                colors_for(column, levels), levels,
                 home / f"trajectory_{column}_panels.png",
                 f"{paths.model_key}: {label}, one cluster at a time",
                 logger,

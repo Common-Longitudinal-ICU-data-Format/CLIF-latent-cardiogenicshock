@@ -619,7 +619,9 @@ def plot_factor_dag(long, offsets, out, logger, min_share: float = 0.04):
     import matplotlib.pyplot as plt
 
     from clifcs.figures import save_figure
-    from clifcs.palette import CONTEXT, GRID, INK_SECONDARY, husl_colors
+    from clifcs.palette import (
+        CONTEXT, GRID, INK_SECONDARY, cluster_colors, husl_colors,
+    )
 
     frame = long.filter(
         pl.col("max_factor").is_not_null()
@@ -632,7 +634,8 @@ def plot_factor_dag(long, offsets, out, logger, min_share: float = 0.04):
     factors = sorted(frame["max_factor"].unique().to_list())
     classes = sorted(frame["growth_cluster"].unique().to_list())
     factor_colors = husl_colors(factors)
-    class_colors = husl_colors(classes)
+    # the latent classes take the deeper ramp, since here they are thin arrows
+    class_colors = cluster_colors(classes)
 
     # order the ring by when each factor tends to dominate
     index_of_window = {float(o): i for i, o in enumerate(offsets)}

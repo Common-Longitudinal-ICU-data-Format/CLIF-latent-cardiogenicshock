@@ -32,7 +32,9 @@ import polars as pl
 sys.path.insert(0, "code")
 from clifcs import get_logger, load_paths
 from clifcs.figures import save_figure
-from clifcs.palette import GRID, INK_PRIMARY, INK_SECONDARY, husl_colors
+from clifcs.palette import (
+    GRID, INK_PRIMARY, INK_SECONDARY, colors_for, husl_colors,
+)
 
 logger = get_logger("love")
 paths = load_paths(role="site")
@@ -124,7 +126,7 @@ for stratification, tag in (
     if part.is_empty():
         continue
     clusters = sorted(part["cluster"].unique().to_list())
-    colours = husl_colors(clusters)
+    colours = colors_for(stratification, clusters)
     names = [n for _, n in present][::-1]
 
     figure, ax = plt.subplots(figsize=(6.6, 0.42 * len(names) + 1.6))

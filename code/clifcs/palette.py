@@ -181,6 +181,50 @@ def husl_colors(keys) -> dict:
     ]
     return dict(zip(keys, hexes))
 
+def cluster_colors(keys, lightness: float = 0.42, saturation: float = 0.78) -> dict:
+    """
+    deeper categorical colours, for the latent-class and sequence clusters
+
+    `hls` rather than `husl`, at lower lightness and higher saturation than
+    seaborn's defaults (l=0.6, s=0.65). husl equalises *perceived* lightness,
+    which is the right choice for outcome categories -- a darker colour there
+    reads as more severe -- but it pays for that with muted, pastel hues, and
+    these clusters are drawn as thin streamlines and small marker outlines
+    where a pastel simply disappears against the grey point cloud.
+
+    Taking the hues from `hls` at l=0.42 keeps them distinguishable at
+    one-pixel linewidths. The trade is real and worth naming: the levels are no
+    longer equally light, so a reader could take the darkest cluster for the
+    worst one. These clusters have no intrinsic order, so that risk is
+    mislabelling rather than a false ordering of severity.
+    """
+    import seaborn as sns
+
+    keys = list(keys)
+    palette = sns.hls_palette(
+        max(len(keys), 2), l=lightness, s=saturation
+    )
+    hexes = [
+        "#{:02x}{:02x}{:02x}".format(*(int(round(255 * v)) for v in rgb))
+        for rgb in palette
+    ]
+    return dict(zip(keys, hexes))
+
+
+#: Columns whose levels are drawn with the deeper `hls` ramp rather than husl.
+#: The latent classes appear mostly as streamlines and marker outlines, where
+#: husl's pastels wash out against the grey cloud. Kept as a list rather than
+#: decided at each call site so one edit moves every figure together.
+DEEP_PALETTE_COLUMNS = ("growth_cluster",)
+
+
+def colors_for(column: str, keys) -> dict:
+    """the palette a given label column should use"""
+    if column in DEEP_PALETTE_COLUMNS:
+        return cluster_colors(keys)
+    return husl_colors(keys)
+
+
 #: Zweck phenotypes, in the paper's order
 PHENOTYPE_LEVELS = (
     "I non-congested",
