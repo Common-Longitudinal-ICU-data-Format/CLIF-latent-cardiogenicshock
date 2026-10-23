@@ -791,6 +791,12 @@ SUBSET_ORDER = ("cardiogenic", "septic", "all")
 #: order for picking one representative projection and leads with cardiogenic.
 PROJECTION_ORDER = ("all", "cardiogenic", "septic")
 
+#: which site correction the report treats as current when several have been
+#: run. CORAL replaced LEACE because the figures are PaCMAP -- non-linear --
+#: and CORAL is the one that moves the non-linear probe (0.9924 -> 0.8553) and
+#: neighbour purity (1.66x -> 1.41x), which is what a projection reflects.
+PREFERRED_CORRECTION = "coral"
+
 #: how each subset is named in a heading. "cardiogenic" is the union of the two
 #: readings of cardiogenic shock, not the ICD code alone, and saying so in the
 #: heading is cheaper than a footnote under every panel.
@@ -851,6 +857,12 @@ def trajectory_home(paths) -> pathlib.Path:
     homes = trajectory_homes(paths)
     for subset in ("cardiogenic", "septic", "all"):
         for info in homes.values():
+            if (
+                info["subset"] == subset
+                and info["correction"] == PREFERRED_CORRECTION
+            ):
+                return info["home"]
+        for info in homes.values():
             if info["subset"] == subset and info["correction"] is not None:
                 return info["home"]
         for info in homes.values():
@@ -897,10 +909,24 @@ def trajectory_homes(paths) -> dict:
                 candidates.append(
                     (corrected.name.removeprefix("corrected-"), corrected)
                 )
+        # The label must distinguish the correction, or two corrected runs of
+        # the same subset collide on one key and the later one silently wins.
+        # That happened: `sorted()` puts corrected-coral before corrected-leace,
+        # so assigning both to "septic shock" left the report showing the stale
+        # LEACE figures -- drawn under the rank-1 erasure bug -- while every
+        # caption said the correction had been applied.
+        multiple = len([c for c, _ in candidates if c is not None]) > 1
         for correction, directory in candidates:
             label = SUBSET_TITLES[subset]
             if correction is None:
                 label = f"{label}, uncorrected"
+            elif multiple:
+                label = f"{label}, {correction}"
+            if label in found:
+                raise RuntimeError(
+                    f"two projections claim the label {label!r}: "
+                    f"{found[label]['home']} and {directory}"
+                )
             found[label] = {
                 "home": directory,
                 "subset": subset,
@@ -1879,6 +1905,186 @@ def section_patient_paths(paths, out: list) -> None:
         "what the flow field's near-zero gradient alignment says quantitatively."))
 
 
+def section_longitudinal(paths, out: list) -> None:
+    """
+    11's longitudinal strata: how they were found, and what they contain
+
+    Deliberately its own section rather than a tab inside section 6. The
+    clustering and the embedding are separate analyses that share only the
+    (patient, time) key -- the embedding reads every token in the cumulative
+    prefix with no site filter, the clustering reads 366 site-balanced tokens
+    counted inside one six-hour window. Presenting the clusters as though they
+    were a property of the projection would hide that.
+    """
+    homes = trajectory_homes(paths)
+    septic_home = next(
+        (info["home"] for info in homes.values()
+         if info["subset"] == "septic"
+         and info["correction"] == PREFERRED_CORRECTION),
+        None,
+    )
+    tables_home = paths.output_home / "tables" / "GEM-all"
+    movement_file = tables_home / "state_movement_septic.csv"
+    character_file = tables_home / "cluster_characteristics_sequence_cluster_septic.csv"
+    growth_file = tables_home / "cluster_characteristics_growth_cluster_septic.csv"
+    sites_file = tables_home / "cluster_sites_sequence_cluster_septic.csv"
+    tokens_file = tables_home / "cluster_mortality_tokens_septic.csv"
+    if not any(f.is_file() for f in (movement_file, character_file, tokens_file)):
+        return
+
+    out.append('<h2 id="longitudinal">7 &middot; Longitudinal strata</h2>')
+    out.append(
+        "<p>Septic shock patients clustered on how their <b>token "
+        "composition</b> moves over the seven days after shock onset, by two "
+        "methods that assume different things. <b>State sequences</b> assign "
+        "each six-hour window one of six care states learned by NMF over the "
+        "window compositions, then cluster the resulting 29-symbol strings. "
+        "<b>Latent class growth</b> summarises each composition component by a "
+        "quadratic growth curve per patient and mixes over the coefficients "
+        "&mdash; two-stage, since true GBTM estimates curves and classes "
+        "jointly.</p>"
+    )
+    out.append(
+        "<p>This is a <b>separate analysis from the embedding</b>. They share "
+        "only the (patient, time) key. The embedding at +24&nbsp;h reads every "
+        "token in the patient's cumulative prefix, unfiltered, capped at the "
+        "model's 4096-token context; the label at +24&nbsp;h comes from 366 "
+        "site-balanced tokens counted inside the six hours ending there. Same "
+        "patient, same instant, two different views of it &mdash; which is why "
+        "colouring one by the other says something rather than restating "
+        "itself. Token space carries no site correction, so the feature space "
+        "was filtered down from 1,192 tokens: 953 appear at every site, 472 "
+        "clear 1% prevalence everywhere, and 330 also sit within a 2&times; "
+        "between-site prevalence ratio.</p>"
+    )
+
+    if movement_file.is_file():
+        out.append('<h3>How much patients actually move</h3>')
+        out.append(
+            "<p>The number of state changes per patient, out of 28 possible "
+            "transitions over seven days. This replaced a time-shuffled null, "
+            "which was not a meaningful test here: silhouette mostly reports "
+            "that k-means found a compact partition, which it does in almost "
+            "any feature space, and the windows are anchored to each patient's "
+            "own shock onset <i>by design</i>, so permuting them produces "
+            "noise rather than a plausible alternative cohort. Counting "
+            "transitions asks the question directly.</p>"
+        )
+        out.append(table(
+            pl.read_csv(movement_file),
+            {"patients": thousands, "share": pct},
+        ))
+
+    character_tabs = []
+    for path, label in ((character_file, "State sequences"),
+                        (growth_file, "Latent class growth")):
+        if not path.is_file():
+            continue
+        frame = pl.read_csv(path)
+        character_tabs.append((label, table(
+            frame,
+            {
+                "n": thousands,
+                **{c: pct for c in frame.columns
+                   if c.startswith(("invasive", "renal", "died"))},
+                **{c: num(3) for c in frame.columns if "norepinephrine" in c},
+                "ICU length of stay (days)": num(1),
+                "peak vasoactive agents": num(0),
+            },
+        )))
+    if character_tabs:
+        out.append('<h3>What each stratum contains</h3>')
+        out.append(
+            "<p>Treatment and outcome by stratum. Read the treatment columns "
+            "knowing the feature space includes treatment tokens &mdash; "
+            "vasopressor and ventilation events are part of the composition "
+            "the clusters were built from, so a treatment difference is partly "
+            "by construction. ICU length of stay and mortality are not in the "
+            "feature space at all and are the columns that carry weight.</p>"
+        )
+        out.append(tabs(character_tabs))
+
+    if septic_home is not None:
+        panels = [
+            ("Care state (per timepoint)",
+             figure(septic_home / "trajectory_flow_septic_care_state.png",
+                    "The state assigned to each six-hour window")),
+            ("Stratum (per patient)",
+             figure(septic_home / "trajectory_flow_septic_stratum.png",
+                    "The stratum the patient's whole sequence fell into")),
+        ]
+        panels = [(label, body) for label, body in panels if body]
+        if panels:
+            out.append('<h3>The strata, drawn in the septic embedding</h3>')
+            out.append(
+                "<p>Two different grains, and they are not interchangeable. "
+                "<b>Care state</b> is per (patient, timepoint) and is the thing "
+                "that moves. <b>Stratum</b> is per patient and is constant "
+                "along a trajectory by construction, so that panel shows where "
+                "a stratum lives rather than where a patient is at that "
+                "moment. If the care states land coherently here, the model "
+                "organises patients much as their site-comparable event "
+                "composition does; if they do not, the likely reason is the "
+                "~800 tokens the site filter removed, which the embedding "
+                "still reads and the labels do not.</p>"
+            )
+            out.append(tabs(panels))
+
+    if sites_file.is_file():
+        out.append('<h3>Are the strata hospitals?</h3>')
+        out.append(
+            "<p>Cram&eacute;r's V between stratum and contributing site. "
+            "Roughly: below 0.1 the partition is near-independent of site, "
+            "above 0.3 it is substantially a site partition and should not be "
+            "read as clinical. Token space has no site correction, so this is "
+            "the check that the prevalence filter did its job.</p>"
+        )
+        out.append(table(
+            pl.read_csv(sites_file),
+            {
+                "n": thousands,
+                **{c: pct for c in pl.read_csv(sites_file).columns
+                   if c.startswith("share_")},
+                "cramers_v": num(3),
+            },
+        ))
+
+    if tokens_file.is_file():
+        frame = pl.read_csv(tokens_file)
+        significant = frame.filter(pl.col("p_adjusted") < 0.05)
+        out.append('<h3>Within a stratum, what separates the patients who died</h3>')
+        out.append(
+            "<p>The strata stratify by severity, so a token enriched among "
+            "deaths across the whole cohort mainly says that sicker patients "
+            "die. Asking inside a stratum holds severity roughly fixed and "
+            "asks what separates outcome among patients who look similarly "
+            "sick. Prevalence is per patient, not per window, so a patient "
+            "charted twice as often does not count twice; cells below 11 "
+            "patients are suppressed; Bonferroni is over every "
+            "token-by-stratum test rather than within each stratum.</p>"
+        )
+        out.append(callout(
+            "<b>Several of these are consequences, not antecedents.</b> The "
+            "token window spans the whole week, so <code>XFR-IN//ward</code> "
+            "means the patient left the ICU alive, <code>EOS</code> is the end "
+            "of a record, and <code>rass_Q8</code> against "
+            "<code>rass_Q0</code> partly restates survival. As "
+            "characterisation that is fine. To make these predictive the token "
+            "window has to stop early &mdash; say +24&nbsp;h &mdash; while the "
+            "outcome stays at discharge."
+        ))
+        out.append(table(
+            significant.sort("p_adjusted").head(60),
+            {
+                "died_prevalence": pct,
+                "survived_prevalence": pct,
+                "log2_ratio": num(2),
+                "p_adjusted": num(4),
+                "p": num(6),
+            },
+        ))
+
+
 def section_flow(paths, out: list) -> None:
     home = trajectory_home(paths)
     homes = trajectory_homes(paths)
@@ -1897,8 +2103,12 @@ def section_flow(paths, out: list) -> None:
     # septic-named figures and presented them as the septic cohort.
     septic_home = next(
         (info["home"] for info in homes.values()
-         if info["subset"] == "septic" and info["correction"] is not None),
-        home / "no-septic-grid",
+         if info["subset"] == "septic" and info["correction"] == PREFERRED_CORRECTION),
+        next(
+            (info["home"] for info in homes.values()
+             if info["subset"] == "septic" and info["correction"] is not None),
+            home / "no-septic-grid",
+        ),
     )
     alignment_file = paths.output_home / "tables" / "GEM-all" / "trajectory_flow_alignment.csv"
     # 09 names the flow figure after whichever projection it drew, so that a
@@ -2100,6 +2310,48 @@ def section_flow(paths, out: list) -> None:
             "uniform scatter of bins means it does not.</p>"
         )
         out.append(tabs(token_panels))
+
+    # Perfusion state: MAP adequacy crossed with pressor exposure, as four
+    # groups with a hysteresis band on the MAP side. Separate from the
+    # physiology underlays because it is a STATE a patient is in rather than a
+    # value they have, and the transition matrix below only makes sense for a
+    # state.
+    perfusion = figure(
+        septic_home / "trajectory_flow_septic_perfusion.png",
+        "Coded septic shock, coloured by MAP adequacy and pressor exposure",
+    )
+    transitions = figure(
+        septic_home / "trajectory_perfusion_transitions.png",
+        "Row-normalised, with the count in each cell",
+    )
+    if perfusion or transitions:
+        out.append('<h3>Perfusion state, and movement between the states</h3>')
+        out.append(
+            "<p>Four groups: MAP above or below 65&nbsp;mmHg, crossed with "
+            "whether vasopressors are running. The MAP side is a <b>Schmitt "
+            "trigger, not a threshold</b> &mdash; crossing up needs MAP&nbsp;&gt;&nbsp;65, "
+            "crossing down needs MAP&nbsp;&lt;&nbsp;55, and inside the band the patient "
+            "keeps whatever state they were last in. A plain cut at 65 makes a "
+            "patient hovering there change group at nearly every six-hour grid "
+            "point, and a transition matrix built from that measures "
+            "measurement noise. The band resolves about 95% of "
+            "patient-timepoints; the rest never leave 55&ndash;65 and fall "
+            "back to the plain cut.</p>"
+        )
+        out.append(
+            "<p>Two consequences, both deliberate. The state is "
+            "<b>path-dependent</b>: two patients with the same MAP can be in "
+            "different groups depending which side they arrived from, which is "
+            "what a trigger is for. And a missing MAP carries the previous "
+            "state forward rather than breaking the run, since an absent "
+            "measurement is not evidence that perfusion changed. The pressor "
+            "side gets no hysteresis &mdash; starting or stopping a "
+            "vasopressor is a recorded action, not a noisy measurement.</p>"
+        )
+        out.append(tabs([
+            ("Where the states sit", perfusion),
+            ("Where patients go next", transitions),
+        ]))
 
     # Physiology, one variable per tab. The combined grid is kept as an
     # overview, but eleven panels at 3.6 inches each is unreadable as evidence
@@ -3034,6 +3286,11 @@ def main() -> None:
             "them here would put one cohort's figures under another's tables. "
             "Run <code>python code/09_trajectories.py</code> and regenerate "
             "this report.", "warn"))
+    # Outside the coverage branch above on purpose: 11 reads tokens_times
+    # directly rather than the trajectory grid, so the strata are valid even
+    # when 09's figures describe a stale cohort. Only the two panels inside it
+    # need the grid, and those are each wrapped in figure().
+    section_longitudinal(paths, out)
     section_sites(paths, out)
     section_models(paths, out, logger)
     undifferentiated = section_undifferentiated(paths, out)

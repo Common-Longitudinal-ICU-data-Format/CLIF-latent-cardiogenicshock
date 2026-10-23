@@ -146,11 +146,16 @@ def site_composition(frame: pl.DataFrame, label: str, sites, logger) -> None:
     chi2 = float(((observed - expected) ** 2 / np.maximum(expected, 1e-9)).sum())
     v = float(np.sqrt(chi2 / (total * (min(observed.shape) - 1))))
     logger.info(f"  {label} vs site: Cramer's V {v:.3f}")
+    rows = []
     for row in table.iter_rows(named=True):
-        shares = {s: row[s] for s in present}
-        n = sum(shares.values())
+        n = sum(row[s] for s in present)
         spread = "  ".join(f"{s} {row[s] / max(n, 1):>5.1%}" for s in present)
         logger.info(f"    {row[label]}  n={n:>6,}  {spread}")
+        rows.append({
+            label: row[label], "n": n,
+            **{f"share_{s}": row[s] / max(n, 1) for s in present},
+        })
+    return pl.DataFrame(rows).with_columns(cramers_v=pl.lit(v))
 
 
 def differential_within_cluster(
@@ -376,7 +381,21 @@ def main() -> None:
     agreement = adjusted_rand_score(sequence_labels, growth_labels)
     logger.info(f"  the two methods agree: ARI {agreement:.3f}")
 
-    state_movement(states, sequence_labels, logger)
+    (paths.output_home / 'tables' / paths.model_key).mkdir(
+        parents=True, exist_ok=True
+    )
+    movement = state_movement(states, sequence_labels, logger)
+    changes = (states[:, 1:] != states[:, :-1]).sum(axis=1)
+    pl.DataFrame({
+        "changes": list(range(int(changes.max()) + 1)),
+        "patients": [int((changes == k).sum()) for k in range(int(changes.max()) + 1)],
+    }).with_columns(
+        share=pl.col("patients") / int(len(changes)),
+        possible_transitions=pl.lit(states.shape[1] - 1),
+    ).write_csv(
+        paths.output_home / "tables" / paths.model_key
+        / f"state_movement_{args.subset}.csv"
+    )
     empty = (volume == 0).mean(axis=1)
     logger.info("  share of each cluster's windows with nothing recorded:")
     for cluster in sorted(set(sequence_labels.tolist())):
@@ -458,9 +477,21 @@ def main() -> None:
         if paths.tokenizer_yaml_or_none is not None else ({}, {})
     )
     differential = []
+    tables_home = paths.output_home / "tables" / paths.model_key
+    tables_home.mkdir(parents=True, exist_ok=True)
     for label in ("sequence_cluster", "growth_cluster"):
-        characterise(labels_frame, paths, label, logger)
-        site_composition(labels_frame, label, list(paths.sites), logger)
+        summary = characterise(labels_frame, paths, label, logger)
+        if not summary.is_empty():
+            summary.write_csv(
+                tables_home / f"cluster_characteristics_{label}_{args.subset}.csv"
+            )
+        spread = site_composition(
+            labels_frame, label, list(paths.sites), logger
+        )
+        if spread is not None and not spread.is_empty():
+            spread.write_csv(
+                tables_home / f"cluster_sites_{label}_{args.subset}.csv"
+            )
         table = differential_within_cluster(
             counts, labels_frame, token_ids, names, label, logger
         )
