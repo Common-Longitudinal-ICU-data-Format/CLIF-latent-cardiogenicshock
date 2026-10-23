@@ -2382,6 +2382,47 @@ def section_longitudinal(paths, out: list) -> None:
             )
             out.append(tabs(cluster_views))
 
+    balance_panels = [
+        (label, figure(
+            paths.output_home / "figures" / "GEM-all"
+            / f"covariate_balance_{tag}_septic.png", ""))
+        for tag, label in (
+            ("perfusion", "MAP/pressor clusters"),
+            ("growth", "Latent class growth"),
+            ("sequence", "Care-state sequence clusters"),
+        )
+    ]
+    balance_panels = [(l, b) for l, b in balance_panels if b]
+    if balance_panels:
+        out.append('<h3>Are the clusters comparable? Baseline covariate balance</h3>')
+        out.append(
+            "<p>One dot per baseline covariate per cluster: the standardised "
+            "mean difference between that cluster and all the others pooled, "
+            "measured <b>at shock onset</b> before the trajectories diverge. "
+            "The shaded band is |SMD|&nbsp;&lt;&nbsp;0.1, the usual threshold "
+            "for balance; the dashed lines mark 0.25, past which an adjusted "
+            "estimate is extrapolating rather than comparing.</p>"
+        )
+        out.append(
+            "<p>This is the figure that says whether the adjusted odds ratios "
+            "elsewhere mean anything. A regression will happily report an "
+            "effect for a cluster whose covariate distribution barely overlaps "
+            "the others' &mdash; the number is arithmetic, not evidence.</p>"
+        )
+        out.append(callout(
+            "<b>The latent classes are badly imbalanced and the MAP/pressor "
+            "clusters are not.</b> G2 sits at SMD &minus;1.73 on invasive "
+            "ventilation and +1.25 on GCS, seven times the severe-imbalance "
+            "threshold, so its adjusted odds ratio of 0.57 against G1 rests on "
+            "groups that scarcely overlap on ventilation at baseline. The "
+            "MAP/pressor clusters' worst imbalance is 0.44 (P1, vasoactive "
+            "agents) &mdash; still past 0.25, but far closer to a like-for-"
+            "like comparison. Of the three stratifications, P1&ndash;P4 is the "
+            "one whose adjusted mortality differences are safest to read.",
+            "warn"
+        ))
+        out.append(tabs(balance_panels))
+
     if sites_file.is_file():
         out.append('<h3>Are the strata hospitals?</h3>')
         out.append(

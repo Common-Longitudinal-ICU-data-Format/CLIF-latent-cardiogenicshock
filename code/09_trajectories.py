@@ -1098,6 +1098,45 @@ def plot_septic_flow(frame, px, py, home, paths, args, logger) -> None:
         )
 
 
+def attach_sofa(paths, frame: pl.DataFrame, logger) -> pl.DataFrame:
+    """
+    join the gridded SOFA, replacing the column trajectory_state leaves null
+
+    state.py populates sofa_total only from a precomputed `clif_sofa` table,
+    which stage_derive writes as ONE row per encounter stamped at the last
+    event time of the stay -- so the as-of join could never match an earlier
+    grid point and the column came back 100% null, silently dropping its flow
+    panel. `sofa_grid.parquet` holds the worst score in the 24h ending at each
+    grid point, which is what "SOFA at time t" ordinarily means, so this is a
+    direct join on (patient, offset) rather than an as-of.
+    """
+    source = paths.patient_level_home / "sofa_grid.parquet"
+    if not source.is_file():
+        logger.info(
+            f"no {source.name}: sofa_total stays null. Build it with "
+            "clifcs.sofa_grid."
+        )
+        return frame
+    sofa = pl.read_parquet(source).select(
+        "hospitalization_id", "offset_hours",
+        pl.col("sofa_total").cast(pl.Float64).alias("sofa_gridded"),
+    )
+    frame = frame.join(sofa, on=["hospitalization_id", "offset_hours"], how="left")
+    if "sofa_total" in frame.columns:
+        frame = frame.with_columns(
+            sofa_total=pl.coalesce("sofa_gridded", "sofa_total")
+        ).drop("sofa_gridded")
+    else:
+        frame = frame.rename({"sofa_gridded": "sofa_total"})
+    have = int(frame["sofa_total"].is_not_null().sum())
+    logger.info(
+        f"gridded SOFA: {have:,} of {frame.height:,} grid points "
+        f"({have / max(frame.height, 1):.1%}), median "
+        f"{frame['sofa_total'].median()}"
+    )
+    return frame
+
+
 def attach_state(paths, frame: pl.DataFrame, logger) -> pl.DataFrame:
     """physiology at each grid point, for use as a flow-field underlay"""
     cache = paths.patient_level_home / "trajectory_state.parquet"
@@ -3387,6 +3426,7 @@ def main() -> None:
                   })
 
     frame = attach_state(paths, frame, logger)
+    frame = attach_sofa(paths, frame, logger)
 
     # MAP adequacy crossed with pressor exposure, as a four-state variable with
     # a hysteresis band on the MAP side. Needs the state table, so it cannot be
