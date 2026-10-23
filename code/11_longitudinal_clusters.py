@@ -26,6 +26,8 @@ import argparse
 import pathlib
 import sys
 
+from collections import Counter
+
 import numpy as np
 import polars as pl
 from sklearn.cluster import KMeans
@@ -42,6 +44,8 @@ from clifcs.longitudinal import (
     state_movement,
     split_half_stability,
 )
+from clifcs.perfusion import PERFUSION_ORDER, perfusion_state
+from clifcs.state import trajectory_state
 from clifcs.tokens import vocabulary
 from clifcs.windows import (
     composition_matrix,
@@ -156,6 +160,173 @@ def site_composition(frame: pl.DataFrame, label: str, sites, logger) -> None:
             **{f"share_{s}": row[s] / max(n, 1) for s in present},
         })
     return pl.DataFrame(rows).with_columns(cramers_v=pl.lit(v))
+
+
+def perfusion_sequences(paths, cohort, offsets, logger) -> pl.DataFrame:
+    """
+    each patient's path through the four MAP-by-pressor states, over seven days
+
+    Built here rather than read from 09, because 09's state table stops at
+    +48h: it is keyed to the embedding grid, and the embedding grid is 13
+    points from -24h to +48h. This needs 29 points out to a week, so the
+    physiology is re-asof-joined onto the wider grid.
+
+    Returns one row per (patient, window) with `perfusion_state`, plus the
+    per-patient string. A window after the record ends carries a null state --
+    the patient has no MAP and no infusion because they are discharged or dead,
+    which is not the same as a perfused patient off pressors.
+    """
+    onset = pl.read_parquet(paths.cohort_home / "cs_onset.parquet").select(
+        "hospitalization_id",
+        onset=pl.col("cs_onset_dttm").cast(pl.Datetime("us")),
+    )
+    keep = set(cohort["hospitalization_id"].to_list())
+
+    parts = []
+    for site in paths.sites:
+        site_ids = set(
+            cohort.filter(pl.col("site") == site)["hospitalization_id"].to_list()
+        )
+        if not site_ids:
+            continue
+        grid = (
+            onset.filter(pl.col("hospitalization_id").is_in(list(site_ids)))
+            .join(
+                pl.DataFrame({"offset_hours": [float(o) for o in offsets]}),
+                how="cross",
+            )
+            .with_columns(
+                grid_dttm=pl.col("onset")
+                + pl.duration(seconds=(pl.col("offset_hours") * 3600).cast(pl.Int64))
+            )
+            .select("hospitalization_id", "offset_hours", "grid_dttm")
+        )
+        state = trajectory_state(paths.raw_subset(site), grid)
+        logger.info(
+            f"[{site}] physiology on {grid.height:,} seven-day grid points"
+        )
+        parts.append(state.with_columns(site=pl.lit(site)))
+
+    if not parts:
+        return pl.DataFrame()
+    state = pl.concat(parts, how="diagonal_relaxed")
+    state = perfusion_state(state, logger)
+    return state
+
+
+def cluster_perfusion_sequences(
+    state: pl.DataFrame, offsets, n_clusters: int, seed: int, logger
+):
+    """
+    cluster patients on their sequence through the four perfusion states
+
+    The states here are CLINICALLY DEFINED -- a MAP threshold with hysteresis
+    crossed with whether pressors run -- not learned from the data like the six
+    care states. That is the point of doing both: the care-state clustering
+    asks what groupings the record falls into, this asks how patients move
+    through a partition a clinician would recognise without being told.
+
+    Five symbols, not four: a window after the record ends is its own symbol.
+    Folding it into "MAP >65, no vasopressors" would say a discharged patient
+    is a well-perfused one, and folding it into the low state would say a dead
+    patient is hypotensive. Both are wrong and the second flatters the
+    clustering, since death is the outcome these strata get judged against.
+    """
+    symbols = list(PERFUSION_ORDER) + ["record ended"]
+    index = {s: i for i, s in enumerate(symbols)}
+    wide = (
+        state.with_columns(
+            symbol=pl.col("perfusion_state").fill_null("record ended")
+        )
+        .pivot(on="offset_hours", index="hospitalization_id", values="symbol")
+    )
+    columns = [str(float(o)) for o in offsets if str(float(o)) in wide.columns]
+    if len(columns) < 2:
+        logger.warning("not enough perfusion windows to cluster")
+        return pl.DataFrame()
+
+    patients = wide["hospitalization_id"].to_list()
+    codes = np.full((len(patients), len(columns)), index["record ended"], dtype=int)
+    for j, column in enumerate(columns):
+        values = wide[column].to_list()
+        codes[:, j] = [index.get(v if v is not None else "record ended",
+                                index["record ended"]) for v in values]
+
+    one_hot = np.zeros((len(patients), len(columns) * len(symbols)), dtype=np.float32)
+    for j in range(len(columns)):
+        one_hot[np.arange(len(patients)), j * len(symbols) + codes[:, j]] = 1.0
+
+    model = KMeans(n_clusters=n_clusters, random_state=seed, n_init=10)
+    labels = model.fit_predict(one_hot)
+    changes = (codes[:, 1:] != codes[:, :-1]).sum(axis=1)
+    logger.info(
+        f"perfusion-sequence clusters: k={n_clusters}, sizes "
+        f"{np.bincount(labels, minlength=n_clusters).tolist()}; "
+        f"{int((changes > 0).sum()):,} of {len(changes):,} patients "
+        f"({(changes > 0).mean():.1%}) change perfusion state at least once, "
+        f"median {np.median(changes):.0f} of {len(columns) - 1}"
+    )
+
+    short = {s: str(i) for i, s in enumerate(symbols)}
+    strings = ["".join(str(c) for c in row) for row in codes]
+    out = pl.DataFrame({
+        "hospitalization_id": patients,
+        "perfusion_cluster": [f"P{int(v) + 1}" for v in labels],
+        "perfusion_sequence": strings,
+        "perfusion_changes": changes.tolist(),
+    })
+    logger.info("  symbol key: " + ", ".join(
+        f"{short[s]}={s}" for s in symbols
+    ))
+    for cluster in sorted(out["perfusion_cluster"].unique().to_list()):
+        part = out.filter(pl.col("perfusion_cluster") == cluster)
+        top = part["perfusion_sequence"].value_counts(sort=True).head(3)
+        logger.info(f"  {cluster} n={part.height:,}")
+        for seq, n in zip(top["perfusion_sequence"].to_list(),
+                          top["count"].to_list()):
+            logger.info(f"      {seq}  x{n}")
+    return out
+
+
+def cluster_sequence_table(states, labels, offsets, logger, top: int = 4):
+    """
+    the commonest sequences in each cluster, and how it spends its time
+
+    Both, because neither alone is honest. The modal sequence is vivid but
+    thin -- with six symbols over 29 positions the most common string is
+    typically a few per cent of its cluster, and reading it as "what this
+    cluster looks like" is the mistake that led me to call these static when
+    98.6% of patients move. Occupancy is the mass: the share of all this
+    cluster's windows spent in each state.
+    """
+    rows = []
+    strings = ["".join(str(int(s)) for s in row) for row in states]
+    for cluster in sorted(set(labels.tolist())):
+        mask = labels == cluster
+        name = f"S{cluster + 1}"
+        members = [s for s, k in zip(strings, mask) if k]
+        counter = Counter(members)
+        occupancy = Counter(int(v) for row in states[mask] for v in row)
+        total = sum(occupancy.values())
+        for rank, (sequence, n) in enumerate(counter.most_common(top), start=1):
+            rows.append({
+                "cluster": name,
+                "patients": int(mask.sum()),
+                "rank": rank,
+                "sequence": sequence,
+                "patients_with_this_sequence": n,
+                "share_of_cluster": n / max(int(mask.sum()), 1),
+                "occupancy": "  ".join(
+                    f"{'none' if s == 0 else s}={occupancy[s] / total:.0%}"
+                    for s, _ in occupancy.most_common(4)
+                ),
+            })
+        logger.info(
+            f"  {name} n={int(mask.sum()):,}  modal {counter.most_common(1)[0][0]} "
+            f"(x{counter.most_common(1)[0][1]}, "
+            f"{counter.most_common(1)[0][1] / max(int(mask.sum()), 1):.1%} of the cluster)"
+        )
+    return pl.DataFrame(rows)
 
 
 def describe_states(counts, token_ids, states, patients, offsets, names, logger):
@@ -472,6 +643,11 @@ def main() -> None:
         parents=True, exist_ok=True
     )
     movement = state_movement(states, sequence_labels, logger)
+    logger.info("sequences per cluster:")
+    cluster_sequence_table(states, sequence_labels, OFFSETS, logger).write_csv(
+        paths.output_home / "tables" / paths.model_key
+        / f"cluster_sequences_{args.subset}.csv"
+    )
     vocab, _fam = (
         vocabulary(str(paths.tokenizer_yaml))
         if paths.tokenizer_yaml_or_none is not None else ({}, {})
@@ -575,9 +751,69 @@ def main() -> None:
         if paths.tokenizer_yaml_or_none is not None else ({}, {})
     )
     differential = []
+    # The clinically-defined counterpart: how patients move through the four
+    # MAP-by-pressor states. Independent of everything above -- it reads
+    # physiology, not tokens -- so it is a second opinion on the same patients
+    # rather than a variation on the same features.
+    perfusion = perfusion_sequences(paths, cohort, OFFSETS, logger)
+    if not perfusion.is_empty():
+        perfusion_labels = cluster_perfusion_sequences(
+            perfusion, OFFSETS, args.clusters, args.seed, logger
+        )
+        if not perfusion_labels.is_empty():
+            labels_frame = labels_frame.join(
+                perfusion_labels, on="hospitalization_id", how="left"
+            )
+            assignments = assignments.join(
+                perfusion_labels.select(
+                    "hospitalization_id", "perfusion_cluster",
+                    "perfusion_sequence",
+                ),
+                on="hospitalization_id", how="left",
+            )
+            symbols = list(PERFUSION_ORDER) + ["record ended"]
+            rows = []
+            for cluster in sorted(
+                perfusion_labels["perfusion_cluster"].unique().to_list()
+            ):
+                part = perfusion_labels.filter(
+                    pl.col("perfusion_cluster") == cluster
+                )
+                top = part["perfusion_sequence"].value_counts(sort=True).head(3)
+                for rank, (sequence, n) in enumerate(
+                    zip(top["perfusion_sequence"].to_list(),
+                        top["count"].to_list()), start=1
+                ):
+                    rows.append({
+                        "cluster": cluster,
+                        "patients": part.height,
+                        "rank": rank,
+                        "sequence": sequence,
+                        "patients_with_this_sequence": n,
+                        "share_of_cluster": n / max(part.height, 1),
+                        "median_changes": float(part["perfusion_changes"].median()),
+                    })
+            (paths.output_home / "tables" / paths.model_key).mkdir(
+                parents=True, exist_ok=True
+            )
+            pl.DataFrame(rows).write_csv(
+                paths.output_home / "tables" / paths.model_key
+                / f"perfusion_sequences_{args.subset}.csv"
+            )
+            pl.DataFrame({
+                "symbol": [str(i) for i in range(len(symbols))],
+                "state": symbols,
+            }).write_csv(
+                paths.output_home / "tables" / paths.model_key
+                / f"perfusion_symbol_key_{args.subset}.csv"
+            )
+
     tables_home = paths.output_home / "tables" / paths.model_key
     tables_home.mkdir(parents=True, exist_ok=True)
-    for label in ("sequence_cluster", "growth_cluster"):
+    stratifications = ["sequence_cluster", "growth_cluster"]
+    if "perfusion_cluster" in labels_frame.columns:
+        stratifications.append("perfusion_cluster")
+    for label in stratifications:
         summary = characterise(labels_frame, paths, label, logger)
         if not summary.is_empty():
             summary.write_csv(
@@ -652,6 +888,24 @@ def main() -> None:
         ),
         on="hospitalization_id", how="left",
     )
+    # the per-(patient, window) perfusion state travels in the same long table,
+    # so 09 can colour by it on exactly the same join key
+    if not perfusion.is_empty():
+        long = long.join(
+            perfusion.select(
+                "hospitalization_id", "offset_hours", "perfusion_state"
+            ),
+            on=["hospitalization_id", "offset_hours"],
+            how="left",
+        )
+        if "perfusion_cluster" in labels_frame.columns:
+            long = long.join(
+                labels_frame.select(
+                    "hospitalization_id", "perfusion_cluster"
+                ).unique(),
+                on="hospitalization_id", how="left",
+            )
+
     long_out = (
         paths.patient_level_home
         / f"longitudinal_states_{args.subset}.parquet"

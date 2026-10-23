@@ -2000,9 +2000,109 @@ def section_longitudinal(paths, out: list) -> None:
             {"patients": thousands, "share": pct},
         ))
 
+    sequences_file = tables_home / "cluster_sequences_septic.csv"
+    if sequences_file.is_file():
+        out.append('<h3>What the sequences in each stratum look like</h3>')
+        out.append(
+            "<p>The commonest sequences in each stratum, and how the stratum "
+            "spends its time. Both, because neither alone is honest. The "
+            "modal sequence is vivid but thin &mdash; with six symbols over 29 "
+            "positions the most common string is only 0.7&ndash;2.7% of its "
+            "stratum, and reading it as 'what this stratum looks like' is the "
+            "mistake that led to calling these static when 98.6% of patients "
+            "move. The occupancy column is the mass: the share of all that "
+            "stratum's windows spent in each state. Digits are care states; "
+            "<code>0</code> is a window with nothing recorded.</p>"
+        )
+        out.append(table(
+            pl.read_csv(sequences_file),
+            {
+                "patients": thousands,
+                "patients_with_this_sequence": thousands,
+                "share_of_cluster": pct,
+            },
+            key_column="cluster",
+        ))
+
+    perfusion_file = tables_home / "perfusion_sequences_septic.csv"
+    key_file = tables_home / "perfusion_symbol_key_septic.csv"
+    if perfusion_file.is_file():
+        out.append('<h3>Sequences through the MAP-by-pressor states</h3>')
+        out.append(
+            "<p>The same question asked of a <b>clinically defined</b> state "
+            "space rather than a learned one. The six care states above come "
+            "out of an NMF over token composition and have to be interpreted "
+            "after the fact; these four are a MAP threshold with hysteresis "
+            "crossed with whether vasopressors are running, so they mean "
+            "something before any clustering happens. Patients are clustered "
+            "on their 29-symbol path through them.</p>"
+        )
+        out.append(
+            "<p>Five symbols, not four: a window after the record ends is its "
+            "own symbol. Folding it into 'MAP&nbsp;&gt;&nbsp;65, no "
+            "vasopressors' would call a discharged patient a well-perfused "
+            "one, and folding it into a low state would call a dead patient "
+            "hypotensive &mdash; the second flatters the clustering, since "
+            "death is the outcome these strata get judged against.</p>"
+        )
+        if key_file.is_file():
+            out.append(table(pl.read_csv(key_file), {}, key_column="symbol"))
+        out.append(table(
+            pl.read_csv(perfusion_file),
+            {
+                "patients": thousands,
+                "patients_with_this_sequence": thousands,
+                "share_of_cluster": pct,
+                "median_changes": num(0),
+            },
+            key_column="cluster",
+        ))
+
+    if septic_home is not None:
+        overlays = [
+            (label, figure(septic_home / f"trajectory_flow_overlay_{tag}.png", note))
+            for tag, label, note in (
+                ("stratum", "Token strata",
+                 "One field per token-composition stratum"),
+                ("perfusion", "MAP/pressor clusters",
+                 "One field per MAP-by-pressor sequence cluster"),
+                ("care_state", "Care states",
+                 "One field per care state, pooled across patients"),
+                ("perfusion_state", "Perfusion states",
+                 "One field per MAP-by-pressor state"),
+            )
+        ]
+        overlays = [(label, body) for label, body in overlays if body]
+        if overlays:
+            out.append('<h3>A separate flow field per group, overlaid</h3>')
+            out.append(
+                "<p>Unlike every other flow figure here, <b>these fit one "
+                "field per group and overlay them</b>. The others fit a single "
+                "field over everyone and vary only the hue beneath it, so that "
+                "a difference between two panels cannot be a difference in the "
+                "arrows. These do the opposite deliberately: each group's "
+                "field comes from its own patients' displacements, so the "
+                "question is not where a group sits but whether the groups "
+                "<i>move differently through the same space</i>.</p>"
+            )
+            out.append(
+                "<p>Two cautions. Streamlines of different colours crossing is "
+                "not a contradiction &mdash; it is two groups passing through "
+                "one region in different directions, which is precisely what "
+                "the pooled field averages away. And the groups differ in size "
+                "several-fold, so a sparse group's field rests on fewer "
+                "vectors at the same linewidth; the per-group vector count is "
+                "in the legend rather than implied by the ink.</p>"
+            )
+            out.append(tabs(overlays))
+
     character_tabs = []
-    for path, label in ((character_file, "State sequences"),
-                        (growth_file, "Latent class growth")):
+    for path, label in (
+        (character_file, "State sequences"),
+        (growth_file, "Latent class growth"),
+        (tables_home / "cluster_characteristics_perfusion_cluster_septic.csv",
+         "MAP/pressor sequences"),
+    ):
         if not path.is_file():
             continue
         frame = pl.read_csv(path)
