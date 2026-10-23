@@ -2184,6 +2184,42 @@ def section_longitudinal(paths, out: list) -> None:
             )
             out.append(tabs(panels))
 
+    factor_dag = figure(
+        paths.output_home / "figures" / "GEM-all"
+        / "longitudinal_factor_dag_septic.png",
+        "",
+    )
+    if factor_dag:
+        out.append('<h3>Each latent class as a path through the NMF factors</h3>')
+        out.append(
+            "<p>Not on the projection. The PaCMAP-placed graphs tie the nodes "
+            "to the embedding geometry, which is right for four or six states "
+            "and unreadable for twelve &mdash; the nodes pack into whatever "
+            "space the cloud occupies. Here the factors are spread on a circle "
+            "so every edge is visible. The cost is that <b>distance on the "
+            "page no longer means anything</b>; only the edges do.</p>"
+        )
+        out.append(
+            "<p>Node colour matches the factor's colour in the hexagon maps, "
+            "and arrow colour matches the class's colour in the flow overlay, "
+            "so the three figures can be read together. Nodes are ordered "
+            "round the circle by the <b>mean window at which each factor "
+            "dominates</b>, making the ring roughly a timeline, so a class "
+            "that progresses reads as motion round it rather than as a "
+            "scribble. Node size is how many windows the factor dominates; the "
+            "figure inside is the share that stay put.</p>"
+        )
+        out.append(callout(
+            "Each window is assigned to its <b>single largest</b> factor. That "
+            "is a hard reading of a soft representation, and it is the point of "
+            "comparison: if these paths resemble the care-state graph, then "
+            "hardening twelve factors into six states by k-means lost little. "
+            "Transitions below 4% of a factor's departures are dropped &mdash; "
+            "twelve nodes allow 132 directed edges per class and most are "
+            "noise."
+        ))
+        out.append(factor_dag)
+
     if septic_home is not None:
         dag_panels = [
             (label, figure(septic_home / f"trajectory_{tag}_dag.png", note))

@@ -100,6 +100,9 @@ def characterise(frame: pl.DataFrame, paths, label: str, logger) -> pl.DataFrame
         key = cluster[0] if isinstance(cluster, tuple) else cluster
         row = {label: key, "n": part.height}
         for column, name, how in (
+            ("map_median", "median MAP (mmHg)", "median"),
+            ("map_min", "lowest MAP (mmHg)", "median"),
+            ("hours_hypotensive", "hours with MAP <65", "median"),
             ("nee_max", "peak norepinephrine equivalents", "median"),
             ("nee_median", "median norepinephrine equivalents", "median"),
             ("n_vasopressors_max", "peak vasoactive agents", "median"),
@@ -543,6 +546,180 @@ def differential_within_cluster(
     return table
 
 
+def plot_factor_dag(long, offsets, out, logger, min_share: float = 0.04):
+    """
+    each latent class as a path through the 12 NMF factors, laid out to be read
+
+    Not on the projection. The PaCMAP-placed graphs put nodes at their median
+    embedding position, which ties the graph to the geometry but packs twelve
+    nodes into whatever space the cloud happens to occupy -- unreadable past
+    about six. Here the nodes are spread on a circle, so every edge is visible,
+    and the cost is that distance on the page no longer means anything.
+
+    Node colour is the factor's colour in the hexagon maps and node order round
+    the circle is the MEAN WINDOW INDEX at which that factor dominates, so the
+    ring is roughly a timeline and a cluster that progresses reads as motion
+    round it rather than as a scribble.
+
+    Arrow colour is the latent class's colour in the flow overlay. One panel
+    per class, sharing the node layout, because four classes of arrows over
+    twelve nodes on one axes is 500-odd possible edges and nothing legible.
+
+    Each window is assigned to its single largest factor. That is a hard
+    reading of a soft representation and it is the point of comparison: if
+    these paths look like the care-state graph, the k-means hardening into six
+    states lost little.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from clifcs.figures import save_figure
+    from clifcs.palette import CONTEXT, GRID, INK_SECONDARY, husl_colors
+
+    frame = long.filter(
+        pl.col("max_factor").is_not_null()
+        & pl.col("growth_cluster").is_not_null()
+    )
+    if frame.is_empty():
+        logger.warning("no max_factor / growth_cluster rows; factor DAG skipped")
+        return
+
+    factors = sorted(frame["max_factor"].unique().to_list())
+    classes = sorted(frame["growth_cluster"].unique().to_list())
+    factor_colors = husl_colors(factors)
+    class_colors = husl_colors(classes)
+
+    # order the ring by when each factor tends to dominate
+    index_of_window = {float(o): i for i, o in enumerate(offsets)}
+    timing = (
+        frame.with_columns(
+            position=pl.col("offset_hours").replace_strict(
+                index_of_window, default=None, return_dtype=pl.Float64
+            )
+        )
+        .group_by("max_factor")
+        .agg(mean_position=pl.col("position").mean(), n=pl.len())
+    )
+    order = (
+        timing.sort("mean_position")["max_factor"].to_list()
+        if not timing.is_empty() else factors
+    )
+    order = [f for f in order if f in factors] + [f for f in factors if f not in order]
+    angles = {
+        f: 2.0 * np.pi * i / len(order) - np.pi / 2.0
+        for i, f in enumerate(order)
+    }
+    nodes = {f: (np.cos(a), np.sin(a)) for f, a in angles.items()}
+    occupancy = dict(zip(timing["max_factor"].to_list(), timing["n"].to_list()))
+    largest = max(occupancy.values()) if occupancy else 1
+
+    columns = 2
+    rows = int(np.ceil(len(classes) / columns))
+    figure, axes = plt.subplots(
+        rows, columns, figsize=(4.6 * columns, 4.4 * rows), squeeze=False
+    )
+
+    for index, cluster in enumerate(classes):
+        ax = axes[index // columns][index % columns]
+        part = frame.filter(pl.col("growth_cluster") == cluster).sort(
+            "hospitalization_id", "offset_hours"
+        )
+        pairs = (
+            part.with_columns(
+                next_factor=pl.col("max_factor").shift(-1).over("hospitalization_id"),
+                next_t=pl.col("offset_hours").shift(-1).over("hospitalization_id"),
+            )
+            .drop_nulls(["next_factor", "next_t"])
+            .filter(
+                (pl.col("next_t") - pl.col("offset_hours")
+                 - (offsets[1] - offsets[0])).abs() < 1e-6
+            )
+        )
+        counts = {}
+        for a, b in zip(pairs["max_factor"].to_list(),
+                        pairs["next_factor"].to_list()):
+            counts[(a, b)] = counts.get((a, b), 0) + 1
+        departures = {
+            f: sum(n for (a, _), n in counts.items() if a == f) for f in order
+        }
+
+        drawn = 0
+        for (a, b), n in sorted(counts.items(), key=lambda kv: kv[1]):
+            if a == b or a not in nodes or b not in nodes:
+                continue
+            share = n / max(departures.get(a, 1), 1)
+            if share < min_share:
+                continue
+            ax.annotate(
+                "", xy=nodes[b], xytext=nodes[a],
+                arrowprops=dict(
+                    arrowstyle="-|>", color=class_colors[cluster],
+                    alpha=0.8, linewidth=0.5 + 3.5 * share,
+                    shrinkA=11, shrinkB=13,
+                    connectionstyle="arc3,rad=0.18",
+                ),
+                zorder=2,
+            )
+            drawn += 1
+
+        for factor in order:
+            nx_, ny_ = nodes[factor]
+            stay = counts.get((factor, factor), 0) / max(departures.get(factor, 1), 1)
+            size = 120 + 520 * (occupancy.get(factor, 0) / largest)
+            ax.scatter([nx_], [ny_], s=size, c=factor_colors[factor],
+                       edgecolors="#ffffff", linewidths=1.0, zorder=3)
+            label_r = 1.26
+            ax.annotate(
+                factor.replace("factor ", "F"),
+                xy=(np.cos(angles[factor]) * label_r,
+                    np.sin(angles[factor]) * label_r),
+                ha="center", va="center", fontsize=6, color=INK_SECONDARY,
+                zorder=4,
+            )
+            if stay > 0:
+                ax.annotate(
+                    f"{stay:.0%}", xy=(nx_, ny_), ha="center", va="center",
+                    fontsize=5, color="#ffffff", zorder=5, fontweight="bold",
+                )
+
+        n_patients = part["hospitalization_id"].n_unique()
+        ax.set_title(
+            f"{cluster}  —  {n_patients:,} patients, {drawn} transitions "
+            f"above {min_share:.0%}",
+            loc="left", fontsize=8, pad=6, color=class_colors[cluster],
+        )
+        ax.set_xlim(-1.45, 1.45)
+        ax.set_ylim(-1.45, 1.45)
+        ax.set_aspect("equal")
+        ax.axis("off")
+        logger.info(
+            f"  {cluster}: {n_patients:,} patients, {len(counts):,} distinct "
+            f"transitions, {drawn} drawn above {min_share:.0%}"
+        )
+
+    for index in range(len(classes), rows * columns):
+        axes[index // columns][index % columns].axis("off")
+
+    figure.suptitle(
+        "Latent class growth: paths through the 12 NMF factors",
+        x=0.01, ha="left", fontsize=10,
+    )
+    figure.text(
+        0.01, 0.005,
+        "Nodes are the 12 NMF factors in the hexagon-map colours, placed on a "
+        "circle ordered by the mean window at which each dominates, sized by "
+        "how many windows it dominates; the figure inside is the share that "
+        "stay. Arrows are in each class's flow-overlay colour, width is the "
+        "share of departures. Each window is assigned to its single largest "
+        "factor, which is a hard reading of a soft representation.",
+        fontsize=5.5, color=INK_SECONDARY, wrap=True,
+    )
+    save_figure(figure, out)
+    plt.close(figure)
+    logger.info(f"wrote {out}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--subset", default="septic",
@@ -723,34 +900,6 @@ def main() -> None:
                 f"{labels_frame.height:,} patients have a CRRT token in the window"
             )
 
-    # treatment, read off the state table 09 already wrote
-    state_file = paths.patient_level_home / "trajectory_state.parquet"
-    if state_file.is_file():
-        per_patient = (
-            pl.read_parquet(state_file)
-            .filter(pl.col("offset_hours").is_between(OFFSETS[0], OFFSETS[-1]))
-            .group_by("hospitalization_id")
-            .agg(
-                nee_max=pl.col("nee").max(),
-                nee_median=pl.col("nee").median(),
-                n_vasopressors_max=pl.col("n_vasopressors").max(),
-                ever_imv=pl.col("on_imv").max() > 0,
-            )
-        )
-        labels_frame = labels_frame.join(
-            per_patient, on="hospitalization_id", how="left"
-        )
-    else:
-        logger.warning(
-            f"{state_file.name} not found: treatment columns omitted. Run 09 "
-            "--stage plot first."
-        )
-
-    names, _families = (
-        vocabulary(str(paths.tokenizer_yaml))
-        if paths.tokenizer_yaml_or_none is not None else ({}, {})
-    )
-    differential = []
     # The clinically-defined counterpart: how patients move through the four
     # MAP-by-pressor states. Independent of everything above -- it reads
     # physiology, not tokens -- so it is a second opinion on the same patients
@@ -826,6 +975,37 @@ def main() -> None:
                 / f"perfusion_symbol_key_{args.subset}.csv"
             )
 
+    # Treatment and haemodynamics over the SEVEN-DAY window, from the state
+    # table this script built for the perfusion sequences. 09's
+    # trajectory_state.parquet is keyed to the 13-point embedding grid and
+    # stops at +48h, so aggregating it would describe the first two days and
+    # label the result as a seven-day stratum.
+    if not perfusion.is_empty():
+        per_patient = (
+            perfusion.group_by("hospitalization_id").agg(
+                map_median=pl.col("map").median(),
+                map_min=pl.col("map").min(),
+                nee_max=pl.col("nee").max(),
+                nee_median=pl.col("nee").median(),
+                n_vasopressors_max=pl.col("n_vasopressors").max(),
+                ever_imv=pl.col("on_imv").max() > 0,
+                hours_hypotensive=(
+                    pl.col("perfusion_state").str.starts_with("MAP <65").sum()
+                    * STEP_HOURS
+                ),
+            )
+        )
+        labels_frame = labels_frame.join(
+            per_patient, on="hospitalization_id", how="left"
+        )
+    else:
+        logger.warning("no perfusion state table: treatment columns omitted")
+
+    names, _families = (
+        vocabulary(str(paths.tokenizer_yaml))
+        if paths.tokenizer_yaml_or_none is not None else ({}, {})
+    )
+    differential = []
     tables_home = paths.output_home / "tables" / paths.model_key
     tables_home.mkdir(parents=True, exist_ok=True)
     stratifications = ["sequence_cluster", "growth_cluster"]
@@ -949,6 +1129,12 @@ def main() -> None:
         / f"longitudinal_states_{args.subset}.parquet"
     )
     long.write_parquet(long_out)
+    logger.info("latent class paths through the NMF factors:")
+    plot_factor_dag(
+        long, OFFSETS,
+        paths.figure_home / f"longitudinal_factor_dag_{args.subset}.png",
+        logger,
+    )
     logger.info(
         f"wrote {long_out} ({long.height:,} patient-windows, "
         f"{len(OFFSETS)} per patient)"
