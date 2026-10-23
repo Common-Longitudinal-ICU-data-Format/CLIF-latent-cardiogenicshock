@@ -106,6 +106,8 @@ figcaption {{ font-size: 12.5px; color: var(--ink-2); margin-top: 7px; }}
   padding: 12px 16px; margin: 18px 0; border-radius: 0 4px 4px 0;
 }}
 .callout.warn {{ border-left-color: #eb6834; background: #fdf5f1; }}
+.source {{ font-size: 11px; color: #8a8980; margin: 2px 0 0 0; }}
+.source code {{ font-size: 10px; background: #f4f3f0; padding: 1px 4px; }}
 .callout p {{ margin: 0; color: var(--ink); font-size: 14px; }}
 code {{
   font: 12.5px ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -241,14 +243,34 @@ EMBED_MAX_PX = 1800
 
 
 def figure(path: pathlib.Path, caption: str = "") -> str:
+    """
+    one figure, embedded, with a pointer to its manuscript copy
+
+    The embedded image is downscaled for the report; the manuscript copy beside
+    it is the same figure at 500 dpi with the axis furniture off and a
+    transparent background. The path is printed rather than linked because the
+    report travels as a single self-contained file and a relative link would
+    break the moment it is moved or emailed.
+    """
     path = pathlib.Path(path)
     if not path.is_file():
         return ""
     data = base64.b64encode(_downscaled(path)).decode()
     cap = f"<figcaption>{caption}</figcaption>" if caption else ""
+    manuscript = path.parent / "manuscript" / path.name
+    source = ""
+    if manuscript.is_file():
+        try:
+            shown = manuscript.relative_to(pathlib.Path.cwd())
+        except ValueError:
+            shown = manuscript
+        source = (
+            f'<p class="source">manuscript copy (500&nbsp;dpi, no axes, '
+            f'transparent): <code>{esc(str(shown))}</code></p>'
+        )
     return (
         f'<figure><img src="data:image/png;base64,{data}" alt="{esc(caption)}">'
-        f"{cap}</figure>"
+        f"{cap}{source}</figure>"
     )
 
 
@@ -2381,6 +2403,93 @@ def section_longitudinal(paths, out: list) -> None:
                 "tokens at all.</p>"
             )
             out.append(tabs(cluster_views))
+
+    factor_tokens_file = tables_home / "nmf_factor_tokens_septic.csv"
+    if factor_tokens_file.is_file():
+        out.append('<h3>What each NMF factor is made of</h3>')
+        out.append(
+            "<p>The top-loading tokens per factor, with each token's share of "
+            "that factor's mass and the share the top twelve carry together. "
+            "<code>components_</code> is non-negative, which is why NMF is used "
+            "here rather than PCA: a factor is a set of events that co-occur, "
+            "so its loadings read as a description instead of a contrast "
+            "between two things.</p>"
+        )
+        out.append(
+            "<p>The <b>cover</b> column is the one to read first. A factor "
+            "whose top twelve tokens carry most of its mass is one clinical "
+            "pattern and can be named; a factor carrying 40&ndash;55% is a "
+            "diffuse mixture, and those turn out to be the interesting ones "
+            "&mdash; they are where NMF found genuine co-occurrence rather "
+            "than allocating a whole component to a single token.</p>"
+        )
+        out.append(callout(
+            "<b>Eight of the twelve factors are care delivery or "
+            "documentation, not physiology.</b> F1 is <code>UNK</code> at 73% "
+            "&mdash; token id 0, the tokenizer's reserved out-of-vocabulary "
+            "slot, emitted whenever an event has no entry in the fitted "
+            "vocabulary (7.8% of tokens at UCMC, 8.8% at NU, 14.8% at Rush). "
+            "F4 is end-of-record (<code>EOS</code> plus "
+            "<code>XFR-OUT//icu</code>, 99% cover). F10 is <i>which labs were "
+            "ordered</i>, not their values. F2, F5, F7 and F8 are four slices "
+            "of the respiratory-support ladder read off device and FiO&#8322; "
+            "settings.<br><br>"
+            "Only F6 (hypotension), F9 (hypertension), F11 (tachycardia with "
+            "tachypnoea) and F12 (high SpO&#8322;) are primarily patient "
+            "state, and those are exactly the diffuse ones. So when the latent "
+            "classes move through factors, much of that movement is through "
+            "<b>respiratory support levels and charting states</b>. That is a "
+            "real finding, but it means these are better described as classes "
+            "of care-delivery trajectory than of illness trajectory."
+        ))
+        frame = pl.read_csv(factor_tokens_file)
+        out.append(table(
+            frame.rename({"top_tokens_cover": "cover"}),
+            {"loading": num(3), "share_of_factor": pct, "cover": pct},
+            key_column="factor",
+        ))
+
+    adjusted_file = tables_home / "adjusted_mortality_septic.csv"
+    if adjusted_file.is_file():
+        out.append('<h3>Mortality adjusted for severity at onset</h3>')
+        out.append(
+            "<p>Logistic regression of in-hospital death on baseline "
+            "physiology at shock onset &mdash; SOFA, MAP, lactate, "
+            "norepinephrine equivalents, vasoactive agent count, GCS, "
+            "creatinine, platelets, ventilation and age &mdash; with and "
+            "without the cluster term. AUC is five-fold cross-validated; the "
+            "odds ratios are fitted on all rows against the first cluster as "
+            "reference.</p>"
+        )
+        out.append(
+            "<p>The <b>in record at +48h</b> rows are a landmark: restricted "
+            "to patients still being charted two days in, so the sequence that "
+            "assigned the cluster is observed before most of the deaths it is "
+            "asked to predict. It is a partial fix only &mdash; the criterion "
+            "is 'has a recent MAP at +48h', which most patients satisfy even "
+            "if they die on day five.</p>"
+        )
+        out.append(callout(
+            "<b>Read these against the balance plot above.</b> "
+            "'Record ended' is a symbol in the clustering feature space, so "
+            "the most lethal clusters are partly identified <i>by</i> dying "
+            "and no adjustment removes that. The covariate balance decides "
+            "which of these numbers is a comparison and which is "
+            "extrapolation: G2 sits 1.73 standard deviations from the other "
+            "classes on baseline ventilation, so its odds ratio is arithmetic "
+            "rather than evidence, while the MAP/pressor clusters stay within "
+            "0.44 and are the ones worth quoting.",
+            "warn"
+        ))
+        out.append(table(
+            pl.read_csv(adjusted_file),
+            {
+                "n": thousands, "died": pct, "crude_mortality": pct,
+                "adjusted_odds_ratio": num(2),
+                "auc_severity_only": num(4), "auc_with_cluster": num(4),
+            },
+            key_column="stratification",
+        ))
 
     balance_panels = [
         (label, figure(
