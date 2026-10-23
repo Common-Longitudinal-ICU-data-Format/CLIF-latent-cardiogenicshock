@@ -31,6 +31,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import pathlib
 import shutil
@@ -43,6 +44,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 
+import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
@@ -602,7 +604,8 @@ def project(frame: pl.DataFrame, seed: int, logger) -> pl.DataFrame:
 
 
 def displacement_field(
-    frame: pl.DataFrame, x: str, y: str, bins: int = 26, smooth: float = 1.0
+    frame: pl.DataFrame, x: str, y: str, bins: int = 26, smooth: float = 1.0,
+    step_hours: float | None = None,
 ):
     """
     mean displacement per grid cell, from consecutive timepoints of one patient
@@ -610,6 +613,20 @@ def displacement_field(
     Each patient contributes one vector per consecutive pair, placed at the
     earlier position. Cells holding fewer than a handful of vectors are left
     empty rather than drawn from noise.
+
+    `step_hours` MATTERS WHENEVER THE CALLER HAS FILTERED BY TIMEPOINT. The
+    pairing shifts within hospitalization_id over whatever rows it is given, so
+    a frame filtered to one per-timepoint label -- a care state, a perfusion
+    state -- pairs a patient's +0h row with their +24h row when the windows
+    between were some other state, and reports that 24-hour displacement as if
+    it were one 6-hour step. The vector is then both too long and attributed to
+    a transition that never happened. Passing the step drops any pair whose
+    gap is not one step, which turns such a frame into "where patients go next
+    FROM this state" -- a real quantity -- instead of a corrupted field.
+
+    Not needed when the filter is per patient (a cluster, a phenotype), since
+    every one of that patient's timepoints survives and the pairs stay
+    adjacent. Harmless there regardless.
     """
     ordered = frame.sort("hospitalization_id", "offset_hours")
     dx = (
@@ -623,6 +640,16 @@ def displacement_field(
             vx=pl.col("next_x") - pl.col(x), vy=pl.col("next_y") - pl.col(y)
         )
     )
+    if step_hours is not None:
+        before = dx.height
+        dx = dx.filter(
+            (pl.col("next_t") - pl.col("offset_hours") - step_hours).abs() < 1e-6
+        )
+        if dx.height != before:
+            logging.getLogger("09_trajectories").info(
+                f"    dropped {before - dx.height:,} of {before:,} pairs that "
+                f"span more than one {step_hours:g}h step"
+            )
     px, py = dx[x].to_numpy(), dx[y].to_numpy()
     vx, vy = dx["vx"].to_numpy(), dx["vy"].to_numpy()
 
@@ -2407,7 +2434,8 @@ def plot_last_token_single(frame, px, py, variable, home, logger) -> None:
 
 
 def plot_cluster_flow_overlay(frame, x, y, column, out, title, logger,
-                              min_vectors: int = 5) -> None:
+                              min_vectors: int = 5,
+                              step_hours: float | None = None) -> None:
     """
     one streamplot per cluster, all on the same axes in the cluster's colour
 
@@ -2449,7 +2477,9 @@ def plot_cluster_flow_overlay(frame, x, y, column, out, title, logger,
     handles = []
     for depth, level in enumerate(levels):
         part = frame.filter(pl.col(column) == level)
-        cx, cy, vx, vy, counts, n_vectors = displacement_field(part, x, y)
+        cx, cy, vx, vy, counts, n_vectors = displacement_field(
+            part, x, y, step_hours=step_hours
+        )
         if n_vectors < min_vectors:
             logger.info(f"  {level}: {n_vectors} vectors, too few to draw")
             continue
@@ -2487,6 +2517,243 @@ def plot_cluster_flow_overlay(frame, x, y, column, out, title, logger,
     ax.set_axisbelow(True)
     for side in ("top", "right"):
         ax.spines[side].set_visible(False)
+    save_figure(figure, out)
+    plt.close(figure)
+    logger.info(f"wrote {out}")
+
+
+
+
+# ============================================================ state hexagons
+
+
+def _hex_counts(ax, px, py, codes, n_levels, gridsize, extent):
+    """
+    per-hexagon counts of each level, on one shared hex grid
+
+    matplotlib's hexbin drops empty bins, and it drops a different set for
+    every level, so calling it once per level gives arrays that do not line up.
+    Instead one call establishes the grid, and points are assigned to the
+    nearest hexagon centre -- which for a hex lattice IS the hexagon they fall
+    in -- so every level is counted against the same bins.
+    """
+    from scipy.spatial import cKDTree
+
+    collection = ax.hexbin(
+        px, py, gridsize=gridsize, extent=extent, mincnt=1,
+        linewidths=0.15, edgecolors="#ffffff",
+    )
+    centres = collection.get_offsets()
+    _, nearest = cKDTree(centres).query(np.column_stack([px, py]))
+    counts = np.zeros((n_levels, len(centres)))
+    np.add.at(counts, (codes, nearest), 1.0)
+    return collection, centres, counts
+
+
+def plot_state_hexbin(frame, x, y, column, colors, order, out, title, subtitle,
+                      logger, mode: str = "plurality", gridsize: int = 34,
+                      min_count: int = 10, step_hours: float | None = None) -> None:
+    """
+    the projection tiled into hexagons, each coloured by which state owns it
+
+    Two modes, because they answer different questions and disagree in exactly
+    the way that matters when the states are unevenly sized.
+
+      plurality   the most common state in the hexagon. Reads directly -- "if
+                  you are here you are probably in this state" -- and is what a
+                  clinician would want. But a state holding 40% of all
+                  timepoints wins hexagons where it is merely present, so a
+                  small state can be locally dominant and still never appear.
+
+      enrichment  the state most concentrated here RELATIVE TO ITS OWN TOTAL:
+                  argmax over s of (count in this hexagon / that state's grand
+                  total). Size cancels, so a small state shows up wherever it
+                  actually localises. The cost is symmetric and real: a state
+                  with few timepoints wins thinly-populated hexagons on a
+                  handful of points, because a small denominator makes small
+                  numerators look large.
+
+    Both are drawn and neither is the answer. Where they agree, the structure
+    is not an artefact of group size. Where they differ, the difference is the
+    finding -- it says a region belongs to the big state by headcount and to a
+    small state by concentration.
+
+    Guards against the failure modes above: hexagons below `min_count` points
+    are drawn in grey rather than awarded to anyone, and opacity carries the
+    strength of the call, so a hexagon won 31%-to-30% is visibly fainter than
+    one won 90%-to-5%. The legend reports how many hexagons each state took.
+    """
+    canon = np.array([key_string(v) for v in frame[column].to_list()])
+    levels = [level for level in order if (canon == key_string(level)).any()]
+    if len(levels) < 2:
+        logger.info(f"{column}: fewer than two levels present, hexbin skipped")
+        return
+    code_of = {key_string(level): i for i, level in enumerate(levels)}
+    keep = np.array([c in code_of for c in canon])
+    codes = np.array([code_of[c] for c in canon[keep]])
+    px = frame[x].to_numpy()[keep]
+    py = frame[y].to_numpy()[keep]
+
+    lo_x, hi_x = np.percentile(px, [0.5, 99.5])
+    lo_y, hi_y = np.percentile(py, [0.5, 99.5])
+    extent = (lo_x, hi_x, lo_y, hi_y)
+
+    figure, (ax, legend_ax) = plt.subplots(
+        1, 2, figsize=(6.8, 5.2),
+        gridspec_kw={"width_ratios": [4.0, 1.3], "wspace": 0.04},
+    )
+    legend_ax.axis("off")
+    collection, centres, counts = _hex_counts(
+        ax, px, py, codes, len(levels), gridsize, extent
+    )
+
+    totals = counts.sum(axis=0)
+    if mode == "enrichment":
+        grand = counts.sum(axis=1, keepdims=True)
+        score = counts / np.maximum(grand, 1.0)
+    else:
+        score = counts / np.maximum(totals, 1.0)
+
+    winner = np.argmax(score, axis=0)
+    ordered_score = np.sort(score, axis=0)
+    margin = ordered_score[-1] - ordered_score[-2]
+    # opacity from how decisively the hexagon was won, floored so that a
+    # genuinely contested hexagon is faint but not invisible
+    with np.errstate(invalid="ignore", divide="ignore"):
+        strength = margin / np.maximum(ordered_score[-1], 1e-12)
+    alpha = 0.25 + 0.75 * np.clip(strength, 0.0, 1.0)
+
+    faces = []
+    for h in range(len(centres)):
+        if totals[h] < min_count:
+            faces.append((0.886, 0.882, 0.863, 0.45))  # CONTEXT, muted
+            continue
+        rgba = list(mcolors.to_rgba(colors[levels[winner[h]]]))
+        rgba[3] = float(alpha[h])
+        faces.append(tuple(rgba))
+    collection.set_array(None)
+    collection.set_facecolor(faces)
+
+    # the flow field on top, from the same timepoints
+    cx, cy, vx, vy, cell_counts, n_vectors = displacement_field(
+        frame[keep], x, y, step_hours=step_hours
+    )
+    mask = cell_counts < 5
+    with np.errstate(invalid="ignore"):
+        ax.streamplot(
+            cx, cy, np.where(mask, np.nan, vx), np.where(mask, np.nan, vy),
+            color=INK_PRIMARY, linewidth=0.6, arrowsize=0.7, density=0.9,
+            zorder=5,
+        )
+
+    won = np.array([
+        levels[winner[h]] if totals[h] >= min_count else None
+        for h in range(len(centres))
+    ])
+    handles = []
+    for level in levels:
+        n_hex = int((won == level).sum())
+        share = (canon[keep] == key_string(level)).mean()
+        handles.append(plt.Line2D(
+            [], [], marker="h", linestyle="none", markersize=7,
+            markerfacecolor=colors[level], markeredgecolor="none",
+            label=f"{level}\n  {n_hex} hexes, {share:.0%} of points",
+        ))
+        logger.info(
+            f"    {level:<28} {n_hex:>4} hexagons, {share:>5.1%} of timepoints"
+        )
+    handles.append(plt.Line2D(
+        [], [], marker="h", linestyle="none", markersize=7,
+        markerfacecolor="#e2e1dc", markeredgecolor="none",
+        label=f"under {min_count} points",
+    ))
+    legend_ax.legend(
+        handles=handles, loc="upper left", bbox_to_anchor=(0, 1),
+        labelcolor=INK_SECONDARY, fontsize=6, handletextpad=0.6, borderpad=0,
+        frameon=False, labelspacing=1.1,
+    )
+
+    ax.set_title(title, loc="left", pad=8)
+    ax.set_xlabel(proj_labels()[0])
+    ax.set_ylabel(proj_labels()[1])
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    figure.text(0.012, 0.015, subtitle, fontsize=6.5, color=INK_SECONDARY)
+    save_figure(figure, out)
+    plt.close(figure)
+    logger.info(
+        f"wrote {out} ({len(centres)} hexagons, "
+        f"{int((totals >= min_count).sum())} above the {min_count}-point floor, "
+        f"{n_vectors:,} displacement vectors)"
+    )
+
+
+def plot_state_small_multiples(frame, x, y, column, colors, order, out, title,
+                               logger, step_hours: float | None = None) -> None:
+    """
+    one panel per state: that state on top, everyone else in grey behind
+
+    The honest counterpart to the hexagon figures. No binning, no voting, no
+    normalisation -- just where this state's timepoints are, against the whole
+    cloud. If a state looks localised here it is localised; nothing in this
+    figure can manufacture structure from an uneven denominator, which is the
+    standing risk in both hexagon modes.
+
+    The flow field in each panel is computed from the timepoints IN that state,
+    with the one-step guard, so it reads as "when a patient is in this state,
+    where do they go next" rather than as the pooled field repeated four times.
+    """
+    levels = [
+        level for level in order
+        if (np.array([key_string(v) for v in frame[column].to_list()])
+            == key_string(level)).any()
+    ]
+    if not levels:
+        return
+    canon = np.array([key_string(v) for v in frame[column].to_list()])
+
+    columns = 2
+    rows = int(np.ceil(len(levels) / columns))
+    figure, axes = plt.subplots(
+        rows, columns, figsize=(3.4 * columns, 3.0 * rows),
+        squeeze=False, sharex=True, sharey=True,
+    )
+    for index, level in enumerate(levels):
+        ax = axes[index // columns][index % columns]
+        mask = canon == key_string(level)
+        ax.scatter(frame[x].to_numpy()[~mask], frame[y].to_numpy()[~mask],
+                   s=0.8, c="#d9d7d2", linewidths=0, alpha=0.55,
+                   rasterized=True, zorder=1)
+        ax.scatter(frame[x].to_numpy()[mask], frame[y].to_numpy()[mask],
+                   s=1.6, c=colors[level], linewidths=0, alpha=0.8,
+                   rasterized=True, zorder=2)
+        part = frame.filter(pl.col(column) == level)
+        cx, cy, vx, vy, counts, n_vectors = displacement_field(
+            part, x, y, step_hours=step_hours
+        )
+        if n_vectors >= 5:
+            blank = counts < 5
+            with np.errstate(invalid="ignore"):
+                ax.streamplot(
+                    cx, cy, np.where(blank, np.nan, vx),
+                    np.where(blank, np.nan, vy), color=INK_PRIMARY,
+                    linewidth=0.5, arrowsize=0.6, density=0.8, zorder=3,
+                )
+        ax.set_title(
+            f"{level}\n{int(mask.sum()):,} timepoints, {n_vectors:,} vectors",
+            loc="left", fontsize=7, pad=4,
+        )
+        ax.tick_params(labelsize=6)
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(False)
+        logger.info(
+            f"    {level:<28} {int(mask.sum()):>7,} timepoints, "
+            f"{n_vectors:>7,} vectors"
+        )
+    for index in range(len(levels), rows * columns):
+        axes[index // columns][index % columns].axis("off")
+
+    figure.suptitle(title, x=0.01, ha="left", fontsize=9)
     save_figure(figure, out)
     plt.close(figure)
     logger.info(f"wrote {out}")
@@ -2916,6 +3183,10 @@ def main() -> None:
         plot_cluster_flow_overlay(
             frame, px, py, column, home / filename,
             f"{paths.model_key}: one field per group, {what}", logger,
+            step_hours=(
+                args.step_hours
+                if column in ("care_state", "perfusion_state") else None
+            ),
         )
 
     if "perfusion_state" in frame.columns and args.subset in ("all", "septic"):
@@ -2930,6 +3201,25 @@ def main() -> None:
                 "colors": PERFUSION_COLORS,
                 "order": list(PERFUSION_ORDER),
             },
+        )
+        for mode, tag in (("plurality", "vote"), ("enrichment", "mass")):
+            plot_state_hexbin(
+                frame, px, py, "perfusion_state", PERFUSION_COLORS,
+                list(PERFUSION_ORDER),
+                home / f"trajectory_perfusion_hex_{mode}.png",
+                f"{paths.model_key}: perfusion state by hexagon, {mode}",
+                "plurality = most common state in the hexagon; enrichment = "
+                "the state most concentrated here relative to its own total. "
+                "Opacity carries how decisively the hexagon was won.",
+                logger, mode=mode, step_hours=args.step_hours,
+            )
+        logger.info("perfusion state, one panel each:")
+        plot_state_small_multiples(
+            frame, px, py, "perfusion_state", PERFUSION_COLORS,
+            list(PERFUSION_ORDER),
+            home / "trajectory_perfusion_panels.png",
+            f"{paths.model_key}: perfusion states, one at a time",
+            logger, step_hours=args.step_hours,
         )
         perfusion_transitions(
             frame, home / "trajectory_perfusion_transitions.png",
