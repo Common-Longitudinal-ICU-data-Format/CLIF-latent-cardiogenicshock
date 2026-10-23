@@ -603,6 +603,31 @@ def project(frame: pl.DataFrame, seed: int, logger) -> pl.DataFrame:
     )
 
 
+#: A cell carries an arrow only if it holds at least this many of the group's
+#: displacement vectors, as an absolute floor and as a share of the group.
+#:
+#: The share is what keeps the rule honest across groups of very different
+#: size. A flat floor of five vectors is strict for a 3,000-vector state and
+#: almost no constraint at all for a 38,000-vector one, which is why the big
+#: groups' fields reached furthest into empty space. 0.15% is about 30 vectors
+#: at 20,000 and falls back to the floor below ~3,300.
+FLOW_MIN_VECTORS = 5
+FLOW_MIN_FRACTION = 0.0015
+
+#: How far a streamline may be integrated, in axes-diagonal fractions.
+#: matplotlib's default is 4.0, which lets one line cross the whole figure and
+#: carry a direction from a dense region into a region that merely happens to
+#: be downstream of it. Short segments read as "the flow here is this way"
+#: rather than as a path a patient took.
+FLOW_MAXLENGTH = 0.35
+
+
+def flow_support(counts, n_vectors: int):
+    """cells whose vector carries enough local support to be drawn"""
+    floor = max(FLOW_MIN_VECTORS, FLOW_MIN_FRACTION * max(n_vectors, 0))
+    return counts >= floor
+
+
 def displacement_field(
     frame: pl.DataFrame, x: str, y: str, bins: int = 26, smooth: float = 1.0,
     step_hours: float | None = None,
@@ -662,11 +687,25 @@ def displacement_field(
     sum_x, _, _ = np.histogram2d(px, py, bins=[edges_x, edges_y], weights=vx)
     sum_y, _, _ = np.histogram2d(px, py, bins=[edges_x, edges_y], weights=vy)
 
+    # Smooth the SUMS and the COUNTS, then divide -- a kernel-weighted mean.
+    #
+    # The previous order was wrong in a way that showed up as arrows wandering
+    # off into empty space. It divided first, wrote 0.0 into every sparse cell,
+    # and smoothed that: an empty cell beside a busy one picked up a non-zero
+    # vector from the blur, so streamlines could be integrated through regions
+    # where the group had no patients at all, and a busy cell at the edge of
+    # the cloud was pulled toward zero by the emptiness next to it. Smoothing
+    # the numerator and denominator separately keeps the direction honest and
+    # makes the denominator itself the measure of local support.
+    smooth_counts = gaussian_filter(counts, smooth)
     with np.errstate(invalid="ignore", divide="ignore"):
-        mean_x = np.where(counts >= 5, sum_x / counts, 0.0)
-        mean_y = np.where(counts >= 5, sum_y / counts, 0.0)
-    mean_x = gaussian_filter(mean_x, smooth)
-    mean_y = gaussian_filter(mean_y, smooth)
+        mean_x = np.where(smooth_counts > 0, gaussian_filter(sum_x, smooth)
+                          / np.maximum(smooth_counts, 1e-9), 0.0)
+        mean_y = np.where(smooth_counts > 0, gaussian_filter(sum_y, smooth)
+                          / np.maximum(smooth_counts, 1e-9), 0.0)
+    # the support each cell's vector actually rests on, for the caller to mask
+    # on; `counts` alone understates it for a cell whose neighbours are busy
+    counts = smooth_counts
 
     centres_x = 0.5 * (edges_x[:-1] + edges_x[1:])
     centres_y = 0.5 * (edges_y[:-1] + edges_y[1:])
@@ -772,7 +811,7 @@ def cell_coherence(frame: pl.DataFrame, x: str, y: str, bins: int = 26) -> float
     sum_x, _, _ = np.histogram2d(px, py, [edges_x, edges_y], weights=vx)
     sum_y, _, _ = np.histogram2d(px, py, [edges_x, edges_y], weights=vy)
     sum_speed, _, _ = np.histogram2d(px, py, [edges_x, edges_y], weights=speed)
-    ok = counts >= 5
+    ok = flow_support(counts, int(counts.sum()))
     if not ok.any():
         return float("nan")
     return float(
@@ -1118,7 +1157,7 @@ def plot_state_flow_single(frame, x, y, name, out, title, logger) -> None:
         logger.info(f"  {name}: {int(finite.sum())} finite values, no panel")
         return
 
-    cx, cy, vx, vy, counts, _ = displacement_field(frame, x, y)
+    cx, cy, vx, vy, counts, n_vectors = displacement_field(frame, x, y)
     figure, ax = plt.subplots(figsize=(6.0, 5.2))
 
     mesh = ax.hexbin(
@@ -1138,7 +1177,9 @@ def plot_state_flow_single(frame, x, y, name, out, title, logger) -> None:
 
     # arrows above the underlay, explicitly -- see plot_flow
     ax.streamplot(
-        cx, cy, np.ma.array(vx, mask=counts < 5), np.ma.array(vy, mask=counts < 5),
+        cx, cy,
+        np.ma.array(vx, mask=~flow_support(counts, n_vectors)),
+        np.ma.array(vy, mask=~flow_support(counts, n_vectors)),
         color=INK_PRIMARY, linewidth=0.7, density=1.4, arrowsize=0.9,
         arrowstyle="->", zorder=3,
     )
@@ -1171,7 +1212,7 @@ def plot_state_flow(frame, x, y, out, title, logger, columns: int = 4):
         logger.warning("no state variables available to underlay")
         return pl.DataFrame()
 
-    cx, cy, vx, vy, counts, _ = displacement_field(frame, x, y)
+    cx, cy, vx, vy, counts, n_vectors = displacement_field(frame, x, y)
     rows = int(np.ceil(len(available) / columns))
     figure, axes = plt.subplots(rows, columns, figsize=(3.6 * columns, 3.3 * rows),
                                 squeeze=False)
@@ -1207,8 +1248,8 @@ def plot_state_flow(frame, x, y, out, title, logger, columns: int = 4):
         good = cells.compressed() if hasattr(cells, "compressed") else cells
         lo, hi = np.nanpercentile(good[np.isfinite(good)], [2, 98])
         points.set_clim(lo, hi)
-        masked_x = np.ma.array(vx, mask=counts < 5)
-        masked_y = np.ma.array(vy, mask=counts < 5)
+        masked_x = np.ma.array(vx, mask=~flow_support(counts, n_vectors))
+        masked_y = np.ma.array(vy, mask=~flow_support(counts, n_vectors))
         # zorder above the underlay rather than relying on call order: a
         # streamplot is a LineCollection plus FancyArrowPatches, and collections
         # and patches do not share a default zorder, so the arrows could land
@@ -1539,7 +1580,7 @@ def pick_flow_followers(frame: pl.DataFrame, x, y, logger, n: int = 8,
     for "follows the field" to mean anything, and six grid points is three
     steps at the coarsest useful resolution.
     """
-    cx, cy, vx, vy, counts, _ = displacement_field(frame, x, y)
+    cx, cy, vx, vy, counts, n_vectors = displacement_field(frame, x, y)
     extent = float(max(np.ptp(frame[x].to_numpy()), np.ptp(frame[y].to_numpy())))
 
     eligible = (
@@ -2122,7 +2163,7 @@ def plot_flow(frame, x, y, out, title, subtitle, logger, labels=None,
         ax.scatter(px, py, s=1.0, c="#dcdbd6", linewidths=0,
                    rasterized=True, alpha=0.8, zorder=1)
 
-    mask = counts < 5
+    mask = ~flow_support(counts, n_vectors)
     vx = np.ma.array(vx, mask=mask)
     vy = np.ma.array(vy, mask=mask)
     ax.streamplot(
@@ -2156,7 +2197,8 @@ def plot_flow(frame, x, y, out, title, subtitle, logger, labels=None,
     plt.close(figure)
     logger.info(
         f"wrote {out.name} ({n_vectors:,} displacement vectors, "
-        f"{int((counts >= 5).sum())} populated cells, coherence {coherence:.3f})"
+        f"{int(flow_support(counts, n_vectors).sum())} populated cells, "
+        f"coherence {coherence:.3f})"
     )
     return coherence
 
@@ -2483,14 +2525,13 @@ def plot_cluster_flow_overlay(frame, x, y, column, out, title, logger,
         if n_vectors < min_vectors:
             logger.info(f"  {level}: {n_vectors} vectors, too few to draw")
             continue
-        speed = np.sqrt(vx**2 + vy**2)
-        mask = counts < min_vectors
+        mask = ~flow_support(counts, n_vectors)
         u = np.where(mask, np.nan, vx)
         v = np.where(mask, np.nan, vy)
         with np.errstate(invalid="ignore"):
             ax.streamplot(
                 cx, cy, u, v, color=palette[level], linewidth=0.7,
-                arrowsize=0.7, density=0.9, zorder=2 + depth,
+                arrowsize=0.7, density=0.9, maxlength=FLOW_MAXLENGTH, zorder=2 + depth,
             )
         handles.append(
             plt.Line2D([], [], color=palette[level], linewidth=1.6,
@@ -2644,11 +2685,11 @@ def plot_state_hexbin(frame, x, y, column, colors, order, out, title, subtitle,
         cx, cy, vx, vy, cell_counts, n_vectors = displacement_field(
             frame.filter(pl.Series(keep)), x, y, step_hours=step_hours
         )
-        mask = cell_counts < 5
+        mask = ~flow_support(cell_counts, n_vectors)
         with np.errstate(invalid="ignore"):
             ax.streamplot(
                 cx, cy, np.where(mask, np.nan, vx), np.where(mask, np.nan, vy),
-                color=INK_PRIMARY, linewidth=0.6, arrowsize=0.7, density=0.9,
+                color=INK_PRIMARY, linewidth=0.6, arrowsize=0.7, density=0.9, maxlength=FLOW_MAXLENGTH,
                 zorder=5,
             )
 
@@ -2738,12 +2779,13 @@ def plot_state_small_multiples(frame, x, y, column, colors, order, out, title,
             part, x, y, step_hours=step_hours
         )
         if n_vectors >= 5:
-            blank = counts < 5
+            blank = ~flow_support(counts, n_vectors)
             with np.errstate(invalid="ignore"):
                 ax.streamplot(
                     cx, cy, np.where(blank, np.nan, vx),
                     np.where(blank, np.nan, vy), color=INK_PRIMARY,
-                    linewidth=0.5, arrowsize=0.6, density=0.8, zorder=3,
+                    linewidth=0.5, arrowsize=0.6, density=0.8,
+                    maxlength=FLOW_MAXLENGTH, zorder=3,
                 )
         ax.set_title(
             f"{level}\n{int(mask.sum()):,} timepoints, {n_vectors:,} vectors",
