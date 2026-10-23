@@ -2636,7 +2636,7 @@ def plot_state_hexbin(frame, x, y, column, colors, order, out, title, subtitle,
 
     # the flow field on top, from the same timepoints
     cx, cy, vx, vy, cell_counts, n_vectors = displacement_field(
-        frame[keep], x, y, step_hours=step_hours
+        frame.filter(pl.Series(keep)), x, y, step_hours=step_hours
     )
     mask = cell_counts < 5
     with np.errstate(invalid="ignore"):
