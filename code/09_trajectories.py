@@ -2759,6 +2759,192 @@ def plot_state_small_multiples(frame, x, y, column, colors, order, out, title,
     logger.info(f"wrote {out}")
 
 
+
+
+# ================================================================ state graph
+
+
+def plot_state_dag(frame, x, y, column, colors, order, out, title, logger,
+                   step_hours: float | None = None, min_share: float = 0.02,
+                   placed: bool = True) -> None:
+    """
+    the states as nodes and the transitions between them as arrows
+
+    The transition matrix says the same thing in numbers, but a matrix makes
+    you hold twenty cells in your head to see one path. Here each state is a
+    node, placed at the MEDIAN POSITION of its timepoints in the projection, so
+    the graph is laid over the geometry the rest of the section is drawn in --
+    a transition that is a long arrow really does cross the embedding.
+
+    Self-loops are drawn as a ring around the node rather than an arrow,
+    because they dominate: patients mostly stay, and an arrow from a node to
+    itself would be the thickest line on the figure and say nothing.
+
+    Arrow width is the share of departures from the source state, not the raw
+    count, so a small state's exits are visible. Transitions below `min_share`
+    of a state's departures are dropped -- with five states there are twenty
+    possible arrows and most are rare noise.
+
+    `step_hours` is passed for the same reason as everywhere else: consecutive
+    rows of a timepoint-filtered frame can span more than one step, and a
+    transition counted across a gap is a transition that did not happen.
+    """
+    ordered = frame.sort("hospitalization_id", "offset_hours")
+    pairs = (
+        ordered.with_columns(
+            next_state=pl.col(column).shift(-1).over("hospitalization_id"),
+            next_t=pl.col("offset_hours").shift(-1).over("hospitalization_id"),
+        )
+        .drop_nulls(["next_state", "next_t"])
+    )
+    if step_hours is not None:
+        pairs = pairs.filter(
+            (pl.col("next_t") - pl.col("offset_hours") - step_hours).abs() < 1e-6
+        )
+    if pairs.is_empty():
+        logger.warning(f"no transitions for {column}")
+        return
+
+    levels = [l for l in order if (frame[column] == l).any()]
+    if len(levels) < 2:
+        return
+
+    # node positions: median projection coordinate of each state's timepoints
+    nodes = {}
+    for level in levels:
+        part = frame.filter(pl.col(column) == level)
+        nodes[level] = (
+            float(part[x].median()), float(part[y].median()), part.height
+        )
+
+    counts = {}
+    for a, b in zip(pairs[column].to_list(), pairs["next_state"].to_list()):
+        if a in nodes and b in nodes:
+            counts[(a, b)] = counts.get((a, b), 0) + 1
+    departures = {
+        level: sum(n for (a, _), n in counts.items() if a == level)
+        for level in levels
+    }
+
+    figure, (ax, legend_ax) = plt.subplots(
+        1, 2, figsize=(6.8, 5.2),
+        gridspec_kw={"width_ratios": [4.0, 1.3], "wspace": 0.04},
+    )
+    legend_ax.axis("off")
+    if placed:
+        ax.scatter(frame[x].to_numpy(), frame[y].to_numpy(), s=0.8, c=CONTEXT,
+                   linewidths=0, alpha=0.5, rasterized=True, zorder=1)
+
+    largest = max(nodes[l][2] for l in levels)
+    for (a, b), n in sorted(counts.items(), key=lambda kv: kv[1]):
+        share = n / max(departures[a], 1)
+        if a == b or share < min_share:
+            continue
+        ax_, ay_, _ = nodes[a]
+        bx_, by_, _ = nodes[b]
+        ax.annotate(
+            "", xy=(bx_, by_), xytext=(ax_, ay_),
+            arrowprops=dict(
+                arrowstyle="-|>", color=colors[a], alpha=0.75,
+                linewidth=0.6 + 4.0 * share, shrinkA=14, shrinkB=16,
+                connectionstyle="arc3,rad=0.14",
+            ),
+            zorder=3,
+        )
+
+    for level in levels:
+        nx_, ny_, n = nodes[level]
+        stay = counts.get((level, level), 0) / max(departures[level], 1)
+        size = 180 + 900 * (n / largest)
+        ax.scatter([nx_], [ny_], s=size, c=colors[level], linewidths=1.2,
+                   edgecolors="#ffffff", zorder=4)
+        ax.annotate(
+            f"{stay:.0%}", xy=(nx_, ny_), ha="center", va="center",
+            fontsize=6.5, color="#ffffff", zorder=5, fontweight="bold",
+        )
+
+    handles = [
+        plt.Line2D([], [], marker="o", linestyle="none", markersize=7,
+                   markerfacecolor=colors[level], markeredgecolor="none",
+                   label=f"{level}\n  {nodes[level][2]:,} timepoints, "
+                         f"{counts.get((level, level), 0) / max(departures[level], 1):.0%} stay")
+        for level in levels
+    ]
+    legend_ax.legend(
+        handles=handles, loc="upper left", bbox_to_anchor=(0, 1),
+        labelcolor=INK_SECONDARY, fontsize=6, handletextpad=0.6, borderpad=0,
+        frameon=False, labelspacing=1.1,
+    )
+    ax.set_title(title, loc="left", pad=8)
+    ax.set_xlabel(proj_labels()[0])
+    ax.set_ylabel(proj_labels()[1])
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    figure.text(
+        0.012, 0.015,
+        "nodes at each state's median position, sized by how many timepoints "
+        "it holds; the percentage inside is the share that stay. Arrow width "
+        f"is the share of departures, transitions under {min_share:.0%} dropped.",
+        fontsize=6.5, color=INK_SECONDARY,
+    )
+    save_figure(figure, out)
+    plt.close(figure)
+    logger.info(
+        f"wrote {out} ({len(levels)} nodes, "
+        f"{sum(1 for (a, b), n in counts.items() if a != b and n / max(departures[a], 1) >= min_share)} "
+        f"arrows above {min_share:.0%})"
+    )
+
+
+def plot_factor_panels(frame, x, y, prefix, out, title, logger,
+                       columns: int = 4) -> None:
+    """
+    one panel per NMF factor, coloured by that factor's weight
+
+    This is the layer the six care states are a hardening of. k-means turns
+    twelve continuous weights into one label, so a window that was 51/49
+    between two factors becomes indistinguishable from one that was 99/1.
+    These panels are the only view of what that step discarded, and the
+    question they answer is whether six states are a fair summary of twelve
+    factors or a lossy one.
+
+    Weights are quantile-ranked, not plotted raw: NMF weights are strongly
+    right-skewed -- most windows load near zero on most factors -- so a raw
+    ramp renders every panel as a dark field with a few bright specks.
+    """
+    names = sorted(c for c in frame.columns if c.startswith(prefix))
+    if not names:
+        logger.info(f"no {prefix}* columns present; factor panels skipped")
+        return
+    rows = int(np.ceil(len(names) / columns))
+    figure, axes = plt.subplots(
+        rows, columns, figsize=(2.5 * columns, 2.3 * rows),
+        squeeze=False, sharex=True, sharey=True,
+    )
+    px, py = frame[x].to_numpy(), frame[y].to_numpy()
+    for index, name in enumerate(names):
+        ax = axes[index // columns][index % columns]
+        values = frame[name].to_numpy().astype(float)
+        ranks, finite, _ticks, _labels = quantile_colour(values)
+        ax.scatter(px[~finite], py[~finite], s=0.6, c="#ebe9e4", linewidths=0,
+                   rasterized=True, zorder=1)
+        ax.scatter(px[finite], py[finite], s=0.9, c=ranks[finite],
+                   cmap=continuous_cmap(), linewidths=0, alpha=0.8,
+                   rasterized=True, zorder=2)
+        share = float((values > 0).mean())
+        ax.set_title(f"{name}  ({share:.0%} non-zero)", loc="left", fontsize=6.5,
+                     pad=3)
+        ax.tick_params(labelsize=5)
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(False)
+    for index in range(len(names), rows * columns):
+        axes[index // columns][index % columns].axis("off")
+    figure.suptitle(title, x=0.01, ha="left", fontsize=9)
+    save_figure(figure, out)
+    plt.close(figure)
+    logger.info(f"wrote {out} ({len(names)} factors)")
+
+
 # ===================================================== perfusion plotting
 
 
@@ -3202,6 +3388,58 @@ def main() -> None:
                 "order": list(PERFUSION_ORDER),
             },
         )
+        # Same three views for the token-composition care states, plus the
+        # soft factor layer they were hardened from.
+        if "care_state" in frame.columns:
+            present = [
+                f"state {i}" for i in range(1, 9)
+                if (frame["care_state"] == f"state {i}").any()
+            ]
+            if present:
+                state_colors = husl_colors(present)
+                for mode in ("plurality", "enrichment"):
+                    logger.info(f"care state hexagons, {mode}:")
+                    plot_state_hexbin(
+                        frame, px, py, "care_state", state_colors, present,
+                        home / f"trajectory_care_state_hex_{mode}.png",
+                        f"{paths.model_key}: care state by hexagon, {mode}",
+                        "token-composition states from 11, hardened from the "
+                        "12 NMF factors by k-means",
+                        logger, mode=mode, step_hours=args.step_hours,
+                    )
+                logger.info("care state, one panel each:")
+                plot_state_small_multiples(
+                    frame, px, py, "care_state", state_colors, present,
+                    home / "trajectory_care_state_panels.png",
+                    f"{paths.model_key}: care states, one at a time",
+                    logger, step_hours=args.step_hours,
+                )
+                logger.info("care state graph:")
+                plot_state_dag(
+                    frame, px, py, "care_state", state_colors, present,
+                    home / "trajectory_care_state_dag.png",
+                    f"{paths.model_key}: paths between care states",
+                    logger, step_hours=args.step_hours,
+                )
+        plot_factor_panels(
+            frame, px, py, "topic_",
+            home / "trajectory_nmf_factors.png",
+            f"{paths.model_key}: the 12 NMF factors the care states harden",
+            logger,
+        )
+        if "max_factor" in frame.columns:
+            factors = sorted(frame["max_factor"].drop_nulls().unique().to_list())
+            if len(factors) > 1:
+                logger.info("dominant-factor hexagons, enrichment:")
+                plot_state_hexbin(
+                    frame, px, py, "max_factor", husl_colors(factors), factors,
+                    home / "trajectory_max_factor_hex_enrichment.png",
+                    f"{paths.model_key}: dominant NMF factor by hexagon",
+                    "each window labelled by its single largest factor weight "
+                    "-- the partition the soft layer implies, before k-means",
+                    logger, mode="enrichment", step_hours=args.step_hours,
+                )
+
         for mode, tag in (("plurality", "vote"), ("enrichment", "mass")):
             plot_state_hexbin(
                 frame, px, py, "perfusion_state", PERFUSION_COLORS,
@@ -3219,6 +3457,14 @@ def main() -> None:
             list(PERFUSION_ORDER),
             home / "trajectory_perfusion_panels.png",
             f"{paths.model_key}: perfusion states, one at a time",
+            logger, step_hours=args.step_hours,
+        )
+        logger.info("perfusion state graph:")
+        plot_state_dag(
+            frame, px, py, "perfusion_state", PERFUSION_COLORS,
+            list(PERFUSION_ORDER),
+            home / "trajectory_perfusion_dag.png",
+            f"{paths.model_key}: paths between perfusion states",
             logger, step_hours=args.step_hours,
         )
         perfusion_transitions(

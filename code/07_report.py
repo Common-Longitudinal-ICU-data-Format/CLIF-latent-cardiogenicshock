@@ -1933,6 +1933,26 @@ def section_longitudinal(paths, out: list) -> None:
         return
 
     out.append('<h2 id="longitudinal">7 &middot; Longitudinal strata</h2>')
+    out.append(callout(
+        "<b>Two parallel analyses, not one nested in the other.</b> Both label "
+        "every patient-timepoint with a state, then cluster patients on their "
+        "29-symbol sequence of those states. They share nothing else.<br><br>"
+        "<b>A &mdash; token composition.</b> 12 NMF factors over the "
+        "site-balanced token counts, hardened by k-means into <b>6 care "
+        "states</b>; sequences clustered into <b>4 strata, S1&ndash;S4</b>. "
+        "Data-driven, so the states need interpreting after the fact.<br>"
+        "<b>B &mdash; perfusion.</b> MAP above or below 65&nbsp;mmHg with "
+        "hysteresis, crossed with whether vasopressors run: <b>4 perfusion "
+        "states</b>; sequences clustered into <b>4 clusters, P1&ndash;P4</b>. "
+        "Clinically defined, so the states mean something before any "
+        "clustering.<br><br>"
+        "The care states are <b>not</b> paths through the perfusion states, "
+        "and the 6-versus-4 difference is simply that the two analyses chose "
+        "different numbers of states. A third method, <b>latent class growth "
+        "(G1&ndash;G4)</b>, uses analysis A's <i>soft</i> factor weights "
+        "directly and never hardens them, which is why it disagrees with "
+        "S1&ndash;S4 at ARI 0.253."
+    ))
     out.append(
         "<p>Septic shock patients clustered on how their <b>token "
         "composition</b> moves over the seven days after shock onset, by two "
@@ -2207,19 +2227,36 @@ def section_longitudinal(paths, out: list) -> None:
             "window has to stop early &mdash; say +24&nbsp;h &mdash; while the "
             "outcome stays at discharge."
         ))
-        out.append(table(
-            significant.sort(["stratification", "cluster", "p_adjusted"])
-            .filter(pl.col("stratification") == "sequence_cluster")
-            .drop("stratification", "p")
-            .head(60),
-            {
-                "died_prevalence": pct,
-                "survived_prevalence": pct,
-                "log2_ratio": num(2),
-                "p_adjusted": num(4),
-            },
-            key_column="cluster",
-        ))
+        # All three stratifications, not just one. Filtering to
+        # sequence_cluster meant the perfusion clusters -- the ones with the
+        # cleanest mortality separation -- had 404 significant tokens computed
+        # and none of them shown.
+        token_tabs = []
+        for stratification, label in (
+            ("perfusion_cluster", "MAP/pressor clusters"),
+            ("sequence_cluster", "Token strata"),
+            ("growth_cluster", "Latent class growth"),
+        ):
+            part = (
+                significant.filter(pl.col("stratification") == stratification)
+                .sort(["cluster", "p_adjusted"])
+                .drop("stratification", "p")
+                .head(48)
+            )
+            if part.is_empty():
+                continue
+            token_tabs.append((label, table(
+                part,
+                {
+                    "died_prevalence": pct,
+                    "survived_prevalence": pct,
+                    "log2_ratio": num(2),
+                    "p_adjusted": num(4),
+                },
+                key_column="cluster",
+            )))
+        if token_tabs:
+            out.append(tabs(token_tabs))
 
 
 def section_flow(paths, out: list) -> None:

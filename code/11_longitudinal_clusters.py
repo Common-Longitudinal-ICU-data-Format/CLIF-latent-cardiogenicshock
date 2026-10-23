@@ -772,6 +772,23 @@ def main() -> None:
                 on="hospitalization_id", how="left",
             )
             symbols = list(PERFUSION_ORDER) + ["record ended"]
+            # mortality on the same table, so a reader does not have to carry
+            # the sequence here and the outcome from another section
+            outcome = labels_frame.join(
+                perfusion_labels.select("hospitalization_id", "perfusion_cluster"),
+                on="hospitalization_id", how="inner",
+            ) if "perfusion_cluster" not in labels_frame.columns else labels_frame
+            mortality = {}
+            if "in_hospital_mortality" in outcome.columns:
+                grouped = (
+                    outcome.filter(pl.col("in_hospital_mortality").is_not_null())
+                    .group_by("perfusion_cluster")
+                    .agg(died=pl.col("in_hospital_mortality").cast(pl.Float64).mean())
+                )
+                mortality = dict(zip(
+                    grouped["perfusion_cluster"].to_list(),
+                    grouped["died"].to_list(),
+                ))
             rows = []
             for cluster in sorted(
                 perfusion_labels["perfusion_cluster"].unique().to_list()
@@ -787,6 +804,7 @@ def main() -> None:
                     rows.append({
                         "cluster": cluster,
                         "patients": part.height,
+                        "died": mortality.get(cluster, float("nan")),
                         "rank": rank,
                         "sequence": sequence,
                         "patients_with_this_sequence": n,
@@ -875,6 +893,21 @@ def main() -> None:
     # this reads 366 site-balanced tokens counted inside one six-hour window.
     # Same patient, same instant, two different views of it -- which is the
     # whole reason colouring one by the other says anything.
+    # The SOFT layer travels too. k-means hardens the 12 topic weights into
+    # six states and that is what the sequences are built from, but the weights
+    # themselves are the only view of what hardening discarded -- a window that
+    # was 51/49 between two topics becomes indistinguishable from one that was
+    # 99/1. `max_factor` is the argmax label the soft representation implies,
+    # which is a different partition from the k-means states and worth
+    # comparing against them.
+    flat_topics = topics.reshape(-1, topics.shape[2])
+    topic_columns = {
+        f"topic_{i + 1:02d}": flat_topics[:, i].astype(np.float32)
+        for i in range(flat_topics.shape[1])
+    }
+    dominant = flat_topics.argmax(axis=1)
+    occupied = flat_topics.sum(axis=1) > 0
+
     long = pl.DataFrame({
         "hospitalization_id": np.repeat(patients, len(OFFSETS)),
         "offset_hours": np.tile(np.array(OFFSETS, dtype=np.float64), len(patients)),
@@ -882,6 +915,11 @@ def main() -> None:
             "nothing recorded" if int(v) == 0 else f"state {int(v)}"
             for v in states.reshape(-1)
         ],
+        "max_factor": [
+            f"factor {d + 1:02d}" if ok else None
+            for d, ok in zip(dominant, occupied)
+        ],
+        **topic_columns,
     }).join(
         assignments.select(
             "hospitalization_id", "sequence_cluster", "growth_cluster"
