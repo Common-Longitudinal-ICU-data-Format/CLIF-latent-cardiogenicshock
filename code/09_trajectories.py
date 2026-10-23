@@ -3459,6 +3459,30 @@ def main() -> None:
             f"{paths.model_key}: perfusion states, one at a time",
             logger, step_hours=args.step_hours,
         )
+        # The per-PATIENT cluster labels, one at a time. Different question
+        # from the state panels above: a state panel asks where a moment of
+        # care sits, a cluster panel asks where a whole trajectory lives, since
+        # the label is constant along it. No step guard -- filtering by patient
+        # keeps every one of their timepoints, so the pairs stay adjacent.
+        for column, label in (
+            ("sequence_cluster", "token strata"),
+            ("growth_cluster", "latent class growth"),
+            ("perfusion_cluster", "MAP/pressor sequence clusters"),
+        ):
+            if column not in frame.columns:
+                continue
+            levels = sorted(frame[column].drop_nulls().unique().to_list())
+            if len(levels) < 2:
+                continue
+            logger.info(f"{column}, one panel each:")
+            plot_state_small_multiples(
+                frame.filter(pl.col(column).is_not_null()), px, py, column,
+                husl_colors(levels), levels,
+                home / f"trajectory_{column}_panels.png",
+                f"{paths.model_key}: {label}, one cluster at a time",
+                logger,
+            )
+
         logger.info("perfusion state graph:")
         plot_state_dag(
             frame, px, py, "perfusion_state", PERFUSION_COLORS,
