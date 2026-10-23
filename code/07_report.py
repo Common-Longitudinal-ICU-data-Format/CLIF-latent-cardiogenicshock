@@ -2448,6 +2448,61 @@ def section_flow(paths, out: list) -> None:
         )
         out.append(tabs(token_panels))
 
+    hex_panels = [
+        (label, figure(septic_home / f"trajectory_perfusion_{tag}.png", note))
+        for tag, label, note in (
+            ("hex_plurality", "Hexagons, plurality",
+             "Each hexagon coloured by its most common state"),
+            ("hex_enrichment", "Hexagons, enrichment",
+             "Each hexagon coloured by the state most concentrated there "
+             "relative to that state's own grand total"),
+            ("panels", "One state at a time",
+             "Each state in colour against the whole cloud in grey"),
+        )
+    ]
+    hex_panels = [(label, body) for label, body in hex_panels if body]
+    if hex_panels:
+        out.append('<h3>Where each perfusion state sits</h3>')
+        out.append(
+            "<p>Three views of the same four states, because they disagree in "
+            "a way that is itself informative. <b>Plurality</b> gives each "
+            "hexagon to its most common state &mdash; it reads directly, but a "
+            "state holding 46% of timepoints wins hexagons where it is merely "
+            "present. <b>Enrichment</b> gives each hexagon to the state most "
+            "concentrated there relative to its own total, so group size "
+            "cancels entirely. The <b>small multiples</b> do no binning, no "
+            "voting and no normalisation at all, and are the check on both.</p>"
+        )
+        out.append(callout(
+            "<b>The two hexagon modes differ by 5.6&times; for the "
+            "hypotensive states.</b> MAP&nbsp;&lt;&nbsp;65 with and without "
+            "pressors together hold 10.5% of timepoints, and win <b>19 of 312 "
+            "hexagons (6%) under plurality</b> against <b>106 of 312 (34%) "
+            "under enrichment</b>. Neither is wrong. Plurality is right that "
+            "most regions genuinely contain more well-perfused timepoints; "
+            "enrichment is right that the hypotensive ones are concentrated "
+            "rather than scattered. Read them together, and read the small "
+            "multiples when they disagree."
+        ))
+        out.append(
+            "<p>A further reading of the enrichment panel, which is easy to "
+            "miss: with four states over 312 hexagons, states with identical "
+            "spatial structure would win about 78 each. The observed split is "
+            "105 / 101 / 60 / 46, so <b>the well-perfused states win more than "
+            "their share even after size is cancelled</b> &mdash; they occupy "
+            "coherent regions, while the hypotensive timepoints are spread "
+            "more thinly across the embedding. That is a statement about "
+            "hypotension co-occurring with many different clinical pictures "
+            "rather than marking out a region of its own.</p>"
+        )
+        out.append(
+            "<p>Hexagons below ten points are grey rather than awarded to "
+            "anyone, and opacity carries the margin of the win, so a hexagon "
+            "taken 31%&ndash;30% is visibly fainter than one taken "
+            "90%&ndash;5%. Flow lines are on all three.</p>"
+        )
+        out.append(tabs(hex_panels))
+
     # Perfusion state: MAP adequacy crossed with pressor exposure, as four
     # groups with a hysteresis band on the MAP side. Separate from the
     # physiology underlays because it is a STATE a patient is in rather than a
