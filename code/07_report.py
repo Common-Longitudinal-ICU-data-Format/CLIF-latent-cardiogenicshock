@@ -2184,6 +2184,124 @@ def section_longitudinal(paths, out: list) -> None:
             )
             out.append(tabs(panels))
 
+    if septic_home is not None:
+        dag_panels = [
+            (label, figure(septic_home / f"trajectory_{tag}_dag.png", note))
+            for tag, label, note in (
+                ("perfusion_state", "MAP/pressor states",
+                 "Four clinically defined states"),
+                ("care_state", "Care states",
+                 "Six token-composition states"),
+            )
+        ]
+        dag_panels = [(l, b) for l, b in dag_panels if b]
+        if dag_panels:
+            out.append('<h3>Paths between the states</h3>')
+            out.append(
+                "<p>Each state is a node placed at the <b>median position of "
+                "its timepoints in the projection</b>, so the graph lies over "
+                "the same geometry as every other figure in this section and a "
+                "long arrow really does cross the embedding. Node size is how "
+                "many timepoints the state holds; the percentage inside is the "
+                "share that <i>stay</i> at the next grid point. Arrow width is "
+                "the share of departures from the source state, not the raw "
+                "count, so a small state's exits stay visible.</p>"
+            )
+            out.append(
+                "<p>Self-loops are a number rather than an arrow on purpose: "
+                "patients mostly stay, so a loop would be the thickest line on "
+                "the figure and say nothing. Transitions under 2% of a state's "
+                "departures are dropped &mdash; with six states there are "
+                "thirty possible arrows and most are noise.</p>"
+            )
+            out.append(tabs(dag_panels))
+
+        state_views = [
+            (label, figure(septic_home / f"trajectory_{tag}.png", note))
+            for tag, label, note in (
+                ("care_state_hex_plurality", "Hexagons, plurality",
+                 "Each hexagon's most common care state"),
+                ("care_state_hex_enrichment", "Hexagons, enrichment",
+                 "The care state most concentrated there relative to its own "
+                 "total"),
+                ("care_state_panels", "One state at a time",
+                 "Each care state against the whole cloud"),
+            )
+        ]
+        state_views = [(l, b) for l, b in state_views if b]
+        if state_views:
+            out.append('<h3>Where each care state sits</h3>')
+            out.append(
+                "<p>The same three views the MAP/pressor states get in section "
+                "6, applied to the six token-composition states. Read the two "
+                "hexagon modes against each other: agreement means the "
+                "structure is not an artefact of how unevenly the states are "
+                "sized, disagreement localises where a big state owns a region "
+                "by headcount while a small one owns it by concentration.</p>"
+            )
+            out.append(tabs(state_views))
+
+        factor_views = [
+            (label, figure(septic_home / f"trajectory_{tag}.png", note))
+            for tag, label, note in (
+                ("nmf_factors", "All twelve factors",
+                 "One panel per NMF factor, quantile-ranked"),
+                ("max_factor_hex_enrichment", "Dominant factor by hexagon",
+                 "Each window labelled by its single largest factor weight"),
+            )
+        ]
+        factor_views = [(l, b) for l, b in factor_views if b]
+        if factor_views:
+            out.append('<h3>The soft layer, before it was hardened</h3>')
+            out.append(
+                "<p>The six care states are <b>k-means run on twelve "
+                "continuous NMF factor weights</b>. That step throws the "
+                "softness away: a window that was 51/49 between two factors "
+                "becomes indistinguishable from one that was 99/1. These are "
+                "the only views of what was discarded, and the question they "
+                "answer is whether six states are a fair summary of twelve "
+                "factors or a lossy one.</p>"
+            )
+            out.append(
+                "<p>Weights are <b>quantile-ranked rather than plotted raw</b>. "
+                "NMF weights are strongly right-skewed &mdash; most windows "
+                "load near zero on most factors &mdash; so a raw ramp renders "
+                "every panel as a dark field with a few bright specks. The "
+                "second tab is the argmax partition: each window given to its "
+                "single largest factor, which is the grouping the soft layer "
+                "implies before any clustering.</p>"
+            )
+            out.append(tabs(factor_views))
+
+        cluster_views = [
+            (label, figure(septic_home / f"trajectory_{tag}_panels.png", note))
+            for tag, label, note in (
+                ("perfusion_cluster", "MAP/pressor clusters (P1-P4)",
+                 "Each cluster's patient-timepoints against the whole cloud"),
+                ("sequence_cluster", "Token strata (S1-S4)", ""),
+                ("growth_cluster", "Latent class growth (G1-G4)", ""),
+            )
+        ]
+        cluster_views = [(l, b) for l, b in cluster_views if b]
+        if cluster_views:
+            out.append('<h3>Where each cluster of patients lives</h3>')
+            out.append(
+                "<p>A different question from the state panels above. A state "
+                "panel asks where a <i>moment of care</i> sits; these ask "
+                "where a <i>whole trajectory</i> lives, because the cluster "
+                "label is constant along a patient by construction. A cluster "
+                "that occupies one region moves little; a cluster smeared "
+                "across the projection is one whose patients traverse it.</p>"
+            )
+            out.append(
+                "<p>All three stratifications are shown because they disagree. "
+                "The token strata and the growth classes share the same "
+                "underlying features and still agree only at ARI 0.253, and "
+                "the MAP/pressor clusters come from physiology rather than "
+                "tokens at all.</p>"
+            )
+            out.append(tabs(cluster_views))
+
     if sites_file.is_file():
         out.append('<h3>Are the strata hospitals?</h3>')
         out.append(
