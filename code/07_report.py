@@ -2745,6 +2745,46 @@ def section_flow(paths, out: list) -> None:
                 "The same field, coloured by in-hospital mortality")),
     ]))
 
+    # Placed first in the section on purpose: it is a check on the projection
+    # itself, and every panel below inherits whatever it shows.
+    stream_panels = [
+        (label.capitalize(),
+         figure(info["home"] / "trajectory_stream_length.png", ""))
+        for label, info in homes.items()
+    ]
+    stream_panels = [(l, b) for l, b in stream_panels if b]
+    if stream_panels:
+        out.append('<h3>Event-stream length &mdash; a check on the geometry</h3>')
+        out.append(
+            "<p>Each point coloured by <b>how many tokens the model actually "
+            "read</b> at that grid point. This is a diagnostic rather than a "
+            "label: if the projection organises by stream length, then its "
+            "geometry is partly <i>how much record exists</i> rather than "
+            "clinical state, and every other panel in this section inherits "
+            "that.</p>"
+        )
+        out.append(
+            "<p>Worth checking because the spread is enormous &mdash; the "
+            "prefix runs from 125 tokens at the 5th percentile to 25,379 at "
+            "the maximum, with a median near 900, and the model's "
+            "4096&#8209;token context binds for 3.8% of grid points. Colours "
+            "are quantile-ranked with the bar labelled in real token counts; a "
+            "linear ramp would put almost every patient in the first few "
+            "percent of the scale.</p>"
+        )
+        out.append(callout(
+            "<b>Compare the uncorrected and corrected tabs.</b> The affine "
+            "site correction is fitted to remove <i>site</i>, not stream "
+            "length. If a length gradient survives it, that gradient is not a "
+            "site artefact and cannot be corrected away by this route &mdash; "
+            "it is the model encoding record volume, and any cluster that "
+            "aligns with it is partly a cluster of documentation density. "
+            "Read it against the care-state panels in particular: factor&nbsp;1 "
+            "is <code>UNK</code> and factor&nbsp;10 is lab ordering, both of "
+            "which scale with how much was written down."
+        ))
+        out.append(tabs(stream_panels))
+
     # Who is where, before any flow. Site first, because site is the largest
     # single structure in this geometry -- 1.9x neighbour purity uncorrected --
     # and these projections have had LEACE applied, so the panel is the

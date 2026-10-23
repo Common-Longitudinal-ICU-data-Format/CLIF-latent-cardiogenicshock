@@ -724,7 +724,7 @@ def displacement_field(
 
 
 def plot_scatter(frame, x, y, column, colors, order, title, label, out, logger,
-                 continuous=False):
+                 continuous=False, rank=False):
     figure, (ax, legend_ax) = plt.subplots(
         1, 2, figsize=(6.4, 4.6), gridspec_kw={"width_ratios": [4.0, 1.25], "wspace": 0.04}
     )
@@ -736,10 +736,30 @@ def plot_scatter(frame, x, y, column, colors, order, title, label, out, logger,
 
     if continuous:
         cmap = continuous_cmap()
-        values = shuffled[column].to_numpy()
-        points = ax.scatter(px, py, s=size, c=values, cmap=cmap, linewidths=0,
-                            alpha=0.8, rasterized=True)
-        bar = figure.colorbar(points, cax=legend_ax.inset_axes([0.08, 0.3, 0.16, 0.6]))
+        values = shuffled[column].to_numpy().astype(float)
+        if rank:
+            # Quantile-ranked, with the colourbar still labelled in real units.
+            # Event-stream length spans 125 to 25,379 tokens with a median near
+            # 900, so a linear ramp puts almost every patient in the first few
+            # percent of the scale and the panel reads as uniformly dark.
+            ranks, finite, ticks, tick_labels = quantile_colour(values)
+            points = ax.scatter(px[finite], py[finite], s=size, c=ranks[finite],
+                                cmap=cmap, linewidths=0, alpha=0.8,
+                                rasterized=True)
+            if (~finite).any():
+                ax.scatter(px[~finite], py[~finite], s=size, c="#e6e4df",
+                           linewidths=0, alpha=0.6, rasterized=True)
+            bar = figure.colorbar(
+                points, cax=legend_ax.inset_axes([0.08, 0.3, 0.16, 0.6])
+            )
+            bar.set_ticks(ticks)
+            bar.set_ticklabels(tick_labels)
+        else:
+            points = ax.scatter(px, py, s=size, c=values, cmap=cmap,
+                                linewidths=0, alpha=0.8, rasterized=True)
+            bar = figure.colorbar(
+                points, cax=legend_ax.inset_axes([0.08, 0.3, 0.16, 0.6])
+            )
         bar.set_label(label, color=INK_SECONDARY, fontsize=7)
         bar.ax.tick_params(labelsize=6, color=GRID, labelcolor=INK_SECONDARY)
         bar.outline.set_visible(False)
@@ -3451,6 +3471,26 @@ def main() -> None:
                  f"{paths.model_key}: patient-timepoints around shock onset",
                  "hours from onset", home / "trajectory_time.png", logger,
                  continuous=True)
+    # Event-stream length: how many tokens the model actually read at this grid
+    # point. A DIAGNOSTIC, not a label -- if the projection organises by stream
+    # length then its geometry is partly "how much record exists" rather than
+    # clinical state, and every other panel in the section inherits that. Worth
+    # checking because the prefix spans 125 to 25,379 tokens and the model's
+    # 4096-token context binds for 3.8% of grid points.
+    if "last_valid" in frame.columns:
+        plot_scatter(frame, px, py, "last_valid", None, None,
+                     f"{paths.model_key}: event-stream length at each grid point",
+                     "tokens read before the anchor",
+                     home / "trajectory_stream_length.png", logger,
+                     continuous=True, rank=True)
+        shortest = frame.filter(pl.col("last_valid") <= pl.col("last_valid").quantile(0.1))
+        logger.info(
+            f"stream length: median {frame['last_valid'].median():,.0f} tokens, "
+            f"IQR {frame['last_valid'].quantile(0.25):,.0f}-"
+            f"{frame['last_valid'].quantile(0.75):,.0f}, "
+            f"{(frame['last_valid'] > 4096).mean():.1%} over the 4096 context"
+        )
+
     plot_scatter(frame, px, py, "site", site_colors(paths.sites),
                  list(paths.sites),
                  f"{paths.model_key}: patient-timepoints by site",
