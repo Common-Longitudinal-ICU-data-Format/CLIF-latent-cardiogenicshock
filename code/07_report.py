@@ -1958,6 +1958,31 @@ def section_longitudinal(paths, out: list) -> None:
         "between-site prevalence ratio.</p>"
     )
 
+    state_tokens_file = tables_home / "care_state_tokens_septic.csv"
+    if state_tokens_file.is_file():
+        out.append('<h3>What the six care states are</h3>')
+        out.append(
+            "<p>A state is an index until you know what is in it. Each row is "
+            "a token over-represented in the windows assigned to that state, "
+            "ranked by <b>lift</b> &mdash; its prevalence among the state's "
+            "windows against its prevalence across all windows &mdash; with a "
+            "floor of 25% prevalence in the state. The floor matters: the "
+            "commonest tokens are common everywhere, so a vital charted in 90% "
+            "of all windows sits in 90% of every state's windows and "
+            "distinguishes none of them, while ranking on lift alone surfaces "
+            "rare tokens whose ratio is noise.</p>"
+        )
+        out.append(table(
+            pl.read_csv(state_tokens_file),
+            {
+                "patient_windows": thousands,
+                "prevalence_in_state": pct,
+                "prevalence_overall": pct,
+                "lift": num(2),
+            },
+            key_column="care_state",
+        ))
+
     if movement_file.is_file():
         out.append('<h3>How much patients actually move</h3>')
         out.append(
@@ -2027,6 +2052,15 @@ def section_longitudinal(paths, out: list) -> None:
                 "composition does; if they do not, the likely reason is the "
                 "~800 tokens the site filter removed, which the embedding "
                 "still reads and the labels do not.</p>"
+            )
+            out.append(
+                "<p>The two are easy to conflate, so to restate: a <b>care "
+                "state</b> is assigned to one six-hour window, and a patient "
+                "passes through several &mdash; 98.6% change state at least "
+                "once over the week. A <b>stratum</b> is assigned to the "
+                "patient, by clustering their whole 29-symbol string of care "
+                "states, so it describes the shape of the entire week and is "
+                "constant within a patient by construction.</p>"
             )
             out.append(tabs(panels))
 
