@@ -158,6 +158,93 @@ def site_composition(frame: pl.DataFrame, label: str, sites, logger) -> None:
     return pl.DataFrame(rows).with_columns(cramers_v=pl.lit(v))
 
 
+def describe_states(counts, token_ids, states, patients, offsets, names, logger):
+    """
+    what each care state actually contains
+
+    "state 3" is not a finding, it is an index. A state is only interpretable
+    through the tokens over-represented in the windows assigned to it, so this
+    computes, per state, each token's prevalence among that state's windows
+    against its prevalence overall.
+
+    Lift rather than raw prevalence, with a prevalence floor. The commonest
+    tokens are common everywhere -- a vital charted in 90% of all windows is in
+    90% of every state's windows and says nothing about any of them -- so
+    ranking by prevalence returns the same list for all six states. Ranking by
+    lift alone instead surfaces rare tokens whose ratio is noise, hence the
+    floor: a token has to be in at least a quarter of the state's windows
+    before its lift is worth reading.
+    """
+    state_of = {
+        (p, float(o)): int(states[i, j])
+        for i, p in enumerate(patients)
+        for j, o in enumerate(offsets)
+    }
+    kept = counts.filter(pl.col("token_id").is_in(list(token_ids))).with_columns(
+        care_state=pl.struct("hospitalization_id", "window").map_elements(
+            lambda r: state_of.get(
+                (r["hospitalization_id"], float(r["window"])), -1
+            ),
+            return_dtype=pl.Int64,
+        )
+    ).filter(pl.col("care_state") >= 0)
+
+    cells = (
+        kept.select("hospitalization_id", "window", "care_state").unique()
+        .group_by("care_state").len().rename({"len": "cells"})
+    )
+    per_state = (
+        kept.select("hospitalization_id", "window", "care_state", "token_id")
+        .unique().group_by("care_state", "token_id").len()
+        .rename({"len": "present"})
+        .join(cells, on="care_state")
+        .with_columns(prevalence=pl.col("present") / pl.col("cells"))
+    )
+    total = kept.select("hospitalization_id", "window").unique().height
+    overall = (
+        kept.select("hospitalization_id", "window", "token_id").unique()
+        .group_by("token_id").len().rename({"len": "n"})
+        .with_columns(base=pl.col("n") / total)
+    )
+    lift = (
+        per_state.join(overall, on="token_id")
+        .with_columns(
+            lift=pl.col("prevalence") / pl.col("base"),
+            token=pl.col("token_id").cast(pl.Int64).replace_strict(
+                names, default="<unmapped>", return_dtype=pl.String
+            ),
+        )
+    )
+
+    rows = []
+    logger.info("what each care state contains:")
+    for state in sorted(lift["care_state"].unique().to_list()):
+        part = (
+            lift.filter(
+                (pl.col("care_state") == state) & (pl.col("prevalence") >= 0.25)
+            )
+            .sort("lift", descending=True)
+            .head(8)
+        )
+        n_cells = int(cells.filter(pl.col("care_state") == state)["cells"][0])
+        label = "nothing recorded" if state == 0 else f"state {state}"
+        logger.info(f"  {label} ({n_cells:,} patient-windows)")
+        for row in part.iter_rows(named=True):
+            logger.info(
+                f"      {row['token']:<34} in {row['prevalence']:>5.1%} of its "
+                f"windows ({row['lift']:.2f}x overall)"
+            )
+            rows.append({
+                "care_state": label,
+                "patient_windows": n_cells,
+                "token": row["token"],
+                "prevalence_in_state": row["prevalence"],
+                "prevalence_overall": row["base"],
+                "lift": row["lift"],
+            })
+    return pl.DataFrame(rows)
+
+
 def differential_within_cluster(
     counts, labels_frame, token_ids, names, label: str, logger,
     min_cell: int = 11, top: int = 8,
@@ -385,6 +472,17 @@ def main() -> None:
         parents=True, exist_ok=True
     )
     movement = state_movement(states, sequence_labels, logger)
+    vocab, _fam = (
+        vocabulary(str(paths.tokenizer_yaml))
+        if paths.tokenizer_yaml_or_none is not None else ({}, {})
+    )
+    if vocab:
+        describe_states(
+            counts, token_ids, states, patients, OFFSETS, vocab, logger
+        ).write_csv(
+            paths.output_home / "tables" / paths.model_key
+            / f"care_state_tokens_{args.subset}.csv"
+        )
     changes = (states[:, 1:] != states[:, :-1]).sum(axis=1)
     pl.DataFrame({
         "changes": list(range(int(changes.max()) + 1)),
@@ -496,7 +594,19 @@ def main() -> None:
             counts, labels_frame, token_ids, names, label, logger
         )
         if not table.is_empty():
-            differential.append(table.with_columns(stratification=pl.lit(label)))
+            # Renamed to a common column before the concat. Keeping each
+            # stratification's own column name meant the diagonal concat gave
+            # every sequence_cluster row a null growth_cluster and vice versa,
+            # so the published table carried a column of "None" next to the
+            # one that held the value.
+            differential.append(
+                table.rename({label: "cluster"})
+                .with_columns(stratification=pl.lit(label))
+                .select(
+                    "stratification", "cluster", "token", "died_prevalence",
+                    "survived_prevalence", "log2_ratio", "p", "p_adjusted",
+                )
+            )
 
     if differential:
         out = (

@@ -2074,14 +2074,17 @@ def section_longitudinal(paths, out: list) -> None:
             "outcome stays at discharge."
         ))
         out.append(table(
-            significant.sort("p_adjusted").head(60),
+            significant.sort(["stratification", "cluster", "p_adjusted"])
+            .filter(pl.col("stratification") == "sequence_cluster")
+            .drop("stratification", "p")
+            .head(60),
             {
                 "died_prevalence": pct,
                 "survived_prevalence": pct,
                 "log2_ratio": num(2),
                 "p_adjusted": num(4),
-                "p": num(6),
             },
+            key_column="cluster",
         ))
 
 
