@@ -43,9 +43,7 @@ The script reads your CLIF-2.1 tables and writes summary tables covering:
   treatment was delivered, which single guideline covers each patient, and how
   many trials cover them at all
 - **charting practice** — per-token prevalence, which is how we tell a real
-  population difference from a documentation difference. This one needs the
-  shared encoding file; without it those stages are skipped and the rest still
-  runs
+  population difference from a documentation difference
 
 ---
 
@@ -91,10 +89,7 @@ cd CLIF-latent-cardiogenicshock
 python3 --version          # Windows: py --version
 ```
 
-**It has to be 3.11 or newer.** If it is older, see
-[If your Python is too old](#if-your-python-is-too-old) below before going on —
-a virtual environment built on an old interpreter cannot be upgraded later, and
-the install failure it produces does not mention versions.
+**It has to be 3.11 or newer.**
 
 ### 3. Create a virtual environment and install
 
@@ -116,14 +111,6 @@ python --version
 pip install -r requirements-site.txt
 ```
 
-> **Check `python`, not `python3`.** Inside an activated environment the two can
-> resolve to different interpreters, and `pip` follows `python`. If `python
-> --version` is older than 3.11, delete the environment directory, fix your
-> interpreter, and create it again.
-
-Put the environment somewhere local. Not on Box, Dropbox or OneDrive — those
-hold locks on the files and the directory then cannot even be deleted.
-
 ### 4. Point it at your data
 
 ```bash
@@ -144,13 +131,12 @@ sites:
 directory you send, so use something recognisable. On Windows, write the path
 with forward slashes: `C:/data/CLIF_2_1`.
 
-Three optional settings:
+Two optional settings, both defaulting to the directory you run from:
 
 | | |
 |---|---|
 | `output_home` | where results are written. Defaults to `./output` |
 | `scratch_home` | working space. Defaults to `./scratch`. Large and deletable afterwards, so point it at a fast local disk if you have one |
-| `tokenizer_yaml` | the shared encoding, if we sent you one. Without it the `tokenize`, `winnow` and `tokencounts` stages are skipped and the run says so; everything else is unaffected |
 
 `paths.yaml` is gitignored and never leaves your machine.
 
@@ -196,28 +182,6 @@ long it took, so a long run is readable as it goes:
 | `export` | assemble the directory to send |
 
 Everything is written as it goes, so nothing is lost if the run stops.
-
-### Check the patient flow before you send
-
-```bash
-# after the cohort stage, or at the end
-cat output/cohort/filter_ledger.csv
-```
-
-Two things go wrong here, and both are much cheaper to catch now than after the
-results are pooled:
-
-- **An ICU definition that does not match.** Sites label units differently.
-  Compare the ICU row against total hospitalizations and ask whether it is
-  plausible for your institution.
-- **A table that is present but not populated.** This has already bitten us
-  once: one site's `clif_ecmo_mcs` names 82% of all hospitalizations because it
-  is a concept table, not a record of what was done. Any criterion sub-count
-  that is implausibly large, or implausibly zero, is the signal.
-
-If something in the ledger looks wrong, tell us before sending.
-
----
 
 ## If a stage fails
 
@@ -267,7 +231,7 @@ one site at a time with `--site YOURSITE`.
 output/
   upload_to_box_<SITE>/        <-- SEND THIS
     manifest.json                site, code version, minimum cell size
-    token_levels.csv             the token legend. Only with `tokenizer_yaml`
+    token_levels.csv             the token legend
     counts/
       filter_ledger.csv          patient flow and attrition
       phenotype_summary.csv      Zweck phenotype breakdown
@@ -276,8 +240,8 @@ output/
       bhavani_summary.csv        Bhavani sepsis phenotypes
       seymour_availability.csv   which features your site charts
       baseline_by_shock_type.csv medians and shares by coded mechanism
-      token_prevalence_anchor-*  per-token prevalence, and the same rolled up
-      token_families_anchor-*    to family. Only with `tokenizer_yaml` set
+      token_prevalence_anchor-*  per-token prevalence
+      token_families_anchor-*    the same, rolled up to family
     trials/
       trial_criteria.csv         the criteria as encoded. No patient data
       trial_iqr_position_*       your medians against the published quartiles
@@ -306,66 +270,3 @@ threshold is 11 patients. If your institution requires a larger one:
 ```bash
 python code/01_site_tables.py --min-cell 20
 ```
-
----
-
-## If your Python is too old
-
-A virtual environment is permanently bound to the interpreter that created it,
-and cannot be upgraded afterwards. Get a new enough interpreter **first**.
-
-**On a cluster**, there is usually a module:
-
-```bash
-module spider python          # or: module avail python
-module load python/3.12       # whatever it offers at 3.11 or newer
-python3 --version             # confirm, then create the environment
-```
-
-Load the module *before* creating the environment, not after. If `python3
---version` says 3.12 but `python --version` inside your activated environment
-says 3.6, that is this mistake: delete the environment directory and create it
-again with the module loaded.
-
-**Anywhere else**, or if no module is new enough, install one without
-administrator rights using [uv](https://astral.sh/uv):
-
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh     # Windows: see astral.sh/uv
-uv python install 3.11
-uv python find 3.11                                  # prints an absolute path
-```
-
-`python3 --version` will still report the old version afterwards — uv installs
-alongside the system interpreter rather than replacing it. Use the path it
-printed to create the environment:
-
-```bash
-"$(uv python find 3.11)" -m venv ~/venvs/clif-cs
-source ~/venvs/clif-cs/bin/activate
-python --version                                     # must say 3.11+
-pip install -r requirements-site.txt
-```
-
----
-
-## Questions
-
-Anything that looks wrong in `filter_ledger.csv`, any stage that fails twice,
-or any table you are not sure you are permitted to send — ask before sending.
-Send `output/logs/01_site_tables.log` with the question.
-
-## Further reading
-
-| | |
-|---|---|
-| [docs/COHORT.md](docs/COHORT.md) | How the cohort is built and what each label means |
-| [docs/FEDERATION.md](docs/FEDERATION.md) | The export contract and the suppression rules, in full |
-
-## Provenance
-
-Dataset processing follows
-[bbj-lab/coreopsis@950c2478](https://github.com/bbj-lab/coreopsis/blob/950c24782670103d130328822d06b39cb4724d7a/RUNME.sh#L14-L54).
-`collation.yaml`, `tokenization.yaml`, `extraction.yaml` and `winnowing_24h.yaml`
-are copied from it verbatim; `clifpy_units.yaml` is extracted from its recipes by
-[code/config/_regen_clifpy_units.py](code/config/_regen_clifpy_units.py).
