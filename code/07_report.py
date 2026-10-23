@@ -2083,7 +2083,9 @@ def section_longitudinal(paths, out: list) -> None:
             (label, figure(septic_home / f"trajectory_flow_overlay_{tag}.png", note))
             for tag, label, note in (
                 ("stratum", "Token strata",
-                 "One field per token-composition stratum"),
+                 "One field per care-state sequence cluster"),
+                ("growth", "Latent class growth",
+                 "One field per latent class, all four on the same axes"),
                 ("perfusion", "MAP/pressor clusters",
                  "One field per MAP-by-pressor sequence cluster"),
                 ("care_state", "Care states",
