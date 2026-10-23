@@ -332,6 +332,49 @@ def cluster_sequence_table(states, labels, offsets, logger, top: int = 4):
     return pl.DataFrame(rows)
 
 
+def factor_token_table(model, token_ids, names, logger, top: int = 12):
+    """
+    the tokens each NMF factor loads on, for naming the factors by hand
+
+    `model.components_` is factors-by-tokens and non-negative, which is the
+    property that makes NMF worth using here: a factor is a set of events that
+    co-occur, so its top loadings read as a description rather than as a
+    contrast between two things the way a PCA loading does.
+
+    Loadings are reported both raw and as a share of the factor's total mass.
+    The share is what says whether a factor is CONCENTRATED -- a factor whose
+    top twelve tokens carry 80% of its mass is one clinical pattern, while one
+    carrying 15% is a diffuse mixture that probably should not be given a
+    single name.
+    """
+    components = model.components_
+    rows = []
+    logger.info("NMF factor loadings (top tokens per factor):")
+    for index in range(components.shape[0]):
+        weights = components[index]
+        total = float(weights.sum())
+        order = np.argsort(weights)[::-1][:top]
+        covered = float(weights[order].sum()) / max(total, 1e-12)
+        logger.info(
+            f"  factor {index + 1:02d}  top {top} tokens carry "
+            f"{covered:.0%} of its mass"
+        )
+        for rank, position in enumerate(order, start=1):
+            token = names.get(int(token_ids[position]), str(token_ids[position]))
+            share = float(weights[position]) / max(total, 1e-12)
+            rows.append({
+                "factor": f"factor {index + 1:02d}",
+                "rank": rank,
+                "token": token,
+                "loading": float(weights[position]),
+                "share_of_factor": share,
+                "top_tokens_cover": covered,
+            })
+            if rank <= 6:
+                logger.info(f"       {rank:>2}. {token:<34} {share:>6.1%}")
+    return pl.DataFrame(rows)
+
+
 def describe_states(counts, token_ids, states, patients, offsets, names, logger):
     """
     what each care state actually contains
@@ -720,6 +763,156 @@ def plot_factor_dag(long, offsets, out, logger, min_share: float = 0.04):
     logger.info(f"wrote {out}")
 
 
+def plot_patient_factor_paths(long, offsets, patients, out, logger):
+    """
+    one panel per patient: their own route through the 12 NMF factors
+
+    The class-level factor graph is an average over two thousand patients and
+    tells you nothing about whether any one of them traced that route. These
+    are the unsmoothed version: the factors a single patient's windows actually
+    loaded highest on, in order.
+
+    Shared layout with the class-level graph -- same circle, same ordering by
+    mean dominating window, same factor colours -- so the two can be held side
+    by side. A patient visits only a handful of the twelve, and the ones they
+    never touch stay faint.
+
+    Each visited node is outlined on a white-to-black ramp by timepoint and
+    labelled with the hour beside it, so the order is readable without
+    following the arrows. Arrows are black rather than the factor colours,
+    because here the arrow is the patient and the colour is the destination;
+    colouring both would make the figure say the same thing twice.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.colors as mcolors
+    import matplotlib.pyplot as plt
+
+    from clifcs.figures import save_figure
+    from clifcs.palette import INK_PRIMARY, INK_SECONDARY, husl_colors
+
+    frame = long.filter(pl.col("max_factor").is_not_null())
+    if frame.is_empty():
+        logger.warning("no max_factor rows; per-patient factor paths skipped")
+        return
+
+    factors = sorted(frame["max_factor"].unique().to_list())
+    factor_colors = husl_colors(factors)
+    index_of_window = {float(o): i for i, o in enumerate(offsets)}
+    timing = (
+        frame.with_columns(
+            position=pl.col("offset_hours").replace_strict(
+                index_of_window, default=None, return_dtype=pl.Float64
+            )
+        )
+        .group_by("max_factor")
+        .agg(mean_position=pl.col("position").mean())
+        .sort("mean_position")
+    )
+    order = [f for f in timing["max_factor"].to_list() if f in factors]
+    order += [f for f in factors if f not in order]
+    angles = {
+        f: 2.0 * np.pi * i / len(order) - np.pi / 2.0 for i, f in enumerate(order)
+    }
+    nodes = {f: (np.cos(a), np.sin(a)) for f, a in angles.items()}
+    ramp = mcolors.LinearSegmentedColormap.from_list("time", ["#ffffff", "#111111"])
+
+    chosen = [p for p in patients if frame.filter(
+        pl.col("hospitalization_id") == p).height >= 3][:6]
+    if not chosen:
+        logger.warning("none of the chosen patients have enough windows")
+        return
+
+    columns = 3
+    rows = int(np.ceil(len(chosen) / columns))
+    figure, axes = plt.subplots(
+        rows, columns, figsize=(3.8 * columns, 3.8 * rows), squeeze=False
+    )
+
+    for index, patient in enumerate(chosen):
+        ax = axes[index // columns][index % columns]
+        track = (
+            frame.filter(pl.col("hospitalization_id") == patient)
+            .sort("offset_hours")
+        )
+        visited = track["max_factor"].to_list()
+        hours = track["offset_hours"].to_list()
+        cluster = track["growth_cluster"].drop_nulls().to_list()
+
+        # every factor faintly, so the unused ones are visible as unused
+        for factor in order:
+            nx_, ny_ = nodes[factor]
+            ax.scatter([nx_], [ny_], s=90, c=factor_colors[factor],
+                       alpha=0.22, linewidths=0, zorder=2)
+            ax.annotate(
+                factor.replace("factor ", "F"),
+                xy=(np.cos(angles[factor]) * 1.28,
+                    np.sin(angles[factor]) * 1.28),
+                ha="center", va="center", fontsize=5.5, color=INK_SECONDARY,
+                zorder=3,
+            )
+
+        span = max(len(hours) - 1, 1)
+        for step, (factor, hour) in enumerate(zip(visited, hours)):
+            nx_, ny_ = nodes[factor]
+            if step + 1 < len(visited):
+                nxt = nodes[visited[step + 1]]
+                if visited[step + 1] != factor:
+                    ax.annotate(
+                        "", xy=nxt, xytext=(nx_, ny_),
+                        arrowprops=dict(
+                            arrowstyle="-|>", color=INK_PRIMARY, alpha=0.75,
+                            linewidth=1.0, shrinkA=9, shrinkB=11,
+                            connectionstyle="arc3,rad=0.16",
+                        ),
+                        zorder=4,
+                    )
+            ax.scatter([nx_], [ny_], s=150, c=[ramp(step / span)],
+                       edgecolors=factor_colors[factor], linewidths=1.8,
+                       zorder=5)
+            # the hour beside the node, nudged outward from the circle centre
+            ax.annotate(
+                f"{hour:+.0f}h",
+                xy=(nx_ * 1.12, ny_ * 1.12), ha="center", va="center",
+                fontsize=5, color=INK_SECONDARY, zorder=6,
+            )
+
+        label = f"{patient}"
+        if cluster:
+            label = f"{label}  ({cluster[0]})"
+        ax.set_title(
+            f"{label}\n{len(set(visited))} of {len(order)} factors visited",
+            loc="left", fontsize=7, pad=4,
+        )
+        ax.set_xlim(-1.5, 1.5)
+        ax.set_ylim(-1.5, 1.5)
+        ax.set_aspect("equal")
+        ax.axis("off")
+        logger.info(
+            f"  {patient}: {len(set(visited))} distinct factors over "
+            f"{len(visited)} windows"
+        )
+
+    for index in range(len(chosen), rows * columns):
+        axes[index // columns][index % columns].axis("off")
+
+    figure.suptitle(
+        "Individual patients through the 12 NMF factors",
+        x=0.01, ha="left", fontsize=10,
+    )
+    figure.text(
+        0.01, 0.005,
+        "Same circle and ordering as the class-level graph. Node fill runs "
+        "white (earliest window) to black (latest); the outline is the "
+        "factor's colour; the hour sits beside the node. Black arrows are this "
+        "patient's own transitions. Faint nodes are factors never visited.",
+        fontsize=5.5, color=INK_SECONDARY,
+    )
+    save_figure(figure, out)
+    plt.close(figure)
+    logger.info(f"wrote {out} ({len(chosen)} patients)")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--subset", default="septic",
@@ -787,7 +980,9 @@ def main() -> None:
     patients = [p for p, k in zip(patients, enough) if k]
     matrix, volume = matrix[enough], volume[enough]
 
-    states, topics, _model = care_states(matrix, args.states, args.seed, logger)
+    states, topics, nmf_model = care_states(
+        matrix, args.states, args.seed, logger
+    )
     sequence_labels, one_hot = sequence_clusters(
         states, args.clusters, args.seed, logger
     )
@@ -830,6 +1025,10 @@ def main() -> None:
         if paths.tokenizer_yaml_or_none is not None else ({}, {})
     )
     if vocab:
+        factor_token_table(nmf_model, token_ids, vocab, logger).write_csv(
+            paths.output_home / "tables" / paths.model_key
+            / f"nmf_factor_tokens_{args.subset}.csv"
+        )
         describe_states(
             counts, token_ids, states, patients, OFFSETS, vocab, logger
         ).write_csv(
@@ -1129,6 +1328,33 @@ def main() -> None:
         / f"longitudinal_states_{args.subset}.parquet"
     )
     long.write_parquet(long_out)
+    # the same patients 09 picks as flow followers, so the two figures show the
+    # same people; falls back to the longest records when that file is absent
+    followers = []
+    projections = sorted(
+        paths.patient_level_home.glob(
+            f"trajectory_projections_{args.subset}*.parquet"
+        )
+    )
+    if projections:
+        followers = (
+            pl.read_parquet(projections[0], columns=["hospitalization_id"])
+            ["hospitalization_id"].unique().to_list()
+        )
+    present = set(long["hospitalization_id"].to_list())
+    followers = [p for p in followers if p in present][:6]
+    if not followers:
+        followers = (
+            long.group_by("hospitalization_id").len().sort("len", descending=True)
+            ["hospitalization_id"].to_list()[:6]
+        )
+    logger.info("individual patients through the NMF factors:")
+    plot_patient_factor_paths(
+        long, OFFSETS, followers,
+        paths.figure_home / f"longitudinal_patient_factor_paths_{args.subset}.png",
+        logger,
+    )
+
     logger.info("latent class paths through the NMF factors:")
     plot_factor_dag(
         long, OFFSETS,

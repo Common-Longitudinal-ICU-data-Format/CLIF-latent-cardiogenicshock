@@ -2998,11 +2998,29 @@ def plot_factor_panels(frame, x, y, prefix, out, title, logger,
     Weights are quantile-ranked, not plotted raw: NMF weights are strongly
     right-skewed -- most windows load near zero on most factors -- so a raw
     ramp renders every panel as a dark field with a few bright specks.
+
+    Each panel gets its OWN ramp, running from near-white to that factor's
+    colour in the hexagon maps and the state graphs. One shared colormap across
+    all twelve made the panels impossible to hold together with the figures
+    that colour factors categorically: factor 7 was cubehelix-dark here and
+    husl-green there, so nothing carried between them. A per-factor ramp costs
+    the ability to compare absolute weight across panels, which was never
+    meaningful anyway once the weights were quantile-ranked within each panel.
     """
     names = sorted(c for c in frame.columns if c.startswith(prefix))
     if not names:
         logger.info(f"no {prefix}* columns present; factor panels skipped")
         return
+    # the same palette the categorical factor figures use, keyed by position so
+    # topic_07 and "factor 07" are the same hue
+    factor_levels = [f"factor {i + 1:02d}" for i in range(len(names))]
+    factor_colours = husl_colors(factor_levels)
+    ramps = {
+        name: mcolors.LinearSegmentedColormap.from_list(
+            name, ["#f6f5f2", factor_colours[level]]
+        )
+        for name, level in zip(names, factor_levels)
+    }
     rows = int(np.ceil(len(names) / columns))
     figure, axes = plt.subplots(
         rows, columns, figsize=(2.5 * columns, 2.3 * rows),
@@ -3016,7 +3034,7 @@ def plot_factor_panels(frame, x, y, prefix, out, title, logger,
         ax.scatter(px[~finite], py[~finite], s=0.6, c="#ebe9e4", linewidths=0,
                    rasterized=True, zorder=1)
         ax.scatter(px[finite], py[finite], s=0.9, c=ranks[finite],
-                   cmap=continuous_cmap(), linewidths=0, alpha=0.8,
+                   cmap=ramps[name], linewidths=0, alpha=0.8,
                    rasterized=True, zorder=2)
         share = float((values > 0).mean())
         ax.set_title(f"{name}  ({share:.0%} non-zero)", loc="left", fontsize=6.5,
@@ -3030,6 +3048,108 @@ def plot_factor_panels(frame, x, y, prefix, out, title, logger,
     save_figure(figure, out)
     plt.close(figure)
     logger.info(f"wrote {out} ({len(names)} factors)")
+
+
+
+
+def plot_paths_over_flow(frame, x, y, column, patients, out, title, logger,
+                         step_hours: float | None = None) -> None:
+    """
+    the per-group flow fields with individual patients drawn on top
+
+    The overlay answers "which way does each group move on average" and the
+    individual paths answer "does any one patient actually do that". Putting
+    them on one axes is the only way to see the gap: a field is a mean over
+    thousands of 6-hour displacements, and a single patient wandering against
+    it is not a contradiction, it is what the mean is a mean of.
+
+    Each marker is filled on a white-to-black ramp by timepoint -- white at
+    onset, black at +48h -- and OUTLINED in the colour of the patient's own
+    group, so a path can be matched to the field it should be compared with
+    without a legend lookup. No hour labels: with four or more paths over a
+    streamplot the text was the densest thing on the figure and obscured the
+    arrows it was meant to be read against.
+    """
+    levels = sorted(frame[column].drop_nulls().unique().to_list())
+    if not levels:
+        return
+    palette = husl_colors(levels)
+
+    figure, (ax, legend_ax) = plt.subplots(
+        1, 2, figsize=(7.0, 5.4),
+        gridspec_kw={"width_ratios": [4.0, 1.3], "wspace": 0.04},
+    )
+    legend_ax.axis("off")
+    ax.scatter(frame[x].to_numpy(), frame[y].to_numpy(), s=0.8, c=CONTEXT,
+               linewidths=0, alpha=0.5, rasterized=True, zorder=1)
+
+    for depth, level in enumerate(levels):
+        part = frame.filter(pl.col(column) == level)
+        cx, cy, vx, vy, counts, n_vectors = displacement_field(
+            part, x, y, step_hours=step_hours
+        )
+        if n_vectors < FLOW_MIN_VECTORS:
+            continue
+        mask = ~flow_support(counts, n_vectors)
+        with np.errstate(invalid="ignore"):
+            ax.streamplot(
+                cx, cy, np.where(mask, np.nan, vx), np.where(mask, np.nan, vy),
+                color=palette[level], linewidth=0.6, arrowsize=0.6,
+                density=0.9, maxlength=FLOW_MAXLENGTH, zorder=2 + depth,
+            )
+
+    ramp = mcolors.LinearSegmentedColormap.from_list(
+        "time", ["#ffffff", "#111111"]
+    )
+    drawn = 0
+    for patient in patients:
+        track = (
+            frame.filter(pl.col("hospitalization_id") == patient)
+            .sort("offset_hours")
+        )
+        if track.height < 3:
+            continue
+        level = track[column].drop_nulls().to_list()
+        edge = palette.get(level[0], INK_PRIMARY) if level else INK_PRIMARY
+        ptx, pty = track[x].to_numpy(), track[y].to_numpy()
+        hours = track["offset_hours"].to_numpy()
+        ax.plot(ptx, pty, color=edge, linewidth=1.0, alpha=0.9, zorder=20,
+                solid_capstyle="round")
+        shade = (hours - hours.min()) / max(hours.max() - hours.min(), 1e-9)
+        ax.scatter(ptx, pty, s=38, c=shade, cmap=ramp, vmin=0, vmax=1,
+                   edgecolors=edge, linewidths=1.4, zorder=21)
+        drawn += 1
+
+    handles = [
+        plt.Line2D([], [], color=palette[level], linewidth=1.8,
+                   label=f"{level}  n={frame.filter(pl.col(column) == level)['hospitalization_id'].n_unique():,}")
+        for level in levels
+    ]
+    handles.append(plt.Line2D(
+        [], [], marker="o", linestyle="none", markersize=6,
+        markerfacecolor="#ffffff", markeredgecolor=INK_PRIMARY,
+        label="earliest timepoint",
+    ))
+    handles.append(plt.Line2D(
+        [], [], marker="o", linestyle="none", markersize=6,
+        markerfacecolor="#111111", markeredgecolor=INK_PRIMARY,
+        label="latest timepoint",
+    ))
+    legend_ax.legend(
+        handles=handles, loc="upper left", bbox_to_anchor=(0, 1),
+        labelcolor=INK_SECONDARY, fontsize=6.5, handletextpad=0.6,
+        borderpad=0, frameon=False,
+    )
+    ax.set_title(title, loc="left", pad=8)
+    ax.set_xlabel(proj_labels()[0])
+    ax.set_ylabel(proj_labels()[1])
+    ax.grid(True, color=GRID, linewidth=0.4, alpha=0.7)
+    ax.set_axisbelow(True)
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    save_figure(figure, out)
+    plt.close(figure)
+    logger.info(f"wrote {out} ({drawn} patient paths over {len(levels)} fields)")
 
 
 # ===================================================== perfusion plotting
@@ -3636,6 +3756,20 @@ def main() -> None:
     # what the arrows are an average of rather than a random walk. A biased
     # sample on purpose; the captions say so.
     patients = pick_flow_followers(frame, px, py, logger)
+
+    # The same flow followers, drawn over the per-class fields rather than one
+    # at a time. Needs `patients`, so it sits here rather than with the other
+    # cluster figures above.
+    if "growth_cluster" in frame.columns and args.subset in ("all", "septic"):
+        logger.info("patient paths over the latent-class fields:")
+        plot_paths_over_flow(
+            frame.filter(pl.col("growth_cluster").is_not_null()),
+            px, py, "growth_cluster", patients,
+            home / "trajectory_paths_over_growth.png",
+            f"{paths.model_key}: individual patients over the latent-class "
+            "flow fields",
+            logger, step_hours=None,
+        )
     if not patients:
         patients = pick_patients(frame)
         logger.warning(
