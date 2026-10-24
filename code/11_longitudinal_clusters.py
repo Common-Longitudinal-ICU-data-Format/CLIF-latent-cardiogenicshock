@@ -45,7 +45,9 @@ from clifcs.longitudinal import (
     state_movement,
     split_half_stability,
 )
-from clifcs.perfusion import PERFUSION_ORDER, perfusion_state
+from clifcs.perfusion import (
+    PERFUSION_ORDER, PERFUSION_STATES, perfusion_state, state_symbol,
+)
 from clifcs.state import trajectory_state
 from clifcs.tokens import vocabulary
 from clifcs.windows import (
@@ -821,7 +823,10 @@ def differential_within_cluster(
     return table
 
 
-def plot_factor_dag(long, offsets, out, logger, min_share: float = 0.04):
+def plot_factor_dag(long, offsets, out, logger, min_share: float = 0.04,
+                    state_column: str = "max_factor",
+                    cluster_column: str = "growth_cluster",
+                    labeller=None, short=None):
     """
     each latent class as a path through the 12 NMF factors, laid out to be read
 
@@ -854,16 +859,23 @@ def plot_factor_dag(long, offsets, out, logger, min_share: float = 0.04):
         CONTEXT, GRID, INK_SECONDARY, cluster_colors, husl_colors,
     )
 
+    if state_column not in long.columns or cluster_column not in long.columns:
+        logger.info(
+            f"no {state_column} / {cluster_column} columns; graph skipped"
+        )
+        return
     frame = long.filter(
-        pl.col("max_factor").is_not_null()
-        & pl.col("growth_cluster").is_not_null()
+        pl.col(state_column).is_not_null()
+        & pl.col(cluster_column).is_not_null()
     )
     if frame.is_empty():
-        logger.warning("no max_factor / growth_cluster rows; factor DAG skipped")
+        logger.warning(f"no {state_column} rows; graph skipped")
         return
+    labeller = labeller or (lambda key: key)
+    short = short or (lambda key: key.replace("factor ", "F"))
 
-    factors = sorted(frame["max_factor"].unique().to_list())
-    classes = sorted(frame["growth_cluster"].unique().to_list())
+    factors = sorted(frame[state_column].unique().to_list())
+    classes = sorted(frame[cluster_column].unique().to_list())
     factor_colors = husl_colors(factors)
     # the latent classes take the deeper ramp, since here they are thin arrows
     class_colors = cluster_colors(classes)
@@ -876,11 +888,11 @@ def plot_factor_dag(long, offsets, out, logger, min_share: float = 0.04):
                 index_of_window, default=None, return_dtype=pl.Float64
             )
         )
-        .group_by("max_factor")
+        .group_by(state_column)
         .agg(mean_position=pl.col("position").mean(), n=pl.len())
     )
     order = (
-        timing.sort("mean_position")["max_factor"].to_list()
+        timing.sort("mean_position")[state_column].to_list()
         if not timing.is_empty() else factors
     )
     order = [f for f in order if f in factors] + [f for f in factors if f not in order]
@@ -889,7 +901,7 @@ def plot_factor_dag(long, offsets, out, logger, min_share: float = 0.04):
         for i, f in enumerate(order)
     }
     nodes = {f: (np.cos(a), np.sin(a)) for f, a in angles.items()}
-    occupancy = dict(zip(timing["max_factor"].to_list(), timing["n"].to_list()))
+    occupancy = dict(zip(timing[state_column].to_list(), timing["n"].to_list()))
     largest = max(occupancy.values()) if occupancy else 1
 
     columns = 2
@@ -900,12 +912,12 @@ def plot_factor_dag(long, offsets, out, logger, min_share: float = 0.04):
 
     for index, cluster in enumerate(classes):
         ax = axes[index // columns][index % columns]
-        part = frame.filter(pl.col("growth_cluster") == cluster).sort(
+        part = frame.filter(pl.col(cluster_column) == cluster).sort(
             "hospitalization_id", "offset_hours"
         )
         pairs = (
             part.with_columns(
-                next_factor=pl.col("max_factor").shift(-1).over("hospitalization_id"),
+                next_factor=pl.col(state_column).shift(-1).over("hospitalization_id"),
                 next_t=pl.col("offset_hours").shift(-1).over("hospitalization_id"),
             )
             .drop_nulls(["next_factor", "next_t"])
@@ -915,7 +927,7 @@ def plot_factor_dag(long, offsets, out, logger, min_share: float = 0.04):
             )
         )
         counts = {}
-        for a, b in zip(pairs["max_factor"].to_list(),
+        for a, b in zip(pairs[state_column].to_list(),
                         pairs["next_factor"].to_list()):
             counts[(a, b)] = counts.get((a, b), 0) + 1
         departures = {
@@ -949,7 +961,7 @@ def plot_factor_dag(long, offsets, out, logger, min_share: float = 0.04):
                        edgecolors="#ffffff", linewidths=1.0, zorder=3)
             label_r = 1.26
             ax.annotate(
-                factor.replace("factor ", "F"),
+                short(factor),
                 xy=(np.cos(angles[factor]) * label_r,
                     np.sin(angles[factor]) * label_r),
                 ha="center", va="center", fontsize=6, color=INK_SECONDARY,
@@ -979,10 +991,7 @@ def plot_factor_dag(long, offsets, out, logger, min_share: float = 0.04):
     for index in range(len(classes), rows * columns):
         axes[index // columns][index % columns].axis("off")
 
-    figure.suptitle(
-        "Latent class growth: paths through the 12 NMF factors",
-        x=0.01, ha="left", fontsize=10,
-    )
+    figure.suptitle(labeller("title"), x=0.01, ha="left", fontsize=10)
     figure.text(
         0.01, 0.005,
         "Nodes are the 12 NMF factors in the hexagon-map colours, placed on a "
@@ -998,7 +1007,10 @@ def plot_factor_dag(long, offsets, out, logger, min_share: float = 0.04):
     logger.info(f"wrote {out}")
 
 
-def plot_patient_factor_paths(long, offsets, patients, out_dir, logger):
+def plot_patient_factor_paths(long, offsets, patients, out_dir, logger,
+                              state_column: str = "max_factor",
+                              cluster_column: str = "growth_cluster",
+                              labeller=None, short=None, stem="factor"):
     """
     one figure per patient: their own route through the 12 NMF factors
 
@@ -1026,12 +1038,16 @@ def plot_patient_factor_paths(long, offsets, patients, out_dir, logger):
     from clifcs.longitudinal import check_factor_labels, factor_label
     from clifcs.palette import INK_PRIMARY, INK_SECONDARY, husl_colors
 
-    frame = long.filter(pl.col("max_factor").is_not_null())
-    if frame.is_empty():
-        logger.warning("no max_factor rows; per-patient factor paths skipped")
+    if state_column not in long.columns:
+        logger.info(f"no {state_column} column; per-patient paths skipped")
         return []
+    frame = long.filter(pl.col(state_column).is_not_null())
+    if frame.is_empty():
+        logger.warning(f"no {state_column} rows; per-patient paths skipped")
+        return []
+    labeller = labeller or (lambda key: key)
 
-    factors = sorted(frame["max_factor"].unique().to_list())
+    factors = sorted(frame[state_column].unique().to_list())
     factor_colors = husl_colors(factors)
     index_of_window = {float(o): i for i, o in enumerate(offsets)}
     timing = (
@@ -1040,11 +1056,11 @@ def plot_patient_factor_paths(long, offsets, patients, out_dir, logger):
                 index_of_window, default=None, return_dtype=pl.Float64
             )
         )
-        .group_by("max_factor")
+        .group_by(state_column)
         .agg(mean_position=pl.col("position").mean())
         .sort("mean_position")
     )
-    order = [f for f in timing["max_factor"].to_list() if f in factors]
+    order = [f for f in timing[state_column].to_list() if f in factors]
     order += [f for f in factors if f not in order]
     angles = {
         f: 2.0 * np.pi * i / len(order) - np.pi / 2.0 for i, f in enumerate(order)
@@ -1060,9 +1076,12 @@ def plot_patient_factor_paths(long, offsets, patients, out_dir, logger):
         )
         if track.height < 3:
             continue
-        visited = track["max_factor"].to_list()
+        visited = track[state_column].to_list()
         hours = track["offset_hours"].to_list()
-        cluster = track["growth_cluster"].drop_nulls().to_list()
+        cluster = (
+            track[cluster_column].drop_nulls().to_list()
+            if cluster_column in track.columns else []
+        )
 
         figure, ax = plt.subplots(figsize=(5.4, 5.4))
         for factor in order:
@@ -1070,7 +1089,7 @@ def plot_patient_factor_paths(long, offsets, patients, out_dir, logger):
             ax.scatter([nx_], [ny_], s=150, c=factor_colors[factor],
                        alpha=0.16, linewidths=0, zorder=2)
             ax.annotate(
-                factor_label(factor),
+                labeller(factor),
                 xy=(np.cos(angles[factor]) * 1.34,
                     np.sin(angles[factor]) * 1.34),
                 ha="center", va="center", fontsize=5.5, color=INK_SECONDARY,
@@ -1112,7 +1131,7 @@ def plot_patient_factor_paths(long, offsets, patients, out_dir, logger):
         ax.set_aspect("equal")
         ax.axis("off")
 
-        target = out_dir / f"patient_factor_path_{len(written) + 1:02d}.png"
+        target = out_dir / f"patient_{stem}_path_{len(written) + 1:02d}.png"
         save_figure(figure, target)
         plt.close(figure)
         written.append(target)
@@ -1621,6 +1640,39 @@ def main() -> None:
     factor_dir = paths.figure_home / f"patient_factor_paths_{args.subset}"
     factor_dir.mkdir(parents=True, exist_ok=True)
     plot_patient_factor_paths(long, OFFSETS, followers, factor_dir, logger)
+
+    # The same two figures for the MAP/pressor state space, so the two
+    # analyses can be compared panel for panel rather than by description.
+    if "rich_state" in long.columns and "motif_cluster_rle" in long.columns:
+        def state_name(key):
+            if key == "title":
+                return "Motif clusters: paths through the MAP/pressor states"
+            from clifcs.perfusion import PERFUSION_STATES, state_symbol
+            try:
+                return f"{state_symbol(PERFUSION_STATES.index(key))} {key}"
+            except ValueError:
+                return key
+
+        logger.info("motif-cluster paths through the MAP/pressor states:")
+        plot_factor_dag(
+            long, OFFSETS,
+            paths.figure_home / f"longitudinal_state_dag_{args.subset}.png",
+            logger, state_column="rich_state",
+            cluster_column="motif_cluster_rle",
+            labeller=state_name,
+            short=lambda k: k if k == "title" else (
+                "" if k not in PERFUSION_STATES
+                else state_symbol(PERFUSION_STATES.index(k))
+            ),
+        )
+        state_dir = paths.figure_home / f"patient_state_paths_{args.subset}"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        logger.info("individual patients through the MAP/pressor states:")
+        plot_patient_factor_paths(
+            long, OFFSETS, followers, state_dir, logger,
+            state_column="rich_state", cluster_column="motif_cluster_rle",
+            labeller=state_name, stem="state",
+        )
 
     logger.info("latent class paths through the NMF factors:")
     plot_factor_dag(

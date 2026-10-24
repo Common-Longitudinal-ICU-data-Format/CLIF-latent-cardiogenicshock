@@ -2066,183 +2066,6 @@ def section_longitudinal(paths, out: list) -> None:
             key_column="cluster",
         ))
 
-    divergence_tabs = []
-    for length in (2, 3):
-        path = tables_home / f"divergence_tokens_prefix{length}_{'septic'}.csv"
-        if not path.is_file():
-            continue
-        frame = pl.read_csv(path, schema_overrides={
-            "prefix": pl.String, "destination_a": pl.String,
-            "destination_b": pl.String,
-        }).filter(pl.col("p_adjusted") < 0.05).sort("p_adjusted")
-        if frame.is_empty():
-            continue
-        divergence_tabs.append((f"{length}-window prefix", table(
-            frame.drop("p", "shared_window_hours"),
-            {
-                "n_a": thousands, "n_b": thousands,
-                "prevalence_a": pct, "prevalence_b": pct,
-                "log2_ratio": num(2), "p_adjusted": num(4),
-            },
-            key_column="prefix",
-        )))
-    if divergence_tabs:
-        out.append('<h3>Where identical trajectories diverge</h3>')
-        out.append(
-            "<p>Among patients who have occupied the <b>same states in the "
-            "same order</b> up to the same hour, what was in the record at the "
-            "last shared window that distinguishes the ones who go one way "
-            "from the ones who go another? This holds the path fixed, which is "
-            "stronger than holding severity fixed: every patient in a "
-            "comparison is indistinguishable by state until the moment they "
-            "split.</p>"
-        )
-        out.append(
-            "<p>Each row is one token, tested on per-patient prevalence in the "
-            "last shared window, between the two largest destination states. "
-            "Cells below 11 patients are suppressed and Bonferroni runs over "
-            "every token-by-comparison test, which is conservative &mdash; "
-            "1,178 tests at a 2-window prefix.</p>"
-        )
-        out.append(callout(
-            "<b>Rows marked state-defining are close to circular and should "
-            "be read last.</b> A norepinephrine dose token in the last shared "
-            "window can <i>be</i> the change that puts the patient in a "
-            "different state at the next one, so finding it enriched says a "
-            "dose increase precedes a dose increase. MAP and SBP tokens are "
-            "flagged for the same reason: the state is defined by MAP. The "
-            "informative rows are the unflagged ones.<br><br>"
-            "This is association and not cause. Both groups are observed "
-            "rather than assigned, so a token appearing before a divergence "
-            "may mark something already underway rather than a lever that "
-            "could be pulled."
-        ))
-        out.append(tabs(divergence_tabs))
-
-    motif_tabs = []
-    for tag, label in (("rle", "Collapsed runs"), ("raw", "Raw sequences")):
-        path = tables_home / f"motif_vocabulary_{tag}.csv"
-        if not path.is_file():
-            continue
-        # Int64 inference would turn "00" into 0 and "03" into 3, collapsing
-        # distinct motifs onto each other.
-        frame = pl.read_csv(path, schema_overrides={"motif": pl.String})
-        motif_tabs.append((label, table(
-            frame,
-            {"patients": thousands, "share_of_patients": pct},
-            key_column="motif",
-        )))
-    if motif_tabs:
-        out.append('<h3>State motifs &mdash; short patterns as words</h3>')
-        out.append(
-            "<p>Each patient's path through the 15 MAP-by-pressor states is a "
-            "string, chopped into overlapping 2- to 4-grams. A motif carried "
-            "by at least 1% of patients becomes a word, and a patient becomes "
-            "a tf-idf bag of the words their trajectory contains. Clustering "
-            "that groups patients who make the same <b>moves</b>, wherever in "
-            "the week they make them.</p>"
-        )
-        out.append(
-            "<p>This is what the Hamming clusterings elsewhere cannot do. They "
-            "score two patients on being in the same state at the same hour, "
-            "so a wean at +60&nbsp;h and a wean at +96&nbsp;h come out "
-            "maximally different at every position where they disagree, "
-            "despite being the same manoeuvre. A motif is position-free: both "
-            "contribute <code>30</code> and land together.</p>"
-        )
-        out.append(callout(
-            "<b>Two readings of the same sequences.</b> On the raw string, "
-            "motifs carry duration &mdash; holding a state for five windows "
-            "looks different from holding it for one, and the commonest "
-            "motifs are simply runs (<code>00</code>, <code>000</code>, "
-            "<code>0000</code> in 73&ndash;78% of patients, because 55% of all "
-            "windows are 'MAP&nbsp;&gt;65, no pressors'). Collapsing runs "
-            "first strips duration out and leaves the transitions, which is "
-            "why the collapsed vocabulary is smaller (241 against 421) and its "
-            "top entries are manoeuvres rather than plateaus: <code>03</code> "
-            "escalation in 34% of patients, <code>30</code> wean in 33%, "
-            "<code>32</code> start of a taper in 32.9%.<br><br>"
-            "The median sequence is 29 windows raw and <b>6 after "
-            "collapsing</b> &mdash; a typical patient occupies only six "
-            "distinct runs across the week, which is the clearest measure yet "
-            "of how little the perfusion state actually moves."
-        ))
-        out.append(tabs(motif_tabs))
-
-    perfusion_file = tables_home / "perfusion_sequences_septic.csv"
-    key_file = tables_home / "perfusion_symbol_key_septic.csv"
-    if perfusion_file.is_file():
-        out.append('<h3>Sequences through the MAP-by-pressor states</h3>')
-        out.append(
-            "<p>The same question asked of a <b>clinically defined</b> state "
-            "space rather than a learned one. The six care states above come "
-            "out of an NMF over token composition and have to be interpreted "
-            "after the fact; these four are a MAP threshold with hysteresis "
-            "crossed with whether vasopressors are running, so they mean "
-            "something before any clustering happens. Patients are clustered "
-            "on their 29-symbol path through them.</p>"
-        )
-        out.append(
-            "<p>Five symbols, not four: a window after the record ends is its "
-            "own symbol. Folding it into 'MAP&nbsp;&gt;&nbsp;65, no "
-            "vasopressors' would call a discharged patient a well-perfused "
-            "one, and folding it into a low state would call a dead patient "
-            "hypotensive &mdash; the second flatters the clustering, since "
-            "death is the outcome these strata get judged against.</p>"
-        )
-        if key_file.is_file():
-            out.append(table(pl.read_csv(key_file), {}, key_column="symbol"))
-        out.append(table(
-            pl.read_csv(perfusion_file),
-            {
-                "patients": thousands,
-                "patients_with_this_sequence": thousands,
-                "share_of_cluster": pct,
-                "median_changes": num(0),
-            },
-            key_column="cluster",
-        ))
-
-    if septic_home is not None:
-        overlays = [
-            (label, figure(septic_home / f"trajectory_flow_overlay_{tag}.png", note))
-            for tag, label, note in (
-                ("stratum", "Token strata",
-                 "One field per care-state sequence cluster"),
-                ("growth", "Latent class growth",
-                 "One field per latent class, all four on the same axes"),
-                ("perfusion", "MAP/pressor clusters",
-                 "One field per MAP-by-pressor sequence cluster"),
-                ("care_state", "Care states",
-                 "One field per care state, pooled across patients"),
-                ("perfusion_state", "Perfusion states",
-                 "One field per MAP-by-pressor state"),
-            )
-        ]
-        overlays = [(label, body) for label, body in overlays if body]
-        if overlays:
-            out.append('<h3>A separate flow field per group, overlaid</h3>')
-            out.append(
-                "<p>Unlike every other flow figure here, <b>these fit one "
-                "field per group and overlay them</b>. The others fit a single "
-                "field over everyone and vary only the hue beneath it, so that "
-                "a difference between two panels cannot be a difference in the "
-                "arrows. These do the opposite deliberately: each group's "
-                "field comes from its own patients' displacements, so the "
-                "question is not where a group sits but whether the groups "
-                "<i>move differently through the same space</i>.</p>"
-            )
-            out.append(
-                "<p>Two cautions. Streamlines of different colours crossing is "
-                "not a contradiction &mdash; it is two groups passing through "
-                "one region in different directions, which is precisely what "
-                "the pooled field averages away. And the groups differ in size "
-                "several-fold, so a sparse group's field rests on fewer "
-                "vectors at the same linewidth; the per-group vector count is "
-                "in the legend rather than implied by the ink.</p>"
-            )
-            out.append(tabs(overlays))
-
     character_tabs = []
     for path, label in (
         (character_file, "State sequences"),
@@ -2758,6 +2581,312 @@ def section_longitudinal(paths, out: list) -> None:
             )))
         if token_tabs:
             out.append(tabs(token_tabs))
+
+
+def section_state_space(paths, out: list) -> None:
+    """
+    the MAP/pressor state space, its motifs, and where trajectories diverge
+
+    Its own section rather than a subsection of the latent-class work,
+    because the two share only the patients. This one starts from a state
+    space a clinician defines in advance -- a MAP threshold and what the
+    pressors are doing -- where section 7 starts from factors a matrix
+    factorisation discovered and which then have to be interpreted. They
+    answer different questions and disagree often enough that running them
+    together is the point.
+    """
+    homes = trajectory_homes(paths)
+    septic_home = next(
+        (info["home"] for info in homes.values()
+         if info["subset"] == "septic"
+         and info["correction"] == PREFERRED_CORRECTION),
+        None,
+    )
+    tables_home = paths.output_home / "tables" / "GEM-all"
+    figures_home = paths.output_home / "figures" / "GEM-all"
+    if not (tables_home / "motif_vocabulary_rle.csv").is_file():
+        return
+
+    out.append('<h2 id="states">8 &middot; MAP/pressor states and their motifs</h2>')
+    out.append(callout(
+        "<b>15 states, not 4.</b> MAP above or below 65&nbsp;mmHg with the "
+        "same hysteresis band as before, crossed with what the pressors are "
+        "doing &mdash; none, rising, falling or steady &mdash; and with "
+        "whether norepinephrine runs alone or alongside another agent. "
+        "Composition only applies while pressors run, so the count is "
+        "2&nbsp;&times;&nbsp;(1&nbsp;+&nbsp;3&nbsp;&times;&nbsp;2) = 14 plus a "
+        "terminal symbol.<br><br>"
+        "A dose change counts only if it clears <b>both</b> 25% relative and "
+        "0.01&nbsp;mcg/kg/min absolute. The relative floor alone makes "
+        "0.01&nbsp;&rarr;&nbsp;0.02 a '100% increase', which is titration "
+        "noise; the absolute floor alone would call 0.30&nbsp;&rarr;&nbsp;0.32 "
+        "meaningful. Without both, the trend flips at nearly every six-hour "
+        "point and every motif built on it measures charting noise.<br><br>"
+        "Because the state now encodes change, a <i>sequence</i> of these "
+        "states encodes change-of-change: a motif reading 'rising then "
+        "falling' is a second-order statement about how the team responded, "
+        "not a first-order one about the patient."
+    ))
+
+    divergence_tabs = []
+    for length in (2, 3):
+        path = tables_home / f"divergence_tokens_prefix{length}_{'septic'}.csv"
+        if not path.is_file():
+            continue
+        frame = pl.read_csv(path, schema_overrides={
+            "prefix": pl.String, "destination_a": pl.String,
+            "destination_b": pl.String,
+        }).filter(pl.col("p_adjusted") < 0.05).sort("p_adjusted")
+        if frame.is_empty():
+            continue
+        divergence_tabs.append((f"{length}-window prefix", table(
+            frame.drop("p", "shared_window_hours"),
+            {
+                "n_a": thousands, "n_b": thousands,
+                "prevalence_a": pct, "prevalence_b": pct,
+                "log2_ratio": num(2), "p_adjusted": num(4),
+            },
+            key_column="prefix",
+        )))
+    if divergence_tabs:
+        out.append('<h3>Where identical trajectories diverge</h3>')
+        out.append(
+            "<p>Among patients who have occupied the <b>same states in the "
+            "same order</b> up to the same hour, what was in the record at the "
+            "last shared window that distinguishes the ones who go one way "
+            "from the ones who go another? This holds the path fixed, which is "
+            "stronger than holding severity fixed: every patient in a "
+            "comparison is indistinguishable by state until the moment they "
+            "split.</p>"
+        )
+        out.append(
+            "<p>Each row is one token, tested on per-patient prevalence in the "
+            "last shared window, between the two largest destination states. "
+            "Cells below 11 patients are suppressed and Bonferroni runs over "
+            "every token-by-comparison test, which is conservative &mdash; "
+            "1,178 tests at a 2-window prefix.</p>"
+        )
+        out.append(callout(
+            "<b>Rows marked state-defining are close to circular and should "
+            "be read last.</b> A norepinephrine dose token in the last shared "
+            "window can <i>be</i> the change that puts the patient in a "
+            "different state at the next one, so finding it enriched says a "
+            "dose increase precedes a dose increase. MAP and SBP tokens are "
+            "flagged for the same reason: the state is defined by MAP. The "
+            "informative rows are the unflagged ones.<br><br>"
+            "This is association and not cause. Both groups are observed "
+            "rather than assigned, so a token appearing before a divergence "
+            "may mark something already underway rather than a lever that "
+            "could be pulled."
+        ))
+        out.append(tabs(divergence_tabs))
+
+    motif_tabs = []
+    for tag, label in (("rle", "Collapsed runs"), ("raw", "Raw sequences")):
+        path = tables_home / f"motif_vocabulary_{tag}.csv"
+        if not path.is_file():
+            continue
+        # Int64 inference would turn "00" into 0 and "03" into 3, collapsing
+        # distinct motifs onto each other.
+        frame = pl.read_csv(path, schema_overrides={"motif": pl.String})
+        motif_tabs.append((label, table(
+            frame,
+            {"patients": thousands, "share_of_patients": pct},
+            key_column="motif",
+        )))
+    if motif_tabs:
+        out.append('<h3>State motifs &mdash; short patterns as words</h3>')
+        out.append(
+            "<p>Each patient's path through the 15 MAP-by-pressor states is a "
+            "string, chopped into overlapping 2- to 4-grams. A motif carried "
+            "by at least 1% of patients becomes a word, and a patient becomes "
+            "a tf-idf bag of the words their trajectory contains. Clustering "
+            "that groups patients who make the same <b>moves</b>, wherever in "
+            "the week they make them.</p>"
+        )
+        out.append(
+            "<p>This is what the Hamming clusterings elsewhere cannot do. They "
+            "score two patients on being in the same state at the same hour, "
+            "so a wean at +60&nbsp;h and a wean at +96&nbsp;h come out "
+            "maximally different at every position where they disagree, "
+            "despite being the same manoeuvre. A motif is position-free: both "
+            "contribute <code>30</code> and land together.</p>"
+        )
+        out.append(callout(
+            "<b>Two readings of the same sequences.</b> On the raw string, "
+            "motifs carry duration &mdash; holding a state for five windows "
+            "looks different from holding it for one, and the commonest "
+            "motifs are simply runs (<code>00</code>, <code>000</code>, "
+            "<code>0000</code> in 73&ndash;78% of patients, because 55% of all "
+            "windows are 'MAP&nbsp;&gt;65, no pressors'). Collapsing runs "
+            "first strips duration out and leaves the transitions, which is "
+            "why the collapsed vocabulary is smaller (241 against 421) and its "
+            "top entries are manoeuvres rather than plateaus: <code>03</code> "
+            "escalation in 34% of patients, <code>30</code> wean in 33%, "
+            "<code>32</code> start of a taper in 32.9%.<br><br>"
+            "The median sequence is 29 windows raw and <b>6 after "
+            "collapsing</b> &mdash; a typical patient occupies only six "
+            "distinct runs across the week, which is the clearest measure yet "
+            "of how little the perfusion state actually moves."
+        ))
+        out.append(tabs(motif_tabs))
+
+    perfusion_file = tables_home / "perfusion_sequences_septic.csv"
+    key_file = tables_home / "perfusion_symbol_key_septic.csv"
+    if perfusion_file.is_file():
+        out.append('<h3>Sequences through the MAP-by-pressor states</h3>')
+        out.append(
+            "<p>The same question asked of a <b>clinically defined</b> state "
+            "space rather than a learned one. The six care states above come "
+            "out of an NMF over token composition and have to be interpreted "
+            "after the fact; these four are a MAP threshold with hysteresis "
+            "crossed with whether vasopressors are running, so they mean "
+            "something before any clustering happens. Patients are clustered "
+            "on their 29-symbol path through them.</p>"
+        )
+        out.append(
+            "<p>Five symbols, not four: a window after the record ends is its "
+            "own symbol. Folding it into 'MAP&nbsp;&gt;&nbsp;65, no "
+            "vasopressors' would call a discharged patient a well-perfused "
+            "one, and folding it into a low state would call a dead patient "
+            "hypotensive &mdash; the second flatters the clustering, since "
+            "death is the outcome these strata get judged against.</p>"
+        )
+        if key_file.is_file():
+            out.append(table(pl.read_csv(key_file), {}, key_column="symbol"))
+        out.append(table(
+            pl.read_csv(perfusion_file),
+            {
+                "patients": thousands,
+                "patients_with_this_sequence": thousands,
+                "share_of_cluster": pct,
+                "median_changes": num(0),
+            },
+            key_column="cluster",
+        ))
+
+    if septic_home is not None:
+        overlays = [
+            (label, figure(septic_home / f"trajectory_flow_overlay_{tag}.png", note))
+            for tag, label, note in (
+                ("stratum", "Token strata",
+                 "One field per care-state sequence cluster"),
+                ("growth", "Latent class growth",
+                 "One field per latent class, all four on the same axes"),
+                ("perfusion", "MAP/pressor clusters",
+                 "One field per MAP-by-pressor sequence cluster"),
+                ("care_state", "Care states",
+                 "One field per care state, pooled across patients"),
+                ("perfusion_state", "Perfusion states",
+                 "One field per MAP-by-pressor state"),
+            )
+        ]
+        overlays = [(label, body) for label, body in overlays if body]
+        if overlays:
+            out.append('<h3>A separate flow field per group, overlaid</h3>')
+            out.append(
+                "<p>Unlike every other flow figure here, <b>these fit one "
+                "field per group and overlay them</b>. The others fit a single "
+                "field over everyone and vary only the hue beneath it, so that "
+                "a difference between two panels cannot be a difference in the "
+                "arrows. These do the opposite deliberately: each group's "
+                "field comes from its own patients' displacements, so the "
+                "question is not where a group sits but whether the groups "
+                "<i>move differently through the same space</i>.</p>"
+            )
+            out.append(
+                "<p>Two cautions. Streamlines of different colours crossing is "
+                "not a contradiction &mdash; it is two groups passing through "
+                "one region in different directions, which is precisely what "
+                "the pooled field averages away. And the groups differ in size "
+                "several-fold, so a sparse group's field rests on fewer "
+                "vectors at the same linewidth; the per-group vector count is "
+                "in the legend rather than implied by the ink.</p>"
+            )
+            out.append(tabs(overlays))
+
+    if septic_home is not None:
+        state_panels = [
+            (label, figure(septic_home / name, note))
+            for name, label, note in (
+                ("trajectory_coarse_state_hex_enrichment.png",
+                 "Hexagons, enrichment",
+                 "Collapsed to MAP x trend; composition dropped, since 15 "
+                 "categorical hues is past where a palette separates"),
+                ("trajectory_coarse_state_hex_plurality.png",
+                 "Hexagons, plurality", ""),
+                ("trajectory_coarse_state_hex_enrichment_noflow.png",
+                 "Enrichment, no flow", ""),
+                ("trajectory_coarse_state_panels.png", "One state at a time", ""),
+            )
+        ]
+        state_panels = [(l, b) for l, b in state_panels if b]
+        if state_panels:
+            out.append('<h3>Where each state sits in the embedding</h3>')
+            out.append(tabs(state_panels))
+
+        motif_views = []
+        for column, stem, label in (
+            ("motif_cluster_rle", "motif_rle", "Collapsed-sequence clusters"),
+            ("motif_cluster_raw", "motif_raw", "Raw-sequence clusters"),
+        ):
+            panes = [
+                figure(septic_home / f"trajectory_{stem}_hex_enrichment.png", ""),
+                figure(septic_home / f"trajectory_{column}_panels.png", ""),
+                figure(septic_home / f"trajectory_flow_overlay_{stem}.png", ""),
+            ]
+            panes = [pane for pane in panes if pane]
+            if panes:
+                motif_views.append((label, "".join(panes)))
+        if motif_views:
+            out.append('<h3>Where the motif clusters live</h3>')
+            out.append(
+                "<p>Hexagon map, one cluster at a time, and the per-cluster "
+                "flow fields overlaid &mdash; the same three views the latent "
+                "classes get in section 7, so the two clusterings can be "
+                "compared panel for panel.</p>"
+            )
+            out.append(tabs(motif_views))
+
+    state_dag = figure(
+        figures_home / "longitudinal_state_dag_septic.png", "")
+    if state_dag:
+        out.append('<h3>Each motif cluster as a path through the states</h3>')
+        out.append(
+            "<p>The same circular layout as the NMF factor graph in section 7, "
+            "with the 15 MAP/pressor states as nodes ordered by the mean "
+            "window at which each dominates. Distance on the page means "
+            "nothing; only the edges do.</p>"
+        )
+        out.append(state_dag)
+
+    patient_states = [
+        (f"Patient {index}", figure(
+            figures_home / f"patient_state_paths_septic"
+            / f"patient_state_path_{index:02d}.png", ""))
+        for index in range(1, 13)
+    ]
+    patient_overlays = [
+        (f"Patient {index}", figure(
+            septic_home / f"paths_over_motif_{index:02d}.png", ""))
+        if septic_home is not None else (f"Patient {index}", "")
+        for index in range(1, 13)
+    ]
+    combined = []
+    for (label, route), (_, overlay) in zip(patient_states, patient_overlays):
+        panes = [pane for pane in (overlay, route) if pane]
+        if panes:
+            combined.append((label, "".join(panes)))
+    if combined:
+        out.append('<h3>Individual patients in this state space</h3>')
+        out.append(
+            "<p>Each tab is one patient: their path over the motif-cluster "
+            "flow fields, and their own route through the 15 states. Node "
+            "fill is the state's colour, the outline runs white at the "
+            "earliest window to black at the latest, and the hour sits beside "
+            "each node.</p>"
+        )
+        out.append(tabs(combined))
 
 
 def section_flow(paths, out: list) -> None:
@@ -4064,6 +4193,7 @@ def main() -> None:
     # when 09's figures describe a stale cohort. Only the two panels inside it
     # need the grid, and those are each wrapped in figure().
     section_longitudinal(paths, out)
+    section_state_space(paths, out)
     section_sites(paths, out)
     section_models(paths, out, logger)
     undifferentiated = section_undifferentiated(paths, out)

@@ -3835,17 +3835,25 @@ def main() -> None:
     # The same flow followers, drawn over the per-class fields rather than one
     # at a time. Needs `patients`, so it sits here rather than with the other
     # cluster figures above.
-    if "growth_cluster" in frame.columns and args.subset in ("all", "septic"):
-        logger.info("patient paths over the latent-class fields:")
-        # One patient per figure. Several at once meant four coloured paths
-        # over four coloured fields, and no way to tell which path belonged to
-        # which field without tracing outlines.
-        followed = frame.filter(pl.col("growth_cluster").is_not_null())
+    # Both clusterings get the same treatment, so the two analyses can be
+    # compared panel for panel. One patient per figure: several at once meant
+    # four coloured paths over four coloured fields, with no way to tell which
+    # path belonged to which field without tracing outlines.
+    for cluster_column, stem, what in (
+        ("growth_cluster", "growth", "latent-class"),
+        ("motif_cluster_rle", "motif", "motif-cluster"),
+    ):
+        if cluster_column not in frame.columns:
+            continue
+        if args.subset not in ("all", "septic"):
+            continue
+        logger.info(f"patient paths over the {what} fields:")
+        followed = frame.filter(pl.col(cluster_column).is_not_null())
         for index, patient in enumerate(patients, start=1):
             plot_paths_over_flow(
-                followed, px, py, "growth_cluster", [patient],
-                home / f"paths_over_growth_{index:02d}.png",
-                f"{paths.model_key}: patient over the latent-class fields",
+                followed, px, py, cluster_column, [patient],
+                home / f"paths_over_{stem}_{index:02d}.png",
+                f"{paths.model_key}: patient over the {what} fields",
                 logger, step_hours=None,
             )
     if not patients:
