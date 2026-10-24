@@ -1530,6 +1530,43 @@ def main() -> None:
                 motif_labels, on="hospitalization_id", how="left"
             )
 
+    # Byte-pair encoding over the same sequences: states as letters, learned
+    # variable-length units as words, the trajectory as a sentence.
+    if not motif_labels.is_empty() and "sequence_raw" in motif_labels.columns:
+        from clifcs.bpe import apply_merges, learn_merges, vocabulary_table
+
+        raw_sequences = motif_labels["sequence_raw"].to_list()
+        logger.info("learning BPE merges over the state sequences:")
+        merges = learn_merges(raw_sequences, n_merges=100, logger=logger)
+        vocabulary, segmented, compression = vocabulary_table(
+            raw_sequences, merges, PERFUSION_STATES, logger
+        )
+        vocabulary.write_csv(
+            tables_home_early / f"bpe_vocabulary_{args.subset}.csv"
+        )
+        pl.DataFrame({
+            "step": list(range(1, len(merges) + 1)),
+            "left": [a for a, _ in merges],
+            "right": [b for _, b in merges],
+            "merged": [a + b for a, b in merges],
+        }).write_csv(tables_home_early / f"bpe_merges_{args.subset}.csv")
+
+        # the sentence as a string of space-separated words, plus the 0-48h
+        # prefix that the latent comparison uses -- nine windows, which is the
+        # only stretch where the state grid and the embedding grid overlap
+        motif_labels = motif_labels.with_columns(
+            bpe_sentence=pl.Series([" ".join(t) for t in segmented]),
+            bpe_words=pl.Series([len(t) for t in segmented]),
+            bpe_sentence_48h=pl.Series([
+                " ".join(apply_merges(s[:9], merges)) for s in raw_sequences
+            ]),
+        )
+        logger.info(
+            f"BPE sentences: median {int(np.median([len(t) for t in segmented]))} "
+            f"words from {int(np.median([len(s) for s in raw_sequences]))} "
+            f"letters (compression {compression:.2f})"
+        )
+
     # Matched-prefix divergence: among patients with the same path so far,
     # what was in the record just before they went different ways.
     if not motif_labels.is_empty() and "sequence_raw" in motif_labels.columns:

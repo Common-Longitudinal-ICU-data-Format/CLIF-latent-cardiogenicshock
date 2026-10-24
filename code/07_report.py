@@ -4230,7 +4230,10 @@ def main() -> None:
     section_state_space(paths, out)
     section_sites(paths, out)
     section_models(paths, out, logger)
-    undifferentiated = section_undifferentiated(paths, out)
+    # Undifferentiated shock dropped from the report. The function is kept
+    # -- it is the only description of the 21,462 patients with no coded
+    # shock type, who are over half the cohort -- so one line restores it.
+    undifferentiated = {}
     section_methods(paths, cfg, out)
 
     stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
