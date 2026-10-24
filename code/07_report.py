@@ -811,6 +811,27 @@ SUBSET_ORDER = ("cardiogenic", "septic", "all")
 #: correction first, since that pair is the control, then the two cohort-
 #: specific embeddings. Distinct from SUBSET_ORDER, which is a *preference*
 #: order for picking one representative projection and leads with cardiogenic.
+#: Which cohort this run is writing for, or None for the combined report.
+#: Set from --cohort in main(). The section functions read it rather than
+#: taking it as an argument, because almost every one of them would have to
+#: pass it through untouched.
+COHORT: str | None = None
+
+
+def cohort_subsets() -> tuple[str, ...]:
+    """
+    the projection subsets a cohort report should show
+
+    Always includes `all`, because the point of the cohort-specific panels is
+    to be read against the whole shock population -- a phenotype that looks
+    distinctive in its own cohort and ordinary in the pooled one is a different
+    finding from one that looks distinctive in both.
+    """
+    if COHORT is None:
+        return PROJECTION_ORDER
+    return ("all", COHORT)
+
+
 PROJECTION_ORDER = ("all", "cardiogenic", "septic")
 
 #: which site correction the report treats as current when several have been
@@ -916,7 +937,7 @@ def trajectory_homes(paths) -> dict:
     """
     base = paths.output_home / "figures" / "GEM-all" / "trajectory"
     found = {}
-    for subset in PROJECTION_ORDER:
+    for subset in cohort_subsets():
         home = base / subset
         if not home.is_dir():
             continue
@@ -1946,11 +1967,11 @@ def section_longitudinal(paths, out: list) -> None:
         None,
     )
     tables_home = paths.output_home / "tables" / "GEM-all"
-    movement_file = tables_home / "state_movement_septic.csv"
-    character_file = tables_home / "cluster_characteristics_sequence_cluster_septic.csv"
-    growth_file = tables_home / "cluster_characteristics_growth_cluster_septic.csv"
-    sites_file = tables_home / "cluster_sites_sequence_cluster_septic.csv"
-    tokens_file = tables_home / "cluster_mortality_tokens_septic.csv"
+    movement_file = tables_home / f"state_movement_{COHORT or 'septic'}.csv"
+    character_file = tables_home / f"cluster_characteristics_sequence_cluster_{COHORT or 'septic'}.csv"
+    growth_file = tables_home / f"cluster_characteristics_growth_cluster_{COHORT or 'septic'}.csv"
+    sites_file = tables_home / f"cluster_sites_sequence_cluster_{COHORT or 'septic'}.csv"
+    tokens_file = tables_home / f"cluster_mortality_tokens_{COHORT or 'septic'}.csv"
     if not any(f.is_file() for f in (movement_file, character_file, tokens_file)):
         return
 
@@ -2000,7 +2021,7 @@ def section_longitudinal(paths, out: list) -> None:
         "between-site prevalence ratio.</p>"
     )
 
-    state_tokens_file = tables_home / "care_state_tokens_septic.csv"
+    state_tokens_file = tables_home / f"care_state_tokens_{COHORT or 'septic'}.csv"
     if state_tokens_file.is_file():
         out.append('<h3>What the six care states are</h3>')
         out.append(
@@ -2042,7 +2063,7 @@ def section_longitudinal(paths, out: list) -> None:
             {"patients": thousands, "share": pct},
         ))
 
-    sequences_file = tables_home / "cluster_sequences_septic.csv"
+    sequences_file = tables_home / f"cluster_sequences_{COHORT or 'septic'}.csv"
     if sequences_file.is_file():
         out.append('<h3>What the sequences in each stratum look like</h3>')
         out.append(
@@ -2070,7 +2091,8 @@ def section_longitudinal(paths, out: list) -> None:
     for path, label in (
         (character_file, "State sequences"),
         (growth_file, "Latent class growth"),
-        (tables_home / "cluster_characteristics_perfusion_cluster_septic.csv",
+        (tables_home
+         / f"cluster_characteristics_perfusion_cluster_{COHORT or 'septic'}.csv",
          "MAP/pressor sequences"),
     ):
         if not path.is_file():
@@ -2102,10 +2124,10 @@ def section_longitudinal(paths, out: list) -> None:
     if septic_home is not None:
         panels = [
             ("Care state (per timepoint)",
-             figure(septic_home / "trajectory_flow_septic_care_state.png",
+             figure(septic_home / "trajectory_flow_care_state.png",
                     "The state assigned to each six-hour window")),
             ("Stratum (per patient)",
-             figure(septic_home / "trajectory_flow_septic_stratum.png",
+             figure(septic_home / "trajectory_flow_stratum.png",
                     "The stratum the patient's whole sequence fell into")),
         ]
         panels = [(label, body) for label, body in panels if body]
@@ -2136,7 +2158,7 @@ def section_longitudinal(paths, out: list) -> None:
 
     factor_dag = figure(
         paths.output_home / "figures" / "GEM-all"
-        / "longitudinal_factor_dag_septic.png",
+        / f"longitudinal_factor_dag_{COHORT or 'septic'}.png",
         "",
     )
     if factor_dag:
@@ -2334,7 +2356,7 @@ def section_longitudinal(paths, out: list) -> None:
     # path over the class flow fields, and their route through the 12 factors.
     individual = []
     factor_dir = (
-        paths.output_home / "figures" / "GEM-all" / "patient_factor_paths_septic"
+        paths.output_home / "figures" / "GEM-all" / f"patient_factor_paths_{COHORT or 'septic'}"
     )
     for index in range(1, 13):
         panes = []
@@ -2380,7 +2402,7 @@ def section_longitudinal(paths, out: list) -> None:
         ))
         out.append(tabs(individual))
 
-    factor_tokens_file = tables_home / "nmf_factor_tokens_septic.csv"
+    factor_tokens_file = tables_home / f"nmf_factor_tokens_{COHORT or 'septic'}.csv"
     if factor_tokens_file.is_file():
         out.append('<h3>What each NMF factor is made of</h3>')
         out.append(
@@ -2425,7 +2447,7 @@ def section_longitudinal(paths, out: list) -> None:
             key_column="factor",
         ))
 
-    adjusted_file = tables_home / "adjusted_mortality_septic.csv"
+    adjusted_file = tables_home / f"adjusted_mortality_{COHORT or 'septic'}.csv"
     if adjusted_file.is_file():
         out.append('<h3>Mortality adjusted for severity at onset</h3>')
         out.append(
@@ -2470,7 +2492,7 @@ def section_longitudinal(paths, out: list) -> None:
     balance_panels = [
         (label, figure(
             paths.output_home / "figures" / "GEM-all"
-            / f"covariate_balance_{tag}_septic.png", ""))
+            / f"covariate_balance_{tag}_{COHORT or 'septic'}.png", ""))
         for tag, label in (
             ("perfusion", "MAP/pressor clusters"),
             ("growth", "Latent class growth"),
@@ -2604,7 +2626,7 @@ def section_state_space(paths, out: list) -> None:
     )
     tables_home = paths.output_home / "tables" / "GEM-all"
     figures_home = paths.output_home / "figures" / "GEM-all"
-    if not (tables_home / "motif_vocabulary_rle.csv").is_file():
+    if not (tables_home / f"motif_vocabulary_rle_{COHORT or 'septic'}.csv").is_file():
         return
 
     out.append('<h2 id="states">8 &middot; MAP/pressor states and their motifs</h2>')
@@ -2630,7 +2652,7 @@ def section_state_space(paths, out: list) -> None:
 
     divergence_tabs = []
     for length in (2, 3):
-        path = tables_home / f"divergence_tokens_prefix{length}_{'septic'}.csv"
+        path = tables_home / f"divergence_tokens_prefix{length}_{COHORT or 'septic'}.csv"
         if not path.is_file():
             continue
         frame = pl.read_csv(path, schema_overrides={
@@ -2683,7 +2705,7 @@ def section_state_space(paths, out: list) -> None:
 
     motif_tabs = []
     for tag, label in (("rle", "Collapsed runs"), ("raw", "Raw sequences")):
-        path = tables_home / f"motif_vocabulary_{tag}.csv"
+        path = tables_home / f"motif_vocabulary_{tag}_{COHORT or 'septic'}.csv"
         if not path.is_file():
             continue
         # Int64 inference would turn "00" into 0 and "03" into 3, collapsing
@@ -2731,8 +2753,8 @@ def section_state_space(paths, out: list) -> None:
         ))
         out.append(tabs(motif_tabs))
 
-    perfusion_file = tables_home / "perfusion_sequences_septic.csv"
-    key_file = tables_home / "perfusion_symbol_key_septic.csv"
+    perfusion_file = tables_home / f"perfusion_sequences_{COHORT or 'septic'}.csv"
+    key_file = tables_home / f"perfusion_symbol_key_{COHORT or 'septic'}.csv"
     if perfusion_file.is_file():
         out.append('<h3>Sequences through the MAP-by-pressor states</h3>')
         out.append(
@@ -2849,7 +2871,7 @@ def section_state_space(paths, out: list) -> None:
             out.append(tabs(motif_views))
 
     state_dag = figure(
-        figures_home / "longitudinal_state_dag_septic.png", "")
+        figures_home / f"longitudinal_state_dag_{COHORT or 'septic'}.png", "")
     if state_dag:
         out.append('<h3>Each motif cluster as a path through the states</h3>')
         out.append(
@@ -2862,7 +2884,7 @@ def section_state_space(paths, out: list) -> None:
 
     patient_states = [
         (f"Patient {index}", figure(
-            figures_home / f"patient_state_paths_septic"
+            figures_home / f"patient_state_paths_{COHORT or 'septic'}"
             / f"patient_state_path_{index:02d}.png", ""))
         for index in range(1, 13)
     ]
@@ -3219,7 +3241,7 @@ def section_flow(paths, out: list) -> None:
     # value they have, and the transition matrix below only makes sense for a
     # state.
     perfusion = figure(
-        septic_home / "trajectory_flow_septic_perfusion.png",
+        septic_home / "trajectory_flow_perfusion.png",
         "Coded septic shock, coloured by MAP adequacy and pressor exposure",
     )
     transitions = figure(
@@ -4135,7 +4157,19 @@ def section_methods(paths, cfg, out: list) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--open", action="store_true")
+    parser.add_argument(
+        "--cohort", choices=("septic", "cardiogenic"), default=None,
+        help="write a cohort-specific report instead of the combined one. "
+             "The cohort description, the token-difference analysis and the "
+             "model provenance are shared and appear in both; the "
+             "projections, the guideline fit and the whole state-space and "
+             "latent-class analysis are scoped to this cohort.",
+    )
     args = parser.parse_args()
+    # module-level so the section functions can scope themselves without
+    # threading the cohort through a dozen signatures
+    global COHORT
+    COHORT = args.cohort
 
     paths = load_paths()
     paths.mkdirs()
@@ -4249,7 +4283,8 @@ def main() -> None:
 {''.join(out)}
 </div><script>{script()}</script></body></html>"""
 
-    destination = paths.output_home / "report.html"
+    name = "report.html" if COHORT is None else f"report_{COHORT}.html"
+    destination = paths.output_home / name
     destination.write_text(document, encoding="utf-8")
     logger.info(
         f"wrote {destination} ({destination.stat().st_size / 1e6:.1f} MB, "

@@ -3306,14 +3306,14 @@ def plot_cluster_panels(frame, px, py, home, paths, args, logger) -> None:
     for column, filename, subtitle in (
         (
             "care_state",
-            "trajectory_flow_septic_care_state.png",
+            "trajectory_flow_care_state.png",
             "the care state 11 assigned this six-hour window, from "
             "site-balanced token counts -- a label on each timepoint, not on "
             "the patient",
         ),
         (
             "sequence_cluster",
-            "trajectory_flow_septic_stratum.png",
+            "trajectory_flow_stratum.png",
             "the severity stratum the patient's whole seven-day sequence fell "
             "into -- constant along each trajectory, so this shows where a "
             "stratum lives rather than where a patient is",
@@ -3640,7 +3640,7 @@ def main() -> None:
 
     if "perfusion_state" in frame.columns and args.subset in ("all", "septic"):
         plot_flow(
-            frame, px, py, home / "trajectory_flow_septic_perfusion.png",
+            frame, px, py, home / "trajectory_flow_perfusion.png",
             f"{paths.model_key}: perfusion state",
             f"MAP adequacy with a {MAP_LOW:g}-{MAP_HIGH:g} mmHg hysteresis band, "
             "crossed with whether vasopressors are running",

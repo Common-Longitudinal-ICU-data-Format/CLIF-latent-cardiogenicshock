@@ -378,7 +378,8 @@ def factor_token_table(model, token_ids, names, logger, top: int = 12):
     return pl.DataFrame(rows)
 
 
-def motif_clusters(perfusion, offsets, n_clusters, seed, logger, tables_home):
+def motif_clusters(perfusion, offsets, n_clusters, seed, logger, tables_home,
+                   subset: str = "septic"):
     """
     cluster patients on the motifs their state sequence contains
 
@@ -422,7 +423,9 @@ def motif_clusters(perfusion, offsets, n_clusters, seed, logger, tables_home):
             vocabulary, carriers, PERFUSION_STATES, len(sequences), logger
         )
         if not described.is_empty():
-            described.write_csv(tables_home / f"motif_vocabulary_{tag}.csv")
+            described.write_csv(
+                tables_home / f"motif_vocabulary_{tag}_{subset}.csv"
+            )
         matrix = motif_matrix(vocabulary, per_patient)
         model = KMeans(n_clusters=n_clusters, random_state=seed, n_init=10)
         labels = model.fit_predict(matrix)
@@ -607,6 +610,109 @@ def divergence_tokens(
             f"log2 {row['log2_ratio']:+.2f}"
         )
     return table
+
+
+def divergence_outcomes(sequences, labels_frame, offsets, logger,
+                        prefix_length: int = 2, min_group: int = 40,
+                        top_prefixes: int = 6):
+    """
+    do the two branches of a divergence end up differently, and treated differently
+
+    The token analysis asks what was in the record BEFORE the split. This asks
+    what happens AFTER it: among patients who were indistinguishable by state
+    until a given hour, do those who go one way have different outcomes, and
+    were they treated differently over the rest of the week?
+
+    The two questions are deliberately separate columns rather than one table,
+    because they answer to different standards. An outcome difference between
+    branches is the thing worth knowing. A treatment difference is partly
+    mechanism and partly definition -- the branch is DEFINED by what the
+    pressors did next, so a difference in peak norepinephrine is close to
+    tautological, while a difference in ventilation or dialysis is not. The
+    constitutive columns are marked so the distinction survives into the table.
+
+    Fisher's exact is not used and the comparisons are not corrected across
+    prefixes: this is a descriptive companion to the token test, which carries
+    the multiplicity burden. Read the effect sizes, not the stars.
+    """
+    position = prefix_length - 1
+    if position >= len(offsets) - 1:
+        return pl.DataFrame()
+
+    prefixes = {}
+    for patient, sequence in sequences.items():
+        if len(sequence) <= prefix_length:
+            continue
+        prefixes.setdefault(sequence[:prefix_length], []).append(
+            (patient, sequence[prefix_length])
+        )
+    ranked = sorted(prefixes.items(), key=lambda kv: -len(kv[1]))
+
+    #: (column, label, whether the branch definition makes it near-circular)
+    MEASURES = (
+        ("in_hospital_mortality", "died in hospital", False),
+        ("icu_los_days", "ICU length of stay (days)", False),
+        ("ever_imv", "invasive ventilation", False),
+        ("ever_rrt", "renal replacement", False),
+        ("map_median", "median MAP (mmHg)", True),
+        ("hours_hypotensive", "hours with MAP <65", True),
+        ("nee_max", "peak norepinephrine equivalents", True),
+        ("n_vasopressors_max", "peak vasoactive agents", True),
+    )
+
+    rows = []
+    logger.info(
+        f"divergence outcomes after a {prefix_length}-window prefix "
+        f"(split at {offsets[position + 1]:+.0f}h):"
+    )
+    for prefix, members in ranked[:top_prefixes]:
+        destinations = Counter(nxt for _, nxt in members)
+        ordered = [d for d, n in destinations.most_common() if n >= min_group]
+        if len(ordered) < 2:
+            continue
+        left, right = ordered[0], ordered[1]
+        ids_a = [p for p, nxt in members if nxt == left]
+        ids_b = [p for p, nxt in members if nxt == right]
+        part_a = labels_frame.filter(
+            pl.col("hospitalization_id").is_in(ids_a)
+        )
+        part_b = labels_frame.filter(
+            pl.col("hospitalization_id").is_in(ids_b)
+        )
+        if part_a.height < min_group or part_b.height < min_group:
+            continue
+        logger.info(
+            f"  {prefix!r}: {part_a.height:,} -> {left!r} vs "
+            f"{part_b.height:,} -> {right!r}"
+        )
+        for column, label, constitutive in MEASURES:
+            if column not in labels_frame.columns:
+                continue
+            values_a = part_a[column].cast(pl.Float64).drop_nulls()
+            values_b = part_b[column].cast(pl.Float64).drop_nulls()
+            if values_a.is_empty() or values_b.is_empty():
+                continue
+            share = column in ("in_hospital_mortality", "ever_imv", "ever_rrt")
+            stat_a = float(values_a.mean() if share else values_a.median())
+            stat_b = float(values_b.mean() if share else values_b.median())
+            rows.append({
+                "prefix": prefix,
+                "destination_a": left, "destination_b": right,
+                "n_a": part_a.height, "n_b": part_b.height,
+                "measure": label,
+                "branch_defining": constitutive,
+                "value_a": stat_a, "value_b": stat_b,
+                "difference": stat_a - stat_b,
+                "is_share": share,
+            })
+            if not constitutive:
+                logger.info(
+                    f"      {label:<30} {stat_a:>8.3g} vs {stat_b:>8.3g}"
+                )
+    if not rows:
+        logger.warning("no divergence outcome comparison cleared the floor")
+        return pl.DataFrame()
+    return pl.DataFrame(rows)
 
 
 def describe_states(counts, token_ids, states, patients, offsets, names, logger):
@@ -1410,7 +1516,7 @@ def main() -> None:
         tables_home_early.mkdir(parents=True, exist_ok=True)
         motif_labels, rich_long = motif_clusters(
             perfusion, OFFSETS, args.clusters, args.seed, logger,
-            tables_home_early,
+            tables_home_early, subset=args.subset,
         )
         if not motif_labels.is_empty():
             labels_frame = labels_frame.join(
@@ -1477,6 +1583,26 @@ def main() -> None:
         if paths.tokenizer_yaml_or_none is not None else ({}, {})
     )
     differential = []
+    # How much of the cohort each state accounts for -- asked for explicitly,
+    # and previously only in the log.
+    if not rich_long.is_empty():
+        representation = (
+            rich_long["rich_state"].value_counts(sort=True)
+            .with_columns(
+                share=pl.col("count") / rich_long.height,
+                symbol=pl.col("rich_state").replace_strict(
+                    {name: state_symbol(i)
+                     for i, name in enumerate(PERFUSION_STATES)},
+                    default="?", return_dtype=pl.String,
+                ),
+            )
+            .select("symbol", "rich_state", "count", "share")
+        )
+        representation.write_csv(
+            paths.output_home / "tables" / paths.model_key
+            / f"state_representation_{args.subset}.csv"
+        )
+
     tables_home = paths.output_home / "tables" / paths.model_key
     tables_home.mkdir(parents=True, exist_ok=True)
     stratifications = ["sequence_cluster", "growth_cluster"]
@@ -1522,6 +1648,22 @@ def main() -> None:
         out.parent.mkdir(parents=True, exist_ok=True)
         pl.concat(differential, how="diagonal_relaxed").write_csv(out)
         logger.info(f"wrote {out}")
+
+    if not motif_labels.is_empty() and "sequence_raw" in motif_labels.columns:
+        sequences_now = dict(zip(
+            motif_labels["hospitalization_id"].to_list(),
+            motif_labels["sequence_raw"].to_list(),
+        ))
+        for prefix_length in (2, 3):
+            found = divergence_outcomes(
+                sequences_now, labels_frame, OFFSETS, logger,
+                prefix_length=prefix_length,
+            )
+            if not found.is_empty():
+                found.write_csv(
+                    tables_home
+                    / f"divergence_outcomes_prefix{prefix_length}_{args.subset}.csv"
+                )
 
     out = (
         paths.patient_level_home
