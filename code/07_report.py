@@ -2066,6 +2066,56 @@ def section_longitudinal(paths, out: list) -> None:
             key_column="cluster",
         ))
 
+    motif_tabs = []
+    for tag, label in (("rle", "Collapsed runs"), ("raw", "Raw sequences")):
+        path = tables_home / f"motif_vocabulary_{tag}.csv"
+        if not path.is_file():
+            continue
+        # Int64 inference would turn "00" into 0 and "03" into 3, collapsing
+        # distinct motifs onto each other.
+        frame = pl.read_csv(path, schema_overrides={"motif": pl.String})
+        motif_tabs.append((label, table(
+            frame,
+            {"patients": thousands, "share_of_patients": pct},
+            key_column="motif",
+        )))
+    if motif_tabs:
+        out.append('<h3>State motifs &mdash; short patterns as words</h3>')
+        out.append(
+            "<p>Each patient's path through the 15 MAP-by-pressor states is a "
+            "string, chopped into overlapping 2- to 4-grams. A motif carried "
+            "by at least 1% of patients becomes a word, and a patient becomes "
+            "a tf-idf bag of the words their trajectory contains. Clustering "
+            "that groups patients who make the same <b>moves</b>, wherever in "
+            "the week they make them.</p>"
+        )
+        out.append(
+            "<p>This is what the Hamming clusterings elsewhere cannot do. They "
+            "score two patients on being in the same state at the same hour, "
+            "so a wean at +60&nbsp;h and a wean at +96&nbsp;h come out "
+            "maximally different at every position where they disagree, "
+            "despite being the same manoeuvre. A motif is position-free: both "
+            "contribute <code>30</code> and land together.</p>"
+        )
+        out.append(callout(
+            "<b>Two readings of the same sequences.</b> On the raw string, "
+            "motifs carry duration &mdash; holding a state for five windows "
+            "looks different from holding it for one, and the commonest "
+            "motifs are simply runs (<code>00</code>, <code>000</code>, "
+            "<code>0000</code> in 73&ndash;78% of patients, because 55% of all "
+            "windows are 'MAP&nbsp;&gt;65, no pressors'). Collapsing runs "
+            "first strips duration out and leaves the transitions, which is "
+            "why the collapsed vocabulary is smaller (241 against 421) and its "
+            "top entries are manoeuvres rather than plateaus: <code>03</code> "
+            "escalation in 34% of patients, <code>30</code> wean in 33%, "
+            "<code>32</code> start of a taper in 32.9%.<br><br>"
+            "The median sequence is 29 windows raw and <b>6 after "
+            "collapsing</b> &mdash; a typical patient occupies only six "
+            "distinct runs across the week, which is the clearest measure yet "
+            "of how little the perfusion state actually moves."
+        ))
+        out.append(tabs(motif_tabs))
+
     perfusion_file = tables_home / "perfusion_sequences_septic.csv"
     key_file = tables_home / "perfusion_symbol_key_septic.csv"
     if perfusion_file.is_file():

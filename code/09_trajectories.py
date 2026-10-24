@@ -3678,7 +3678,26 @@ def main() -> None:
                     True,
                     "each window given to its single largest NMF factor weight",
                 ))
+        # the collapsed 8-state view for hexagons: MAP x trend, composition
+        # dropped. Fifteen categorical hues is past where a palette separates,
+        # and composition is the dimension a hexagon map can least afford.
         for column, tag, what in (
+            ("coarse_state", "coarse_state",
+             "MAP adequacy crossed with pressor dose trend"),
+        ):
+            if column not in frame.columns:
+                continue
+            levels = sorted(frame[column].drop_nulls().unique().to_list())
+            if len(levels) > 1:
+                groupings.append((
+                    column, tag, husl_colors(levels), levels, True, what,
+                ))
+        for column, tag, what in (
+            ("motif_cluster_raw", "motif_raw",
+             "patients clustered on motifs from the raw state sequence"),
+            ("motif_cluster_rle", "motif_rle",
+             "patients clustered on motifs from the run-length-encoded "
+             "sequence"),
             ("perfusion_cluster", "perfusion_cluster",
              "patients clustered on their MAP/pressor sequence"),
             ("sequence_cluster", "sequence_cluster",
@@ -3755,6 +3774,8 @@ def main() -> None:
             ("sequence_cluster", "token strata"),
             ("growth_cluster", "latent class growth"),
             ("perfusion_cluster", "MAP/pressor sequence clusters"),
+            ("motif_cluster_raw", "motif clusters, raw sequences"),
+            ("motif_cluster_rle", "motif clusters, collapsed sequences"),
         ):
             if column not in frame.columns:
                 continue

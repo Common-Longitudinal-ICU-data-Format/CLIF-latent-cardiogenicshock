@@ -33,6 +33,13 @@ import numpy as np
 import polars as pl
 
 
+#: Motif strings are digits, so a CSV round-trip through a type-inferring
+#: reader turns "00" into the integer 0 and makes it indistinguishable from
+#: "0" -- and "03" from "3". Every reader of motif_vocabulary_*.csv has to
+#: force this column to a string; polars infers Int64 otherwise.
+MOTIF_CSV_SCHEMA = {"motif": pl.String}
+
+
 def run_length_encode(sequence: str) -> str:
     """'1111110000' -> '10'; adjacent duplicates collapsed"""
     if not sequence:
