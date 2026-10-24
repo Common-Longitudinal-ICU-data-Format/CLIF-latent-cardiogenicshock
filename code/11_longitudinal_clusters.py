@@ -454,6 +454,159 @@ def motif_clusters(perfusion, offsets, n_clusters, seed, logger, tables_home):
     return out, long_states
 
 
+#: Token families that HELP DEFINE the perfusion state, so finding them
+#: enriched at a divergence is close to circular: a norepinephrine dose token
+#: in the last shared window may simply BE the dose change that puts the
+#: patient in a different state at the next one. They are tested and reported
+#: like everything else, but flagged, because the interesting answer is which
+#: NON-constitutive tokens anticipate the split.
+CONSTITUTIVE_PREFIXES = (
+    "VTL//map", "VTL//sbp", "VTL//dbp",
+    "MED-CTS//norepinephrine", "MED-CTS//epinephrine",
+    "MED-CTS//phenylephrine", "MED-CTS//dopamine",
+    "MED-CTS//angiotensin", "MED-CTS//vasopressin",
+)
+
+
+def is_constitutive(token: str) -> bool:
+    return any(token.startswith(p) for p in CONSTITUTIVE_PREFIXES)
+
+
+def divergence_tokens(
+    sequences, counts, token_ids, names, offsets, logger,
+    prefix_length: int = 3, min_group: int = 40, min_cell: int = 11,
+    top_prefixes: int = 6,
+):
+    """
+    among patients with the same history, what precedes them going different ways
+
+    The within-stratum mortality analysis holds SEVERITY roughly fixed. This
+    holds the PATH fixed, which is stronger: every patient in a comparison has
+    occupied the same states in the same order up to the same hour, so the
+    groups differ only in what happens next. The question is what was in the
+    record at the last shared window that distinguishes them.
+
+    For each common prefix, patients are split by the state they move to next,
+    the two largest destinations are compared, and each token is tested on its
+    per-patient prevalence in the LAST SHARED WINDOW -- before the split, while
+    the two groups are still indistinguishable by state.
+
+    WHAT THIS IS NOT. It is association, not cause. Both groups are observed,
+    not assigned, and a token appearing before a divergence may be a marker of
+    something already underway rather than a lever. The constitutive flag
+    separates the worst case: a pressor-dose token in the last shared window
+    can be the very change that produces the next state, in which case the
+    "finding" is that a dose increase precedes a dose increase.
+    """
+    from scipy.stats import chi2_contingency
+
+    position = prefix_length - 1
+    if position >= len(offsets) - 1:
+        logger.warning("prefix longer than the grid; divergence skipped")
+        return pl.DataFrame()
+    shared_window = float(offsets[position])
+    next_window = float(offsets[position + 1])
+
+    prefixes = {}
+    for patient, sequence in sequences.items():
+        if len(sequence) <= prefix_length:
+            continue
+        prefixes.setdefault(sequence[:prefix_length], []).append(
+            (patient, sequence[prefix_length])
+        )
+    ranked = sorted(prefixes.items(), key=lambda kv: -len(kv[1]))
+    logger.info(
+        f"divergence at {next_window:+.0f}h after a shared prefix of "
+        f"{prefix_length} windows (tokens read from {shared_window:+.0f}h):"
+    )
+
+    present = (
+        counts.filter(
+            pl.col("token_id").is_in(list(token_ids))
+            & (pl.col("window") == shared_window)
+        )
+        .select("hospitalization_id", "token_id")
+        .unique()
+    )
+    by_patient = {}
+    for patient, token in zip(
+        present["hospitalization_id"].to_list(), present["token_id"].to_list()
+    ):
+        by_patient.setdefault(patient, set()).add(int(token))
+
+    rows = []
+    for prefix, members in ranked[:top_prefixes]:
+        destinations = Counter(nxt for _, nxt in members)
+        ordered = [d for d, n in destinations.most_common() if n >= min_group]
+        if len(ordered) < 2:
+            continue
+        left, right = ordered[0], ordered[1]
+        group_a = [p for p, nxt in members if nxt == left]
+        group_b = [p for p, nxt in members if nxt == right]
+        logger.info(
+            f"  prefix {prefix!r} ({len(members):,} patients): "
+            f"{len(group_a):,} go to {left!r} vs {len(group_b):,} to {right!r}"
+        )
+
+        tested = 0
+        for token in token_ids:
+            token = int(token)
+            hit_a = sum(1 for p in group_a if token in by_patient.get(p, ()))
+            hit_b = sum(1 for p in group_b if token in by_patient.get(p, ()))
+            if min(hit_a, hit_b) < min_cell:
+                continue
+            table = np.array([
+                [hit_a, len(group_a) - hit_a],
+                [hit_b, len(group_b) - hit_b],
+            ])
+            if table.min() < 0 or table.sum(axis=0).min() == 0:
+                continue
+            chi2, p, _, _ = chi2_contingency(table, correction=False)
+            rate_a = hit_a / max(len(group_a), 1)
+            rate_b = hit_b / max(len(group_b), 1)
+            name = names.get(token, str(token))
+            rows.append({
+                "prefix": prefix,
+                "shared_window_hours": shared_window,
+                "destination_a": left, "destination_b": right,
+                "n_a": len(group_a), "n_b": len(group_b),
+                "token": name,
+                "constitutive": is_constitutive(name),
+                "prevalence_a": rate_a, "prevalence_b": rate_b,
+                "log2_ratio": float(
+                    np.log2(max(rate_a, 1e-9) / max(rate_b, 1e-9))
+                ),
+                "p": float(p),
+            })
+            tested += 1
+        logger.info(f"      {tested} tokens testable above the small-cell floor")
+
+    if not rows:
+        logger.warning("no divergence comparison cleared the floors")
+        return pl.DataFrame()
+
+    table = pl.DataFrame(rows)
+    table = table.with_columns(
+        p_adjusted=(pl.col("p") * table.height).clip(upper_bound=1.0)
+    ).sort("p")
+    significant = table.filter(pl.col("p_adjusted") < 0.05)
+    logger.info(
+        f"  {table.height:,} tests, {significant.height:,} significant after "
+        f"Bonferroni ({significant.filter(~pl.col('constitutive')).height:,} "
+        "of them not constitutive)"
+    )
+    for row in significant.filter(~pl.col("constitutive")).head(12).iter_rows(
+        named=True
+    ):
+        logger.info(
+            f"      {row['prefix']} -> {row['destination_a']} vs "
+            f"{row['destination_b']}   {row['token']:<32} "
+            f"{row['prevalence_a']:>6.1%} vs {row['prevalence_b']:>6.1%}  "
+            f"log2 {row['log2_ratio']:+.2f}"
+        )
+    return table
+
+
 def describe_states(counts, token_ids, states, patients, offsets, names, logger):
     """
     what each care state actually contains
@@ -1251,6 +1404,28 @@ def main() -> None:
             assignments = assignments.join(
                 motif_labels, on="hospitalization_id", how="left"
             )
+
+    # Matched-prefix divergence: among patients with the same path so far,
+    # what was in the record just before they went different ways.
+    if not motif_labels.is_empty() and "sequence_raw" in motif_labels.columns:
+        sequences = dict(zip(
+            motif_labels["hospitalization_id"].to_list(),
+            motif_labels["sequence_raw"].to_list(),
+        ))
+        vocab_now, _fam = (
+            vocabulary(str(paths.tokenizer_yaml))
+            if paths.tokenizer_yaml_or_none is not None else ({}, {})
+        )
+        for prefix_length in (2, 3):
+            found = divergence_tokens(
+                sequences, counts, token_ids, vocab_now, OFFSETS, logger,
+                prefix_length=prefix_length,
+            )
+            if not found.is_empty():
+                found.write_csv(
+                    tables_home_early
+                    / f"divergence_tokens_prefix{prefix_length}_{args.subset}.csv"
+                )
 
     # Treatment and haemodynamics over the SEVEN-DAY window, from the state
     # table this script built for the perfusion sequences. 09's

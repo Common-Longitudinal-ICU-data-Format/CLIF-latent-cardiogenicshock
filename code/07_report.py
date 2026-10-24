@@ -2066,6 +2066,59 @@ def section_longitudinal(paths, out: list) -> None:
             key_column="cluster",
         ))
 
+    divergence_tabs = []
+    for length in (2, 3):
+        path = tables_home / f"divergence_tokens_prefix{length}_{'septic'}.csv"
+        if not path.is_file():
+            continue
+        frame = pl.read_csv(path, schema_overrides={
+            "prefix": pl.String, "destination_a": pl.String,
+            "destination_b": pl.String,
+        }).filter(pl.col("p_adjusted") < 0.05).sort("p_adjusted")
+        if frame.is_empty():
+            continue
+        divergence_tabs.append((f"{length}-window prefix", table(
+            frame.drop("p", "shared_window_hours"),
+            {
+                "n_a": thousands, "n_b": thousands,
+                "prevalence_a": pct, "prevalence_b": pct,
+                "log2_ratio": num(2), "p_adjusted": num(4),
+            },
+            key_column="prefix",
+        )))
+    if divergence_tabs:
+        out.append('<h3>Where identical trajectories diverge</h3>')
+        out.append(
+            "<p>Among patients who have occupied the <b>same states in the "
+            "same order</b> up to the same hour, what was in the record at the "
+            "last shared window that distinguishes the ones who go one way "
+            "from the ones who go another? This holds the path fixed, which is "
+            "stronger than holding severity fixed: every patient in a "
+            "comparison is indistinguishable by state until the moment they "
+            "split.</p>"
+        )
+        out.append(
+            "<p>Each row is one token, tested on per-patient prevalence in the "
+            "last shared window, between the two largest destination states. "
+            "Cells below 11 patients are suppressed and Bonferroni runs over "
+            "every token-by-comparison test, which is conservative &mdash; "
+            "1,178 tests at a 2-window prefix.</p>"
+        )
+        out.append(callout(
+            "<b>Rows marked state-defining are close to circular and should "
+            "be read last.</b> A norepinephrine dose token in the last shared "
+            "window can <i>be</i> the change that puts the patient in a "
+            "different state at the next one, so finding it enriched says a "
+            "dose increase precedes a dose increase. MAP and SBP tokens are "
+            "flagged for the same reason: the state is defined by MAP. The "
+            "informative rows are the unflagged ones.<br><br>"
+            "This is association and not cause. Both groups are observed "
+            "rather than assigned, so a token appearing before a divergence "
+            "may mark something already underway rather than a lever that "
+            "could be pulled."
+        ))
+        out.append(tabs(divergence_tabs))
+
     motif_tabs = []
     for tag, label in (("rle", "Collapsed runs"), ("raw", "Raw sequences")):
         path = tables_home / f"motif_vocabulary_{tag}.csv"
