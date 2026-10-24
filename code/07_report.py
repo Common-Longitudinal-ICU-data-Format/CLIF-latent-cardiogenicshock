@@ -3506,7 +3506,7 @@ def section_sites(paths, out: list) -> None:
     if not features and not token_panels:
         return
 
-    out.append('<h2 id="sites">7 &middot; Why the sites separate</h2>')
+    out.append('<h2 id="sites">9 &middot; Why the sites separate</h2>')
     if features:
         out.append(
             "<p>The embedding separates the contributing sites almost perfectly "
@@ -3585,7 +3585,7 @@ def section_models(paths, out: list, logger) -> None:
     if results is None and not purity_rows:
         return
 
-    out.append('<h2 id="models">8 &middot; Models</h2>')
+    out.append('<h2 id="models">10 &middot; Models</h2>')
     out.append(
         "<p>Three frozen checkpoints of the same architecture, differing only "
         "in what they were trained on: <b>GEM-all</b> on MIMIC + UCMC + NU, "
@@ -3720,7 +3720,7 @@ def section_undifferentiated(paths, out: list) -> bool:
         return False
 
     out.append(
-        '<h2 id="undifferentiated">9 &middot; Undifferentiated shock</h2>'
+        '<h2 id="undifferentiated">11 &middot; Undifferentiated shock</h2>'
     )
     out.append(
         "<p>The cohort is selected on physiology &mdash; sustained hypotension "
