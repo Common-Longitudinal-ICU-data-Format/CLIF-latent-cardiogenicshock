@@ -199,10 +199,33 @@ def trajectory_state(data_dir, grid: pl.DataFrame) -> pl.DataFrame:
                 nee=pl.col("nee") + pl.col(f"nee_{agent}").fill_null(0.0),
                 n_vasopressors=pl.col("n_vasopressors")
                 + (pl.col(f"nee_{agent}").fill_null(0.0) > 0).cast(pl.Int64),
-            ).drop(f"nee_{agent}")
+            )
+            # keep norepinephrine itself and the count of everything else, so
+            # a caller can tell "NE alone" from "NE plus something" without
+            # re-reading the medication table. The per-agent columns are
+            # dropped as before; only these two aggregates survive.
+            if agent == "norepinephrine":
+                totals = totals.with_columns(
+                    nee_norepinephrine=pl.col(f"nee_{agent}").fill_null(0.0)
+                )
+            else:
+                totals = totals.with_columns(
+                    n_other_pressors=pl.col("n_other_pressors").fill_null(0)
+                    + (pl.col(f"nee_{agent}").fill_null(0.0) > 0).cast(pl.Int64)
+                    if "n_other_pressors" in totals.columns
+                    else (pl.col(f"nee_{agent}").fill_null(0.0) > 0).cast(pl.Int64)
+                )
+            totals = totals.drop(f"nee_{agent}")
+        for column, default in (("nee_norepinephrine", 0.0),
+                                ("n_other_pressors", 0)):
+            if column not in totals.columns:
+                totals = totals.with_columns(pl.lit(default).alias(column))
         out = out.join(totals, on=["hospitalization_id", "offset_hours"], how="left")
     else:
-        out = out.with_columns(nee=pl.lit(0.0), n_vasopressors=pl.lit(0))
+        out = out.with_columns(
+            nee=pl.lit(0.0), n_vasopressors=pl.lit(0),
+            nee_norepinephrine=pl.lit(0.0), n_other_pressors=pl.lit(0),
+        )
 
     return out.with_columns(
         shock_index=pl.when(pl.col("sbp") > 0)

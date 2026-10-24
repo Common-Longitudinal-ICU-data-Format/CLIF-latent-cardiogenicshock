@@ -376,6 +376,84 @@ def factor_token_table(model, token_ids, names, logger, top: int = 12):
     return pl.DataFrame(rows)
 
 
+def motif_clusters(perfusion, offsets, n_clusters, seed, logger, tables_home):
+    """
+    cluster patients on the motifs their state sequence contains
+
+    Returns (labels_frame, long_states). The labels frame carries one row per
+    patient with a cluster from the raw sequence and one from the run-length
+    encoded sequence; the long frame carries the per-(patient, window) state
+    so a projection can be coloured by it.
+    """
+    from sklearn.cluster import KMeans
+
+    from clifcs.motifs import (
+        describe_motifs, extract_motifs, motif_matrix, run_length_encode,
+    )
+    from clifcs.perfusion import PERFUSION_STATES, rich_perfusion_state
+
+    rich = rich_perfusion_state(perfusion, logger)
+    if "rich_symbol" not in rich.columns:
+        return pl.DataFrame(), pl.DataFrame()
+
+    ordered = rich.sort(["hospitalization_id", "offset_hours"])
+    grouped = (
+        ordered.group_by("hospitalization_id", maintain_order=True)
+        .agg(sequence=pl.col("rich_symbol").str.join(""))
+    )
+    patients = grouped["hospitalization_id"].to_list()
+    raw = grouped["sequence"].to_list()
+    collapsed = [run_length_encode(s) for s in raw]
+    logger.info(
+        f"{len(patients):,} sequences, median length {int(np.median([len(s) for s in raw]))} "
+        f"raw and {int(np.median([len(s) for s in collapsed]))} after collapsing runs"
+    )
+
+    frames = {}
+    for tag, sequences in (("raw", raw), ("rle", collapsed)):
+        vocabulary, per_patient, carriers = extract_motifs(sequences)
+        if len(vocabulary) < 4:
+            logger.warning(f"{tag}: only {len(vocabulary)} motifs, skipping")
+            continue
+        logger.info(f"-- motifs from the {tag} sequences")
+        described = describe_motifs(
+            vocabulary, carriers, PERFUSION_STATES, len(sequences), logger
+        )
+        if not described.is_empty():
+            described.write_csv(tables_home / f"motif_vocabulary_{tag}.csv")
+        matrix = motif_matrix(vocabulary, per_patient)
+        model = KMeans(n_clusters=n_clusters, random_state=seed, n_init=10)
+        labels = model.fit_predict(matrix)
+        logger.info(
+            f"   {tag} motif clusters: sizes "
+            f"{np.bincount(labels, minlength=n_clusters).tolist()}"
+        )
+        frames[tag] = pl.DataFrame({
+            "hospitalization_id": patients,
+            f"motif_cluster_{tag}": [f"M{tag[0].upper()}{v + 1}" for v in labels],
+            f"sequence_{tag}": sequences,
+        })
+
+    if not frames:
+        return pl.DataFrame(), pl.DataFrame()
+    out = frames.get("raw", frames.get("rle"))
+    for tag, frame in frames.items():
+        if frame is not out:
+            out = out.join(frame, on="hospitalization_id", how="outer_coalesce")
+
+    # the collapsed 8-state view, for hexagons: MAP x trend, composition
+    # dropped. Fifteen hues is past where a categorical palette separates, and
+    # the composition split is the part a hexagon map can least afford.
+    long_states = ordered.select(
+        "hospitalization_id", "offset_hours", "rich_state", "rich_symbol"
+    ).with_columns(
+        coarse_state=pl.col("rich_state")
+        .str.replace("NE alone, ", "")
+        .str.replace("NE\\+other, ", "")
+    )
+    return out, long_states
+
+
 def describe_states(counts, token_ids, states, patients, offsets, names, logger):
     """
     what each care state actually contains
@@ -1153,6 +1231,27 @@ def main() -> None:
                 / f"perfusion_symbol_key_{args.subset}.csv"
             )
 
+    # The richer state space and the motif clustering on top of it.
+    motif_labels, rich_long = (pl.DataFrame(), pl.DataFrame())
+    if not perfusion.is_empty():
+        tables_home_early = paths.output_home / "tables" / paths.model_key
+        tables_home_early.mkdir(parents=True, exist_ok=True)
+        motif_labels, rich_long = motif_clusters(
+            perfusion, OFFSETS, args.clusters, args.seed, logger,
+            tables_home_early,
+        )
+        if not motif_labels.is_empty():
+            labels_frame = labels_frame.join(
+                motif_labels.select(
+                    [c for c in motif_labels.columns
+                     if not c.startswith("sequence_")]
+                ),
+                on="hospitalization_id", how="left",
+            )
+            assignments = assignments.join(
+                motif_labels, on="hospitalization_id", how="left"
+            )
+
     # Treatment and haemodynamics over the SEVEN-DAY window, from the state
     # table this script built for the perfusion sequences. 09's
     # trajectory_state.parquet is keyed to the 13-point embedding grid and
@@ -1187,8 +1286,9 @@ def main() -> None:
     tables_home = paths.output_home / "tables" / paths.model_key
     tables_home.mkdir(parents=True, exist_ok=True)
     stratifications = ["sequence_cluster", "growth_cluster"]
-    if "perfusion_cluster" in labels_frame.columns:
-        stratifications.append("perfusion_cluster")
+    for extra in ("perfusion_cluster", "motif_cluster_raw", "motif_cluster_rle"):
+        if extra in labels_frame.columns:
+            stratifications.append(extra)
     for label in stratifications:
         summary = characterise(labels_frame, paths, label, logger)
         if not summary.is_empty():
@@ -1299,6 +1399,19 @@ def main() -> None:
                 labels_frame.select(
                     "hospitalization_id", "perfusion_cluster"
                 ).unique(),
+                on="hospitalization_id", how="left",
+            )
+
+    if not rich_long.is_empty():
+        long = long.join(
+            rich_long, on=["hospitalization_id", "offset_hours"], how="left"
+        )
+        if not motif_labels.is_empty():
+            long = long.join(
+                motif_labels.select([
+                    c for c in motif_labels.columns
+                    if not c.startswith("sequence_")
+                ]),
                 on="hospitalization_id", how="left",
             )
 

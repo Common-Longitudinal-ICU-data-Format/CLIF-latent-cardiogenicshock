@@ -142,3 +142,169 @@ def perfusion_state(frame: pl.DataFrame, logger) -> pl.DataFrame:
                         counts["count"].to_list()):
         logger.info(f"    {level:<28} {n:>8,}  {n / ordered.height:>6.1%}")
     return ordered
+
+
+# =================================================== the richer state space
+
+
+#: A dose change counts only if it clears BOTH a relative and an absolute
+#: floor. The relative floor alone makes 0.01 -> 0.02 mcg/kg/min a "100%
+#: increase", which is a titration artefact rather than a decision; the
+#: absolute floor alone would call a 0.30 -> 0.32 change meaningful on a
+#: patient already at a high dose. This is the same deadband reasoning as the
+#: MAP band: without it the trend flips at nearly every grid point and a motif
+#: built from the sequence measures charting noise.
+DOSE_RELATIVE = 0.25
+DOSE_ABSOLUTE = 0.01
+
+#: The alphabet, numbered so a sequence reads as a string of digits and a
+#: motif like "10" or "3012" is legible. Index IS the symbol.
+#:
+#: Two MAP levels crossed with: no pressors, or one of three dose trends
+#: crossed with whether norepinephrine is running alone or with something
+#: else. 14 states plus a terminal symbol.
+#:
+#: Composition applies only when pressors are running, which is why this is
+#: not a clean 2x4x2 -- "no pressors" has no trend and no composition, so the
+#: count is 2 x (1 + 3 x 2) = 14 rather than 16.
+PERFUSION_STATES = tuple(
+    f"MAP {m}65, {label}"
+    for m in (">", "<")
+    for label in (
+        "no pressors",
+        "NE alone, rising",
+        "NE alone, falling",
+        "NE alone, steady",
+        "NE+other, rising",
+        "NE+other, falling",
+        "NE+other, steady",
+    )
+) + ("record ended",)
+
+#: index -> symbol, for writing sequences as digit strings. Beyond 9 the
+#: symbols run A, B, C... so every state stays one character and a motif
+#: stays readable.
+STATE_SYMBOLS = "0123456789ABCDE"
+
+
+def state_symbol(index: int) -> str:
+    return STATE_SYMBOLS[index] if 0 <= index < len(STATE_SYMBOLS) else "?"
+
+
+def rich_perfusion_state(frame: "pl.DataFrame", logger) -> "pl.DataFrame":
+    """
+    MAP adequacy x pressor dose trend x norepinephrine composition
+
+    Extends the four-state version in two directions the earlier analysis
+    could not see. The pressor side is now a TREND rather than a presence
+    flag, so "on pressors and climbing" is distinguishable from "on pressors
+    and weaning" -- the distinction that separated P2 from P4 at twice the
+    mortality while their peak doses were nearly identical. And it records
+    whether norepinephrine is running alone or alongside another agent, since
+    reaching for a second pressor is a decision rather than a dose.
+
+    THE TREND IS A DERIVATIVE, with two consequences. It needs the previous
+    grid point, so the first window of a run has nothing to compare against
+    and is called steady -- biasing the first window toward steady, which is
+    stated rather than hidden. And because the state already encodes change, a
+    SEQUENCE of these states encodes change-of-change: a motif reading
+    "rising then falling" is a second-order statement, and should be read as
+    one.
+
+    Null dose carries forward as no pressors; a null MAP carries the previous
+    adequacy, exactly as in the four-state version.
+    """
+    needed = {"map", "nee", "nee_norepinephrine", "n_other_pressors"}
+    missing = needed - set(frame.columns)
+    if missing:
+        logger.warning(
+            f"rich perfusion state needs {sorted(missing)}: skipping. "
+            "Rebuild the state table so it carries the per-agent columns."
+        )
+        return frame
+
+    ordered = frame.sort(["hospitalization_id", "offset_hours"])
+    ids = ordered["hospitalization_id"].to_list()
+    maps = ordered["map"].to_list()
+    nee = [0.0 if v is None else float(v) for v in ordered["nee"].to_list()]
+    ne_dose = [
+        0.0 if v is None else float(v)
+        for v in ordered["nee_norepinephrine"].to_list()
+    ]
+    others = [
+        0 if v is None else int(v) for v in ordered["n_other_pressors"].to_list()
+    ]
+
+    adequate: list[bool | None] = [None] * len(ids)
+    previous_id, state = None, None
+    for i, (pid, value) in enumerate(zip(ids, maps)):
+        if pid != previous_id:
+            state, previous_id = None, pid
+        if value is not None:
+            if value > MAP_HIGH:
+                state = True
+            elif value < MAP_LOW:
+                state = False
+        adequate[i] = state
+    following, previous_id = None, None
+    for i in range(len(ids) - 1, -1, -1):
+        if ids[i] != previous_id:
+            following, previous_id = None, ids[i]
+        if adequate[i] is None:
+            adequate[i] = following
+        else:
+            following = adequate[i]
+
+    labels: list[str] = []
+    previous_id, previous_dose = None, None
+    for i, pid in enumerate(ids):
+        if pid != previous_id:
+            previous_id, previous_dose = pid, None
+        dose = nee[i]
+        if dose <= 0:
+            arm = "no pressors"
+        else:
+            if previous_dose is None or previous_dose <= 0:
+                trend = "steady"
+            else:
+                change = dose - previous_dose
+                relative = abs(change) / max(previous_dose, 1e-9)
+                if relative >= DOSE_RELATIVE and abs(change) >= DOSE_ABSOLUTE:
+                    trend = "rising" if change > 0 else "falling"
+                else:
+                    trend = "steady"
+            composition = "NE+other" if others[i] > 0 else "NE alone"
+            if ne_dose[i] <= 0 and others[i] > 0:
+                # pressors running but none of them norepinephrine; grouped
+                # with NE+other rather than given a state of its own, which
+                # would add two sparse symbols for a small group
+                composition = "NE+other"
+            arm = f"{composition}, {trend}"
+        high = adequate[i]
+        if high is None:
+            high = (maps[i] or 0) >= MAP_HIGH
+        labels.append(f"MAP {'>' if high else '<'}65, {arm}")
+        previous_dose = dose
+
+    index = {name: i for i, name in enumerate(PERFUSION_STATES)}
+    ordered = ordered.with_columns(
+        rich_state=pl.Series(labels, dtype=pl.String),
+    ).with_columns(
+        rich_symbol=pl.col("rich_state").replace_strict(
+            {name: state_symbol(i) for name, i in index.items()},
+            default="?", return_dtype=pl.String,
+        )
+    )
+
+    counts = ordered["rich_state"].value_counts(sort=True)
+    logger.info(
+        f"rich perfusion state: {len(PERFUSION_STATES)} symbols "
+        f"({DOSE_RELATIVE:.0%} relative and {DOSE_ABSOLUTE} absolute dose "
+        "deadband)"
+    )
+    for level, n in zip(counts["rich_state"].to_list(), counts["count"].to_list()):
+        logger.info(
+            f"    {state_symbol(index.get(level, -1))}  {level:<30} "
+            f"{n:>8,}  {n / ordered.height:>6.1%}"
+        )
+    return ordered
