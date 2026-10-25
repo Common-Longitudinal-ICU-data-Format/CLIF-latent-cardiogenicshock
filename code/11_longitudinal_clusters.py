@@ -458,9 +458,18 @@ def motif_clusters(perfusion, offsets, n_clusters, seed, logger, tables_home,
     long_states = ordered.select(
         "hospitalization_id", "offset_hours", "rich_state", "rich_symbol"
     ).with_columns(
+        # Two collapsed views, because 15 categorical hues do not
+        # separate on a hexagon map and each view drops a different
+        # dimension: coarse_state keeps MAP x trend, composition_state
+        # keeps MAP x composition. The coarse view alone left the
+        # NE-versus-combination question with no figure at all.
         coarse_state=pl.col("rich_state")
         .str.replace("NE alone, ", "")
-        .str.replace("NE\\+other, ", "")
+        .str.replace("NE\+other, ", ""),
+        composition_state=pl.col("rich_state")
+        .str.replace(", rising", "")
+        .str.replace(", falling", "")
+        .str.replace(", steady", ""),
     )
     return out, long_states
 

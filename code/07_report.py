@@ -2957,8 +2957,16 @@ def section_state_space(paths, out: list) -> None:
         state_panels = [
             (label, figure(septic_home / name, note))
             for name, label, note in (
+                ("trajectory_composition_state_hex_enrichment.png",
+                 "NE alone vs NE+other",
+                 "MAP crossed with whether norepinephrine runs alone "
+                 "or with another agent; dose trend dropped"),
+                ("trajectory_rich_state_panels.png",
+                 "All 15 states, one at a time",
+                 "Every dimension at once -- a small multiple needs no "
+                 "palette that separates 15 hues"),
                 ("trajectory_coarse_state_hex_enrichment.png",
-                 "Hexagons, enrichment",
+                 "MAP x trend, enrichment",
                  "Collapsed to MAP x trend; composition dropped, since 15 "
                  "categorical hues is past where a palette separates"),
                 ("trajectory_coarse_state_hex_plurality.png",

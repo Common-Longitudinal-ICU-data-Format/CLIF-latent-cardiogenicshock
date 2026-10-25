@@ -3687,7 +3687,11 @@ def main() -> None:
         # and composition is the dimension a hexagon map can least afford.
         for column, tag, what in (
             ("coarse_state", "coarse_state",
-             "MAP adequacy crossed with pressor dose trend"),
+             "MAP adequacy crossed with pressor dose trend; composition "
+             "dropped so the eight hues separate"),
+            ("composition_state", "composition_state",
+             "MAP adequacy crossed with norepinephrine alone versus "
+             "norepinephrine plus another agent; dose trend dropped"),
         ):
             if column not in frame.columns:
                 continue
@@ -3794,6 +3798,18 @@ def main() -> None:
                 f"{paths.model_key}: {label}, one cluster at a time",
                 logger,
             )
+
+        if "rich_state" in frame.columns:
+            levels = sorted(frame["rich_state"].drop_nulls().unique().to_list())
+            if len(levels) > 1:
+                logger.info("the full 15 states, one panel each:")
+                plot_state_small_multiples(
+                    frame.filter(pl.col("rich_state").is_not_null()),
+                    px, py, "rich_state", husl_colors(levels), levels,
+                    home / "trajectory_rich_state_panels.png",
+                    f"{paths.model_key}: all 15 MAP/pressor states",
+                    logger, step_hours=args.step_hours,
+                )
 
         logger.info("perfusion state graph:")
         plot_state_dag(
