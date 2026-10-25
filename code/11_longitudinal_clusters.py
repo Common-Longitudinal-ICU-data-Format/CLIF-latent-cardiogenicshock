@@ -1538,10 +1538,14 @@ def main() -> None:
         raw_sequences = motif_labels["sequence_raw"].to_list()
         logger.info("learning BPE merges over the state sequences:")
         merges = learn_merges(raw_sequences, n_merges=100, logger=logger)
-        vocabulary, segmented, compression = vocabulary_table(
+        # NOT named `vocabulary`: that is the module-level tokeniser function
+        # imported from clifcs.tokens, and assigning to the name anywhere in
+        # main() makes it local for the whole function, so an earlier call to
+        # it raises UnboundLocalError.
+        bpe_vocab, segmented, compression = vocabulary_table(
             raw_sequences, merges, PERFUSION_STATES, logger
         )
-        vocabulary.write_csv(
+        bpe_vocab.write_csv(
             tables_home_early / f"bpe_vocabulary_{args.subset}.csv"
         )
         pl.DataFrame({
