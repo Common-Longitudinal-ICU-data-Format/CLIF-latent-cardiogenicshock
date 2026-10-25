@@ -2623,6 +2623,29 @@ def section_state_space(paths, out: list) -> None:
         "not a first-order one about the patient."
     ))
 
+    crosstab = tables_home / f"state_crosstab_{COHORT or 'septic'}.csv"
+    if crosstab.is_file():
+        out.append('<h3>The state space as a grid</h3>')
+        out.append(
+            "<p>Every state except the terminal one is a MAP level crossed "
+            "with a pressor arm, so this is the shape the fifteen states "
+            "actually have. Each cell is the share of all patient-windows "
+            "falling in it.</p>"
+        )
+        out.append(
+            "<p>The marginals answer different questions from the cells. "
+            "Column totals are how much of the week is spent with an "
+            "adequate MAP; row totals are how often each pressor posture is "
+            "adopted at all. A cell is the interaction, and the cells worth "
+            "looking at are those the two marginals would not have "
+            "predicted.</p>"
+        )
+        out.append(table(
+            pl.read_csv(crosstab),
+            {"MAP >65": pct, "MAP <65": pct, "both MAP levels": pct},
+            key_column="pressor arm",
+        ))
+
     representation = tables_home / f"state_representation_{COHORT or 'septic'}.csv"
     if representation.is_file():
         out.append('<h3>The fifteen states</h3>')

@@ -730,6 +730,86 @@ def divergence_outcomes(sequences, labels_frame, offsets, logger,
     return pl.DataFrame(rows)
 
 
+def state_crosstab(long_states, logger):
+    """
+    the state space as the 2 x 7 table it actually is
+
+    The flat fifteen-row listing hides the factorisation. Every state except
+    the terminal one is a MAP level crossed with a pressor arm, so the natural
+    presentation is a grid: arms down the side, MAP across the top, each cell
+    the share of all patient-windows that fall in it.
+
+    Marginals are included because they answer different questions from the
+    cells. The column totals are how much of the week is spent with an
+    adequate MAP; the row totals are how often each pressor posture is
+    adopted at all. A cell is the interaction -- and the interesting cells are
+    the ones where the two marginals would not have predicted the value.
+
+    `record ended` has no MAP level and no arm, so it sits outside the grid
+    rather than being folded into a row it does not belong to.
+    """
+    frame = long_states.filter(pl.col("rich_state").is_not_null())
+    total = frame.height
+    if not total:
+        return pl.DataFrame()
+
+    split = frame.with_columns(
+        map_level=pl.when(pl.col("rich_state").str.starts_with("MAP >65"))
+        .then(pl.lit("MAP >65"))
+        .when(pl.col("rich_state").str.starts_with("MAP <65"))
+        .then(pl.lit("MAP <65"))
+        .otherwise(pl.lit("no MAP")),
+        arm=pl.col("rich_state").str.replace("^MAP [<>]65, ", ""),
+    )
+    arms = [
+        "no pressors",
+        "NE alone, rising", "NE alone, falling", "NE alone, steady",
+        "NE+other, rising", "NE+other, falling", "NE+other, steady",
+    ]
+    counts = {
+        (row["arm"], row["map_level"]): row["len"]
+        for row in split.group_by("arm", "map_level").len().iter_rows(named=True)
+    }
+
+    rows = []
+    for arm in arms:
+        high = counts.get((arm, "MAP >65"), 0)
+        low = counts.get((arm, "MAP <65"), 0)
+        rows.append({
+            "pressor arm": arm,
+            "MAP >65": high / total,
+            "MAP <65": low / total,
+            "both MAP levels": (high + low) / total,
+        })
+    high_total = sum(counts.get((a, "MAP >65"), 0) for a in arms)
+    low_total = sum(counts.get((a, "MAP <65"), 0) for a in arms)
+    rows.append({
+        "pressor arm": "all arms",
+        "MAP >65": high_total / total,
+        "MAP <65": low_total / total,
+        "both MAP levels": (high_total + low_total) / total,
+    })
+    terminal = split.filter(pl.col("map_level") == "no MAP").height
+    if terminal:
+        rows.append({
+            "pressor arm": "record ended (no MAP, no arm)",
+            "MAP >65": None, "MAP <65": None,
+            "both MAP levels": terminal / total,
+        })
+
+    table = pl.DataFrame(rows)
+    logger.info(f"state cross-tabulation ({total:,} patient-windows):")
+    logger.info(f"    {'pressor arm':<32} {'MAP >65':>9} {'MAP <65':>9} {'total':>9}")
+    for row in table.iter_rows(named=True):
+        def cell(value):
+            return "   --   " if value is None else f"{value:>8.2%}"
+        logger.info(
+            f"    {row['pressor arm']:<32} {cell(row['MAP >65'])} "
+            f"{cell(row['MAP <65'])} {cell(row['both MAP levels'])}"
+        )
+    return table
+
+
 def describe_states(counts, token_ids, states, patients, offsets, names, logger):
     """
     what each care state actually contains
@@ -1686,6 +1766,12 @@ def main() -> None:
             )
             .select("symbol", "rich_state", "count", "share")
         )
+        crosstab = state_crosstab(rich_long, logger)
+        if not crosstab.is_empty():
+            crosstab.write_csv(
+                paths.output_home / "tables" / paths.model_key
+                / f"state_crosstab_{args.subset}.csv"
+            )
         representation.write_csv(
             paths.output_home / "tables" / paths.model_key
             / f"state_representation_{args.subset}.csv"
