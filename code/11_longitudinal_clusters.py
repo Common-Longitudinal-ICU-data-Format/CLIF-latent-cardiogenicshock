@@ -1649,7 +1649,9 @@ def main() -> None:
     # Byte-pair encoding over the same sequences: states as letters, learned
     # variable-length units as words, the trajectory as a sentence.
     if not motif_labels.is_empty() and "sequence_raw" in motif_labels.columns:
-        from clifcs.bpe import apply_merges, learn_merges, vocabulary_table
+        from clifcs.bpe import (
+            apply_merges, learn_merges, vocabulary_table, word_context,
+        )
 
         raw_sequences = motif_labels["sequence_raw"].to_list()
         logger.info("learning BPE merges over the state sequences:")
@@ -1663,6 +1665,9 @@ def main() -> None:
         )
         bpe_vocab.write_csv(
             tables_home_early / f"bpe_vocabulary_{args.subset}.csv"
+        )
+        word_context(segmented, PERFUSION_STATES, logger).write_csv(
+            tables_home_early / f"bpe_word_context_{args.subset}.csv"
         )
         pl.DataFrame({
             "step": list(range(1, len(merges) + 1)),

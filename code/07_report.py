@@ -2922,6 +2922,35 @@ def section_state_space(paths, out: list) -> None:
             key_column="word",
         ))
 
+    context_file = tables_home / f"bpe_word_context_{COHORT or 'septic'}.csv"
+    if context_file.is_file():
+        out.append('<h3>How the words are used</h3>')
+        out.append(
+            "<p>The vocabulary says which units exist; this says how they "
+            "are used. <b>Opens</b> and <b>closes</b> are the share of that "
+            "word's own occurrences sitting first or last in a sentence, so "
+            "a word that only ever opens reads 100% even when it is rare. "
+            "The neighbour columns are the words that habitually come "
+            "before and after.</p>"
+        )
+        out.append(
+            "<p>This is the prefix and suffix question, and it only has an "
+            "answer because BPE produces a segmentation &mdash; a bag of "
+            "overlapping n-grams has no notion of what follows what. Share "
+            "of patients is the honest denominator for how common a word is: "
+            "occurrences double-count a patient who repeats one, and a word "
+            "used eight times by one patient is not eight patients' worth of "
+            "evidence.</p>"
+        )
+        out.append(table(
+            pl.read_csv(context_file, schema_overrides={"word": pl.String}),
+            {
+                "share_of_patients": pct, "occurrences": thousands,
+                "opens_sentence": pct, "closes_sentence": pct,
+            },
+            key_column="word",
+        ))
+
     latent_file = tables_home / f"sentence_vs_latent_{COHORT or 'septic'}.csv"
     if latent_file.is_file():
         frame = pl.read_csv(latent_file)

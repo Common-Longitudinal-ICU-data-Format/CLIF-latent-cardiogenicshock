@@ -183,3 +183,94 @@ def edit_distance(a, b) -> int:
             ))
         previous = current
     return previous[-1]
+
+
+def word_context(segmented, states, logger, top: int = 25):
+    """
+    for each common word: how often it appears, where, and what surrounds it
+
+    A vocabulary alone says which units exist. This says how they are USED --
+    whether a word opens a sentence, closes one, or sits inside; and which
+    words habitually come before and after it. That is the prefix/suffix
+    question, and it only has an answer because BPE produces a segmentation:
+    a bag of overlapping n-grams has no notion of what follows what.
+
+    `share_of_patients` is the fraction of patients whose sentence contains
+    the word at least once, which is the honest denominator for "how common
+    is this" -- `occurrences` double-counts a patient who repeats a word, and
+    a word repeated eight times in one patient is not eight patients' worth of
+    evidence.
+
+    START and END are reported as shares of that word's own occurrences, so a
+    word that only ever opens a sentence reads 100% even if it is rare.
+    """
+    from collections import Counter
+
+    from clifcs.perfusion import STATE_SYMBOLS
+
+    def spell(word: str) -> str:
+        names = []
+        for character in word:
+            position = STATE_SYMBOLS.find(character)
+            names.append(
+                states[position] if 0 <= position < len(states) else character
+            )
+        if len(set(names)) == 1 and len(names) > 1:
+            return f"{names[0]}  x{len(names)}"
+        return "  ->  ".join(names)
+
+    occurrences = Counter()
+    carriers = Counter()
+    opens = Counter()
+    closes = Counter()
+    before = {}
+    after = {}
+    for tokens in segmented:
+        if not tokens:
+            continue
+        carriers.update(set(tokens))
+        for position, word in enumerate(tokens):
+            occurrences[word] += 1
+            if position == 0:
+                opens[word] += 1
+            if position == len(tokens) - 1:
+                closes[word] += 1
+            if position > 0:
+                before.setdefault(word, Counter())[tokens[position - 1]] += 1
+            if position + 1 < len(tokens):
+                after.setdefault(word, Counter())[tokens[position + 1]] += 1
+
+    n_patients = sum(1 for t in segmented if t)
+    rows = []
+    logger.info("the commonest BPE words, and what surrounds them:")
+    for word, count in occurrences.most_common(top):
+        preceding = before.get(word, Counter())
+        following = after.get(word, Counter())
+        inner = max(count - opens[word], 1)
+        outer = max(count - closes[word], 1)
+        top_before = ", ".join(
+            f"{w} {n / inner:.0%}" for w, n in preceding.most_common(3)
+        ) or "(sentence start)"
+        top_after = ", ".join(
+            f"{w} {n / outer:.0%}" for w, n in following.most_common(3)
+        ) or "(sentence end)"
+        rows.append({
+            "word": word,
+            "length": len(word),
+            "share_of_patients": carriers[word] / max(n_patients, 1),
+            "occurrences": count,
+            "opens_sentence": opens[word] / count,
+            "closes_sentence": closes[word] / count,
+            "commonly_preceded_by": top_before,
+            "commonly_followed_by": top_after,
+            "meaning": spell(word),
+        })
+        logger.info(
+            f"    {word:<12} {carriers[word] / max(n_patients, 1):>6.1%} of "
+            f"patients  opens {opens[word] / count:>5.0%}  "
+            f"closes {closes[word] / count:>5.0%}"
+        )
+        logger.info(f"        before: {top_before}")
+        logger.info(f"        after:  {top_after}")
+        logger.info(f"        means:  {spell(word)[:88]}")
+    return pl.DataFrame(rows)
