@@ -127,6 +127,11 @@ def main() -> None:
         labels["hospitalization_id"].to_list(),
         labels["bpe_sentence_48h"].to_list(),
     ))
+    # the raw 9-letter state string too: the word-level distance saturates
+    letters = dict(zip(
+        labels["hospitalization_id"].to_list(),
+        [(s or "")[:len(OVERLAP)] for s in labels["sequence_raw"].to_list()],
+    ))
     patients = [
         p for p in frame["hospitalization_id"].unique().sort().to_list()
         if p in sentences and sentences[p]
@@ -166,13 +171,36 @@ def main() -> None:
             matrix[left[start:stop]] - matrix[right[start:stop]], axis=1
         )
 
+    # TWO sentence distances, because the obvious one is unusable.
+    #
+    # Normalised WORD-level edit distance saturates: two sentences that share
+    # no BPE word score exactly 1.0, and with a 114-word vocabulary most pairs
+    # do, so the median is 1.0 and a median split puts every pair on one side.
+    # That is what happened on the first run -- both "divergent sentence"
+    # quadrants came out empty.
+    #
+    # The letter-level distance over the nine state symbols is well behaved: it
+    # is the fraction of the nine windows that differ, so it takes ten distinct
+    # values and splits cleanly. Word-level Jaccard is kept beside it because
+    # it is the one that answers "do these trajectories share vocabulary",
+    # which is the question BPE was built for.
     sentence = np.empty(len(left), dtype=np.float32)
+    jaccard = np.empty(len(left), dtype=np.float32)
     gap = np.zeros(len(left), dtype=np.float32)
     same_site = np.zeros(len(left), dtype=bool)
     for k, (i, j) in enumerate(zip(left, right)):
         a, b = patients[i], patients[j]
         wa, wb = words[a], words[b]
-        sentence[k] = edit_distance(wa, wb) / max(len(wa), len(wb), 1)
+        set_a, set_b = set(wa), set(wb)
+        union = set_a | set_b
+        jaccard[k] = (
+            1.0 - len(set_a & set_b) / len(union) if union else 0.0
+        )
+        la, lb = letters.get(a, ""), letters.get(b, "")
+        sentence[k] = (
+            edit_distance(list(la), list(lb)) / max(len(la), len(lb), 1)
+            if la and lb else 1.0
+        )
         if length:
             gap[k] = abs(
                 np.log1p(length.get(a, 0)) - np.log1p(length.get(b, 0))
@@ -181,12 +209,28 @@ def main() -> None:
 
     from scipy.stats import spearmanr
     rho = spearmanr(sentence, latent).statistic
+    rho_words = spearmanr(jaccard, latent).statistic
     logger.info(
-        f"sentence distance vs latent distance: Spearman rho {rho:+.3f}"
+        f"latent distance vs state-letter distance: Spearman rho {rho:+.3f}; "
+        f"vs BPE-word Jaccard: {rho_words:+.3f}"
+    )
+    logger.info(
+        f"  state-letter distance: median {np.median(sentence):.3f}, "
+        f"{len(np.unique(sentence))} distinct values; "
+        f"word Jaccard median {np.median(jaccard):.3f}"
     )
 
     s_cut = np.median(sentence)
     l_cut = np.median(latent)
+    # A median equal to the maximum leaves one side of the split empty. Fall
+    # back to a lower quantile and say so rather than reporting two quadrants
+    # as though the other two did not exist.
+    if s_cut >= sentence.max():
+        s_cut = float(np.quantile(sentence, 0.25))
+        logger.warning(
+            "sentence distance is degenerate at the median; splitting at the "
+            f"25th percentile ({s_cut:.3f}) instead"
+        )
     quadrants = {
         "similar sentence, close latent": (sentence <= s_cut) & (latent <= l_cut),
         "similar sentence, FAR latent": (sentence <= s_cut) & (latent > l_cut),
@@ -203,6 +247,7 @@ def main() -> None:
             "pairs": int(mask.sum()),
             "share": float(mask.mean()),
             "mean_sentence_distance": float(sentence[mask].mean()),
+            "mean_word_jaccard": float(jaccard[mask].mean()),
             "mean_latent_distance": float(latent[mask].mean()),
             "mean_log_stream_gap": float(gap[mask].mean()),
             "same_site_share": float(same_site[mask].mean()),
