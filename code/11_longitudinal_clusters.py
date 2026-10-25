@@ -435,7 +435,13 @@ def motif_clusters(perfusion, offsets, n_clusters, seed, logger, tables_home,
         )
         frames[tag] = pl.DataFrame({
             "hospitalization_id": patients,
-            f"motif_cluster_{tag}": [f"M{tag[0].upper()}{v + 1}" for v in labels],
+            # MR for raw, MC for collapsed. "M" + tag[0] gave MR for both,
+            # since "raw" and "rle" share a first letter, so the two
+            # clusterings carried identical labels and nothing downstream
+            # could tell them apart.
+            f"motif_cluster_{tag}": [
+                f"{'MR' if tag == 'raw' else 'MC'}{v + 1}" for v in labels
+            ],
             f"sequence_{tag}": sequences,
         })
 
@@ -1194,13 +1200,25 @@ def plot_patient_factor_paths(long, offsets, patients, out_dir, logger,
             nx_, ny_ = nodes[factor]
             ax.scatter([nx_], [ny_], s=150, c=factor_colors[factor],
                        alpha=0.16, linewidths=0, zorder=2)
+            # Anchored by angle rather than centred. A centred label on a
+            # left-hand node runs back across the circle and collides with
+            # that node's hour text; anchoring the inner edge pushes every
+            # label outward instead.
+            cos, sin = np.cos(angles[factor]), np.sin(angles[factor])
             ax.annotate(
                 labeller(factor),
-                xy=(np.cos(angles[factor]) * 1.34,
-                    np.sin(angles[factor]) * 1.34),
-                ha="center", va="center", fontsize=5.5, color=INK_SECONDARY,
-                zorder=3, wrap=True,
+                xy=(cos * 1.46, sin * 1.46),
+                ha="left" if cos > 0.15 else ("right" if cos < -0.15 else "center"),
+                va="bottom" if sin > 0.15 else ("top" if sin < -0.15 else "center"),
+                fontsize=5.5, color=INK_SECONDARY, zorder=3,
             )
+
+        # One hour label per NODE, not per visit. A patient who returns to a
+        # factor had every one of their visit times drawn at the same point,
+        # which is what produced "+96h" and "+18h" written over each other.
+        visits: dict[str, list[float]] = {}
+        for factor, hour in zip(visited, hours):
+            visits.setdefault(factor, []).append(hour)
 
         span = max(len(hours) - 1, 1)
         for step, (factor, hour) in enumerate(zip(visited, hours)):
@@ -1218,10 +1236,19 @@ def plot_patient_factor_paths(long, offsets, patients, out_dir, logger,
             ax.scatter([nx_], [ny_], s=210, c=[factor_colors[factor]],
                        edgecolors=[ramp(step / span)], linewidths=2.2,
                        zorder=5)
+        for factor, when in visits.items():
+            nx_, ny_ = nodes[factor]
+            if len(when) <= 3:
+                text = ", ".join(f"{h:+.0f}" for h in when) + "h"
+            else:
+                text = f"{when[0]:+.0f}h ... {when[-1]:+.0f}h  (x{len(when)})"
+            cos, sin = np.cos(angles[factor]), np.sin(angles[factor])
             ax.annotate(
-                f"{hour:+.0f}h",
-                xy=(nx_ * 1.15, ny_ * 1.15), ha="center", va="center",
-                fontsize=5, color=INK_SECONDARY, zorder=6,
+                text,
+                xy=(cos * 1.19, sin * 1.19),
+                ha="left" if cos > 0.15 else ("right" if cos < -0.15 else "center"),
+                va="bottom" if sin > 0.15 else ("top" if sin < -0.15 else "center"),
+                fontsize=4.8, color=INK_PRIMARY, zorder=6,
             )
 
         title = f"{patient}"
@@ -1232,8 +1259,8 @@ def plot_patient_factor_paths(long, offsets, patients, out_dir, logger,
             "visited; node colour = factor, outline = time",
             loc="left", fontsize=7.5, pad=6,
         )
-        ax.set_xlim(-1.62, 1.62)
-        ax.set_ylim(-1.62, 1.62)
+        ax.set_xlim(-1.95, 1.95)
+        ax.set_ylim(-1.78, 1.78)
         ax.set_aspect("equal")
         ax.axis("off")
 
@@ -1833,7 +1860,10 @@ def main() -> None:
         check_factor_labels(nmf_model, token_ids, vocab, logger)
     factor_dir = paths.figure_home / f"patient_factor_paths_{args.subset}"
     factor_dir.mkdir(parents=True, exist_ok=True)
-    plot_patient_factor_paths(long, OFFSETS, followers, factor_dir, logger)
+    plot_patient_factor_paths(
+        long, OFFSETS, followers, factor_dir, logger,
+        labeller=lambda key: factor_label(key),
+    )
 
     # The same two figures for the MAP/pressor state space, so the two
     # analyses can be compared panel for panel rather than by description.
@@ -1873,6 +1903,11 @@ def main() -> None:
         long, OFFSETS,
         paths.figure_home / f"longitudinal_factor_dag_{args.subset}.png",
         logger,
+        labeller=lambda key: (
+            "Latent class growth: paths through the 12 NMF factors"
+            if key == "title" else factor_label(key)
+        ),
+        short=lambda key: factor_label(key).split(" ", 1)[0],
     )
     logger.info(
         f"wrote {long_out} ({long.height:,} patient-windows, "

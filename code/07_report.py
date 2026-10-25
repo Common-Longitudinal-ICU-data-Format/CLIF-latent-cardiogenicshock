@@ -1977,24 +1977,22 @@ def section_longitudinal(paths, out: list) -> None:
 
     out.append('<h2 id="longitudinal">7 &middot; Longitudinal strata</h2>')
     out.append(callout(
-        "<b>Two parallel analyses, not one nested in the other.</b> Both label "
-        "every patient-timepoint with a state, then cluster patients on their "
-        "29-symbol sequence of those states. They share nothing else.<br><br>"
-        "<b>A &mdash; token composition.</b> 12 NMF factors over the "
-        "site-balanced token counts, hardened by k-means into <b>6 care "
-        "states</b>; sequences clustered into <b>4 strata, S1&ndash;S4</b>. "
-        "Data-driven, so the states need interpreting after the fact.<br>"
-        "<b>B &mdash; perfusion.</b> MAP above or below 65&nbsp;mmHg with "
-        "hysteresis, crossed with whether vasopressors run: <b>4 perfusion "
-        "states</b>; sequences clustered into <b>4 clusters, P1&ndash;P4</b>. "
-        "Clinically defined, so the states mean something before any "
-        "clustering.<br><br>"
-        "The care states are <b>not</b> paths through the perfusion states, "
-        "and the 6-versus-4 difference is simply that the two analyses chose "
-        "different numbers of states. A third method, <b>latent class growth "
-        "(G1&ndash;G4)</b>, uses analysis A's <i>soft</i> factor weights "
-        "directly and never hardens them, which is why it disagrees with "
-        "S1&ndash;S4 at ARI 0.253."
+        "<b>This section is the token-composition analysis only.</b> 12 NMF "
+        "factors over the site-balanced token counts, hardened by k-means into "
+        "<b>6 care states</b>; each patient's 29-symbol sequence of those "
+        "states clustered into <b>4 strata, S1&ndash;S4</b>. A second method, "
+        "<b>latent class growth (G1&ndash;G4)</b>, uses the same factors' "
+        "<i>soft</i> weights directly and never hardens them, which is why it "
+        "agrees with S1&ndash;S4 at only ARI 0.253.<br><br>"
+        "These states are <b>data-driven</b>, so they have to be interpreted "
+        "after the fact &mdash; and eight of the twelve factors turn out to "
+        "describe care delivery or documentation rather than the patient.<br><br>"
+        "The clinically-defined counterpart &mdash; MAP crossed with what the "
+        "pressors are doing &mdash; is <a href=\"#states\">section 8</a>. The "
+        "two are parallel analyses sharing only the patients: the care states "
+        "here are <b>not</b> paths through the perfusion states there, and the "
+        "difference in how many states each has is just two analyses choosing "
+        "differently."
     ))
     out.append(
         "<p>Septic shock patients clustered on how their <b>token "
@@ -2192,37 +2190,12 @@ def section_longitudinal(paths, out: list) -> None:
         ))
         out.append(factor_dag)
 
-    if septic_home is not None:
-        dag_panels = [
-            (label, figure(septic_home / f"trajectory_{tag}_dag.png", note))
-            for tag, label, note in (
-                ("perfusion_state", "MAP/pressor states",
-                 "Four clinically defined states"),
-                ("care_state", "Care states",
-                 "Six token-composition states"),
-            )
-        ]
-        dag_panels = [(l, b) for l, b in dag_panels if b]
-        if dag_panels:
-            out.append('<h3>Paths between the states</h3>')
-            out.append(
-                "<p>Each state is a node placed at the <b>median position of "
-                "its timepoints in the projection</b>, so the graph lies over "
-                "the same geometry as every other figure in this section and a "
-                "long arrow really does cross the embedding. Node size is how "
-                "many timepoints the state holds; the percentage inside is the "
-                "share that <i>stay</i> at the next grid point. Arrow width is "
-                "the share of departures from the source state, not the raw "
-                "count, so a small state's exits stay visible.</p>"
-            )
-            out.append(
-                "<p>Self-loops are a number rather than an arrow on purpose: "
-                "patients mostly stay, so a loop would be the thickest line on "
-                "the figure and say nothing. Transitions under 2% of a state's "
-                "departures are dropped &mdash; with six states there are "
-                "thirty possible arrows and most are noise.</p>"
-            )
-            out.append(tabs(dag_panels))
+    # The PaCMAP-placed state graphs are deliberately not shown. Nodes sat at
+    # each state's median projection position, which collides outright when
+    # two states overlap in the embedding -- states 1 and 4 shared a position
+    # and 2 and 3 shared another, so four of six nodes were drawn on top of
+    # each other. The circular graphs off the projection say the same thing
+    # and can be read.
 
         state_views = [
             (label, figure(septic_home / f"trajectory_{tag}.png", note))
@@ -2650,6 +2623,22 @@ def section_state_space(paths, out: list) -> None:
         "not a first-order one about the patient."
     ))
 
+    representation = tables_home / f"state_representation_{COHORT or 'septic'}.csv"
+    if representation.is_file():
+        out.append('<h3>The fifteen states</h3>')
+        out.append(
+            "<p>Every state, with the share of patient-windows it accounts "
+            "for. The symbol is what appears in a sequence, so a motif like "
+            "<code>30</code> reads directly off this table. States run past 9 "
+            "into A&ndash;E so each stays one character and a sequence stays "
+            "legible.</p>"
+        )
+        out.append(table(
+            pl.read_csv(representation, schema_overrides={"symbol": pl.String}),
+            {"count": thousands, "share": pct},
+            key_column="symbol",
+        ))
+
     divergence_tabs = []
     for length in (2, 3):
         path = tables_home / f"divergence_tokens_prefix{length}_{COHORT or 'septic'}.csv"
@@ -2826,6 +2815,48 @@ def section_state_space(paths, out: list) -> None:
                 "in the legend rather than implied by the ink.</p>"
             )
             out.append(tabs(overlays))
+
+    # Perfusion state: MAP adequacy crossed with pressor exposure, as four
+    # groups with a hysteresis band on the MAP side. Separate from the
+    # physiology underlays because it is a STATE a patient is in rather than a
+    # value they have, and the transition matrix below only makes sense for a
+    # state.
+    perfusion = figure(
+        septic_home / "trajectory_flow_perfusion.png",
+        "Coded septic shock, coloured by MAP adequacy and pressor exposure",
+    )
+    transitions = figure(
+        septic_home / "trajectory_perfusion_transitions.png",
+        "Row-normalised, with the count in each cell",
+    )
+    if perfusion or transitions:
+        out.append('<h3>Perfusion state, and movement between the states</h3>')
+        out.append(
+            "<p>Four groups: MAP above or below 65&nbsp;mmHg, crossed with "
+            "whether vasopressors are running. The MAP side is a <b>Schmitt "
+            "trigger, not a threshold</b> &mdash; crossing up needs MAP&nbsp;&gt;&nbsp;65, "
+            "crossing down needs MAP&nbsp;&lt;&nbsp;55, and inside the band the patient "
+            "keeps whatever state they were last in. A plain cut at 65 makes a "
+            "patient hovering there change group at nearly every six-hour grid "
+            "point, and a transition matrix built from that measures "
+            "measurement noise. The band resolves about 95% of "
+            "patient-timepoints; the rest never leave 55&ndash;65 and fall "
+            "back to the plain cut.</p>"
+        )
+        out.append(
+            "<p>Two consequences, both deliberate. The state is "
+            "<b>path-dependent</b>: two patients with the same MAP can be in "
+            "different groups depending which side they arrived from, which is "
+            "what a trigger is for. And a missing MAP carries the previous "
+            "state forward rather than breaking the run, since an absent "
+            "measurement is not evidence that perfusion changed. The pressor "
+            "side gets no hysteresis &mdash; starting or stopping a "
+            "vasopressor is a recorded action, not a noisy measurement.</p>"
+        )
+        out.append(tabs([
+            ("Where the states sit", perfusion),
+            ("Where patients go next", transitions),
+        ]))
 
     bpe_file = tables_home / f"bpe_vocabulary_{COHORT or 'septic'}.csv"
     if bpe_file.is_file():
@@ -3329,48 +3360,6 @@ def section_flow(paths, out: list) -> None:
             "90%&ndash;5%. Flow lines are on all three.</p>"
         )
         out.append(tabs(hex_panels))
-
-    # Perfusion state: MAP adequacy crossed with pressor exposure, as four
-    # groups with a hysteresis band on the MAP side. Separate from the
-    # physiology underlays because it is a STATE a patient is in rather than a
-    # value they have, and the transition matrix below only makes sense for a
-    # state.
-    perfusion = figure(
-        septic_home / "trajectory_flow_perfusion.png",
-        "Coded septic shock, coloured by MAP adequacy and pressor exposure",
-    )
-    transitions = figure(
-        septic_home / "trajectory_perfusion_transitions.png",
-        "Row-normalised, with the count in each cell",
-    )
-    if perfusion or transitions:
-        out.append('<h3>Perfusion state, and movement between the states</h3>')
-        out.append(
-            "<p>Four groups: MAP above or below 65&nbsp;mmHg, crossed with "
-            "whether vasopressors are running. The MAP side is a <b>Schmitt "
-            "trigger, not a threshold</b> &mdash; crossing up needs MAP&nbsp;&gt;&nbsp;65, "
-            "crossing down needs MAP&nbsp;&lt;&nbsp;55, and inside the band the patient "
-            "keeps whatever state they were last in. A plain cut at 65 makes a "
-            "patient hovering there change group at nearly every six-hour grid "
-            "point, and a transition matrix built from that measures "
-            "measurement noise. The band resolves about 95% of "
-            "patient-timepoints; the rest never leave 55&ndash;65 and fall "
-            "back to the plain cut.</p>"
-        )
-        out.append(
-            "<p>Two consequences, both deliberate. The state is "
-            "<b>path-dependent</b>: two patients with the same MAP can be in "
-            "different groups depending which side they arrived from, which is "
-            "what a trigger is for. And a missing MAP carries the previous "
-            "state forward rather than breaking the run, since an absent "
-            "measurement is not evidence that perfusion changed. The pressor "
-            "side gets no hysteresis &mdash; starting or stopping a "
-            "vasopressor is a recorded action, not a noisy measurement.</p>"
-        )
-        out.append(tabs([
-            ("Where the states sit", perfusion),
-            ("Where patients go next", transitions),
-        ]))
 
     # Physiology, one variable per tab. The combined grid is kept as an
     # overview, but eleven panels at 3.6 inches each is unreadable as evidence

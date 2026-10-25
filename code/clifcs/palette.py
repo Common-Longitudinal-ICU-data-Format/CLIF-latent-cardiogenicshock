@@ -215,7 +215,13 @@ def cluster_colors(keys, lightness: float = 0.42, saturation: float = 0.78) -> d
 #: The latent classes appear mostly as streamlines and marker outlines, where
 #: husl's pastels wash out against the grey cloud. Kept as a list rather than
 #: decided at each call site so one edit moves every figure together.
-DEEP_PALETTE_COLUMNS = ("growth_cluster",)
+DEEP_PALETTE_COLUMNS = (
+    "growth_cluster",
+    "sequence_cluster",
+    "perfusion_cluster",
+    "motif_cluster_raw",
+    "motif_cluster_rle",
+)
 
 
 def colors_for(column: str, keys) -> dict:
