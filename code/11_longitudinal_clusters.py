@@ -38,6 +38,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from clifcs import get_logger, load_paths
 from clifcs.longitudinal import (
     check_factor_labels,
+    factor_label,
     care_states,
     growth_clusters,
     growth_coefficients,
