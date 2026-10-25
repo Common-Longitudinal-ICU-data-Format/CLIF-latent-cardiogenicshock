@@ -1570,6 +1570,17 @@ def main() -> None:
             f"words from {int(np.median([len(s) for s in raw_sequences]))} "
             f"letters (compression {compression:.2f})"
         )
+        # `assignments` was joined with motif_labels BEFORE this block ran, so
+        # the BPE columns have to be carried across explicitly or they never
+        # reach the written parquet -- which is how 14 came to find no
+        # bpe_sentence_48h column after 11 had reported success.
+        assignments = assignments.join(
+            motif_labels.select(
+                "hospitalization_id", "bpe_sentence", "bpe_words",
+                "bpe_sentence_48h",
+            ),
+            on="hospitalization_id", how="left",
+        )
 
     # Matched-prefix divergence: among patients with the same path so far,
     # what was in the record just before they went different ways.

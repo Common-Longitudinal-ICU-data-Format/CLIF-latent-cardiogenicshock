@@ -2827,6 +2827,101 @@ def section_state_space(paths, out: list) -> None:
             )
             out.append(tabs(overlays))
 
+    bpe_file = tables_home / f"bpe_vocabulary_{COHORT or 'septic'}.csv"
+    if bpe_file.is_file():
+        frame = pl.read_csv(bpe_file, schema_overrides={"word": pl.String})
+        out.append('<h3>Byte-pair encoding &mdash; learned words</h3>')
+        out.append(
+            "<p>States are letters, merged units are words, a trajectory is a "
+            "sentence. BPE repeatedly merges the commonest adjacent pair, so "
+            "the words are <b>learned rather than given a length</b>.</p>"
+        )
+        out.append(
+            "<p>This differs from the motif vocabulary above in three ways. "
+            "Motifs are every 2- to 4-gram, pruned by frequency, which is a "
+            "<i>bag of overlapping substrings</i>; BPE produces a "
+            "<i>segmentation</i>, so a sentence has word order and a unit can "
+            "sit in prefix or suffix position. Nothing caps a word at four "
+            "states. And long runs collapse: the motif vocabulary's top three "
+            "entries were <code>00</code>, <code>000</code> and "
+            "<code>0000</code> in 73&ndash;78% of patients &mdash; three words "
+            "all meaning 'stayed off pressors' &mdash; where BPE merges them "
+            "into one unit while keeping it distinct from <code>00</code>, so "
+            "duration is compressed rather than exploded or, as under "
+            "run-length encoding, discarded.</p>"
+        )
+        out.append(callout(
+            "<b>The vocabulary is fitted on this cohort alone.</b> The same "
+            "string therefore means something different in the other report, "
+            "and the two vocabularies are not comparable &mdash; a word is "
+            "whatever was frequent here. Merges never cross the terminal "
+            "symbol, so no word encodes the end of a record; allowing that "
+            "would let a word encode death and every comparison downstream "
+            "would inherit the outcome it was meant to predict."
+        ))
+        out.append(table(
+            frame.head(40),
+            {
+                "occurrences": thousands, "patients": thousands,
+                "share_of_patients": pct,
+            },
+            key_column="word",
+        ))
+
+    latent_file = tables_home / f"sentence_vs_latent_{COHORT or 'septic'}.csv"
+    if latent_file.is_file():
+        frame = pl.read_csv(latent_file)
+        rho = frame["spearman_rho"][0] if "spearman_rho" in frame.columns else None
+        out.append('<h3>Sentences against the latent space</h3>')
+        out.append(
+            "<p>Every patient has two descriptions of the same 48 hours: a BPE "
+            "sentence over the MAP/pressor states, and a trajectory of nine "
+            "1024-d embeddings. Pairs of patients are scored under both "
+            "&mdash; normalised word-level edit distance, and Frobenius "
+            "distance between the corrected trajectories &mdash; then split "
+            "at the median of each."
+            + (f" Spearman &rho; between the two distances is "
+               f"<b>{rho:+.3f}</b>." if rho is not None else "")
+            + "</p>"
+        )
+        out.append(
+            "<p>Distances are taken in the <b>1024-d space, not PaCMAP</b>: a "
+            "projection's distances are not metric, so 'close on the map' is "
+            "not a claim about the representation. The window is 0&ndash;48&nbsp;h, "
+            "the only stretch where the state grid and the embedding grid "
+            "overlap.</p>"
+        )
+        out.append(callout(
+            "<b>The off-diagonal quadrants are the result.</b> Pairs close "
+            "under both measures, or far under both, say the model agrees with "
+            "the state description. The other two say what the 15-state space "
+            "is missing.<br><br>"
+            "<i>Divergent sentence, close latent</i> &mdash; the model treats "
+            "these patients as alike despite different MAP and pressor "
+            "courses, so whatever they share is outside the state space. "
+            "<i>Similar sentence, far latent</i> &mdash; identical course, and "
+            "the model still separates them, so again the difference is "
+            "outside it.<br><br>"
+            "<b>Read the two right-hand columns before concluding anything.</b> "
+            "Position in the projection explains R&sup2;&nbsp;0.45 of log "
+            "stream length and site survives the correction at non-linear "
+            "AUC&nbsp;0.855, so 'close in latent space' partly means "
+            "'similarly documented, same hospital'. These are reported rather "
+            "than adjusted away: a quadrant that is really a documentation "
+            "artefact should be visible as one."
+        ))
+        out.append(table(
+            frame.drop("spearman_rho") if "spearman_rho" in frame.columns else frame,
+            {
+                "pairs": thousands, "share": pct,
+                "mean_sentence_distance": num(3),
+                "mean_latent_distance": num(2),
+                "mean_log_stream_gap": num(3),
+                "same_site_share": pct,
+            },
+            key_column="quadrant",
+        ))
+
     if septic_home is not None:
         state_panels = [
             (label, figure(septic_home / name, note))
