@@ -474,6 +474,27 @@ def stage_cohort(
         sepsis_phenotype.save_model(
             paths.cohort_home / f"{scheme}_model.json", model, scheme
         )
+    # A scheme that was APPLIED leaves no centroids and no model, so anything
+    # of that shape already in the directory is from an earlier run that
+    # refit. Removed rather than left: nothing clears cohort_home between
+    # runs, and those two files are precisely the evidence that distinguishes
+    # a transferred labelling from a local one -- 01_report.py reads them for
+    # exactly that, and a derivation site copies `<scheme>_model.json` into
+    # models/. Left behind, they describe a fit that no longer governs any
+    # label in cohort.parquet.
+    for scheme in ("seymour", "bhavani"):
+        if scheme in sepsis_fitted:
+            continue
+        for stale in (
+            paths.cohort_home / f"{scheme}_centroids.csv",
+            paths.cohort_home / f"{scheme}_model.json",
+        ):
+            if stale.is_file():
+                stale.unlink()
+                logger.info(
+                    f"removed {stale.name}, left by an earlier run that refit "
+                    f"{scheme}; this run applied a model fitted elsewhere"
+                )
 
     paths.cohort_home.mkdir(parents=True, exist_ok=True)
     cohort.write_parquet(paths.cohort_home / "cohort.parquet")
@@ -1322,14 +1343,6 @@ def main() -> None:
     paths.mkdirs()
     cfg = load_cohort_cfg()
     sepsis_cfg = OmegaConf.load(CONFIG_HOME / "phenotypes_sepsis.yaml")
-    sepsis_models = {
-        scheme: path
-        for scheme, path in (
-            ("seymour", args.seymour_model),
-            ("bhavani", args.bhavani_model),
-        )
-        if path
-    }
     logger = get_logger("01_site_tables", paths.log_home / "01_site_tables.log")
 
     if args.site and args.site not in paths.sites:
@@ -1397,6 +1410,14 @@ def main() -> None:
                 "applying the phenotype models shipped in models/ -- pass "
                 "--refit-phenotypes to fit new ones on this cohort instead"
             )
+            # NAMED, not summarised. The line above said "the models" and was
+            # true of the Zweck model alone for some time: `sepsis_models` was
+            # built from these flags before this block filled them in, so the
+            # two sepsis schemes silently refit while the log said they were
+            # being applied. One line per scheme means the next time a model
+            # fails to reach a scheme, the log says which.
+            for attr in shipped:
+                logger.info(f"  {attr:<16} {getattr(args, attr)}")
     if needs_cohort and not transferred and not args.refit_phenotypes:
         parser.error(
             "the cohort stage would REFIT the phenotype models on this "
@@ -1423,6 +1444,30 @@ def main() -> None:
             "any other site's."
         )
 
+    # BUILT HERE, not up with the config loading, and that placement is the
+    # point. `--seymour-model` and `--bhavani-model` are empty until the
+    # shipped-model block above fills them in, so a mapping built any earlier
+    # is `{}` on every run that relies on the default -- which is every run at
+    # a contributing site. `stage_cohort` then gets no sepsis models and
+    # refits both schemes, while the log two screens up says the shipped
+    # models are being applied.
+    #
+    # That happened. It is the same class of failure the shipped-model default
+    # was added to prevent, one layer down, and the only sign was the word
+    # "refit" in a log line among warnings -- Seymour agreeing with the
+    # published profiles on 38.6%, mortality not rising alpha-to-delta -- that
+    # read as findings about the cohort rather than as symptoms of a refit.
+    #
+    # The Zweck model escaped it because `args.phenotype_model` is read at the
+    # call site rather than copied into a dict ahead of time.
+    sepsis_models = {
+        scheme: path
+        for scheme, path in (
+            ("seymour", args.seymour_model),
+            ("bhavani", args.bhavani_model),
+        )
+        if path
+    }
 
     if args.from_stage:
         todo = STAGES[STAGES.index(args.from_stage) :]
