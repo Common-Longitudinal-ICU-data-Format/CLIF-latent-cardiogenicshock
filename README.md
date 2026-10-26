@@ -1,24 +1,5 @@
 # CLIF shock cohort — site run
 
-> ## What we are asking for
->
-> Check out this repository, run **one script**, and send back **one
-> directory**.
->
-> ```bash
-> python code/01_site_tables.py --check    # verify your setup, runs nothing
-> python code/01_site_tables.py            # the run
-> ```
->
-> Then send `output/upload_to_box_<SITE>/`.
->
-> It runs as a plain Python program on one machine — laptop, workstation or
-> cluster, Windows, macOS or Linux. Everything in the directory you send is a
-> count, a share or a median over at least 11 patients; no patient-level data
-> leaves your site.
-
----
-
 ## What the script does
 
 Where do shock patients sit, and do the published subphenotypes correspond to
@@ -83,29 +64,43 @@ git clone <repo>
 cd CLIF-latent-cardiogenicshock
 ```
 
-### 2. Check your Python
+### 2. Find a Python 3.11 or newer
 
 ```bash
 python3 --version          # Windows: py --version
 ```
 
-**It has to be 3.11 or newer.**
+**It has to be 3.11 or newer.** On a Mac, `python3` is usually Apple's 3.9,
+which is too old even when a newer Python is installed alongside it. Check for
+one by version number:
+
+```bash
+python3.12 --version       # also try python3.11, python3.13. Windows: py -3.12 --version
+```
+
+If none is installed, get one from [python.org](https://www.python.org/downloads/).
+Without admin rights, [uv](https://docs.astral.sh/uv/) can do step 3 for you and
+fetch the Python itself: `uv venv --seed --python 3.12 ~/venvs/clif-cs`.
 
 ### 3. Create a virtual environment and install
+
+Build the environment with the interpreter you found in step 2. An environment
+keeps the Python it was created with, so this is the step that fixes the
+version.
 
 macOS / Linux:
 
 ```bash
-python3 -m venv ~/venvs/clif-cs
+python3.12 -m venv ~/venvs/clif-cs     # the interpreter from step 2
 source ~/venvs/clif-cs/bin/activate
-python --version                       # confirm 3.11+ -- see the note below
+python --version                       # must say 3.11 or newer
 pip install -r requirements-site.txt
 ```
 
 Windows (PowerShell):
 
 ```powershell
-py -m venv $HOME\venvs\clif-cs
+py -3.12 -m venv $HOME\venvs\clif-cs    # the version from step 2
 $HOME\venvs\clif-cs\Scripts\Activate.ps1
 python --version
 pip install -r requirements-site.txt
@@ -113,12 +108,7 @@ pip install -r requirements-site.txt
 
 ### 4. Point it at your data
 
-```bash
-cp code/config/paths.example.yaml code/config/paths.yaml
-```
-
-Edit `code/config/paths.yaml`. **One setting is required.** The shortest
-working file is four lines:
+Create `code/config/paths.yaml` containing four lines:
 
 ```yaml
 role: site
@@ -127,16 +117,20 @@ sites:
     data_dir: /the/path/to/your/CLIF_2_1_directory
 ```
 
+`data_dir` is the folder that directly holds the `clif_*.parquet` files.
 `YOURSITE` is the label that appears in every table and in the name of the
 directory you send, so use something recognisable. On Windows, write the path
 with forward slashes: `C:/data/CLIF_2_1`.
 
-Two optional settings, both defaulting to the directory you run from:
+**That is the whole file for most sites.** Everything else is optional.
+[`code/config/paths.example.yaml`](code/config/paths.example.yaml) explains each
+setting if you want to copy one across:
 
-| | |
-|---|---|
-| `output_home` | where results are written. Defaults to `./output` |
-| `scratch_home` | working space. Defaults to `./scratch`. Large and deletable afterwards, so point it at a fast local disk if you have one |
+| setting | what it is | if you leave it out |
+|---|---|---|
+| `output_home` | where results are written | `./output` |
+| `scratch_home` | working space, large and deletable afterwards. Point it at a fast local disk, never a synced drive (Box, Dropbox, OneDrive) | `./scratch` |
+| `tokenizer_yaml` | the tokenizer the model was trained with. Ask the coordinating site for it; one you build locally is not a substitute | `tokenize`, `winnow` and `tokencounts` are skipped and the bundle carries no token tables. Everything else is unaffected |
 
 `paths.yaml` is gitignored and never leaves your machine.
 
@@ -231,7 +225,7 @@ one site at a time with `--site YOURSITE`.
 output/
   upload_to_box_<SITE>/        <-- SEND THIS
     manifest.json                site, code version, minimum cell size
-    token_levels.csv             the token legend
+    token_levels.csv             the token legend (only with tokenizer_yaml)
     counts/
       filter_ledger.csv          patient flow and attrition
       phenotype_summary.csv      Zweck phenotype breakdown
@@ -240,8 +234,8 @@ output/
       bhavani_summary.csv        Bhavani sepsis phenotypes
       seymour_availability.csv   which features your site charts
       baseline_by_shock_type.csv medians and shares by coded mechanism
-      token_prevalence_anchor-*  per-token prevalence
-      token_families_anchor-*    the same, rolled up to family
+      token_prevalence_anchor-*  per-token prevalence (only with tokenizer_yaml)
+      token_families_anchor-*    the same, rolled up to family (only with tokenizer_yaml)
     trials/
       trial_criteria.csv         the criteria as encoded. No patient data
       trial_iqr_position_*       your medians against the published quartiles

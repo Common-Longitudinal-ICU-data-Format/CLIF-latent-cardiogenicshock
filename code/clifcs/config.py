@@ -27,6 +27,12 @@ for _stream in (sys.stdout, sys.stderr):
         _stream.reconfigure(encoding="utf-8", errors="replace")
 
 
+def _is_placeholder(value) -> bool:
+    """an unedited `/path/to/...` value from paths.example.yaml"""
+    text = str(value) if value is not None else ""
+    return text.startswith("/path/to") or text == "/path"
+
+
 def _redirect_hf_cache() -> None:
     """
     send HuggingFace `datasets` scratch into scratch_home, not ~/.cache
@@ -65,7 +71,8 @@ def _redirect_hf_cache() -> None:
         scratch = OmegaConf.load(config).get("scratch_home")
     except Exception:  # a malformed paths.yaml is load_paths' problem to report
         return
-    if not scratch:
+    # a template placeholder counts as unset, as it does in load_paths
+    if not scratch or _is_placeholder(scratch):
         return
     # PER PROCESS. Two runs sharing one cache directory destroy each other:
     # both clear it between grid points, so one deletes an arrow file the other
@@ -527,10 +534,6 @@ def load_paths(
     #
     # Checked before anything is resolved, so the message is about the config
     # rather than about the filesystem's opinion of a path nobody meant.
-    def _is_placeholder(value) -> bool:
-        text = str(value) if value is not None else ""
-        return text.startswith("/path/to") or text == "/path"
-
     # ONLY `sites.<name>.data_dir` is fatal, because it is the only key with no
     # sane fallback -- there is nothing to analyse without it. Everything else
     # either degrades or defaults:

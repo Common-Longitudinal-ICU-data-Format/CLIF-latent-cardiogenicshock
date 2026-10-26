@@ -45,3 +45,7 @@ Thumbs.db
 /output/upload_to_box_*/
 /output/token_level_data_*/
 /output/received/
+
+#ai folders
+.claude
+first_review.md
