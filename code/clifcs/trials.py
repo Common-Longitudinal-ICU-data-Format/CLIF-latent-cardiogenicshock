@@ -206,7 +206,7 @@ def onset_vitals(
     )
     at_onset = (
         wide.filter(pl.col("recorded_dttm") <= onset + pl.duration(hours=onset_hours))
-        .sort(["hospitalization_id", "map_best"])
+        .sort(["hospitalization_id", "map_best", "recorded_dttm"])
         .group_by("hospitalization_id", maintain_order=True)
         .agg(
             map_at_onset=pl.col("map_best").first(),
