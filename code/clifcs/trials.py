@@ -2127,6 +2127,9 @@ def assign_guideline(
     for trial in reversed(specificity):
         inside = pl.col(f"elig_{trial.key}") & pl.col(f"inside_t1_{trial.key}")
         assigned = pl.when(inside).then(pl.lit(trial.label)).otherwise(assigned)
+        # the fit has to move with the assignment, or a patient reassigned to
+        # a trial they sit inside keeps the "criteria only" of the one they left
+        fit = pl.when(inside).then(pl.lit("criteria and population")).otherwise(fit)
 
     out = frame.with_columns(assigned_guideline=assigned, guideline_fit=fit)
 
