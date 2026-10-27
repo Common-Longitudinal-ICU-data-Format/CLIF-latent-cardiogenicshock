@@ -173,11 +173,25 @@ def collect(data_dir, cohort: pl.DataFrame, logger) -> pl.DataFrame:
             state = state.drop(collision)
         state = state.join(sofa, on="hospitalization_id", how="left")
 
-    return cohort.join(state, on="hospitalization_id", how="left").join(
+    return _join_state(cohort, state).join(
         _rrt_flag(data_dir, cohort["hospitalization_id"]),
         on="hospitalization_id",
         how="left",
     )
+
+
+def _join_state(cohort: pl.DataFrame, state: pl.DataFrame) -> pl.DataFrame:
+    """
+    the cohort with the at-onset state attached, the state winning shared names
+
+    cohort.parquet already carries lactate, creatinine, bicarbonate, bun and
+    platelet_count -- the nearest value in the phenotype window, -24 h to +6 h.
+    A plain join kept those and parked the state's at-onset values in
+    `*_right`, so the table read a different window from the one documented
+    in `collect`, with numbers plausible enough that nothing flagged it.
+    """
+    shared = [c for c in state.columns if c in cohort.columns and c != "hospitalization_id"]
+    return cohort.drop(shared).join(state, on="hospitalization_id", how="left")
 
 
 def summarise(frame: pl.DataFrame, site: str, min_cell: int) -> pl.DataFrame:
