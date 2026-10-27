@@ -567,6 +567,24 @@ def stage_subset(paths, cohort: pl.DataFrame, sites, logger, force: bool) -> Non
 # ============================================================ stage: derive
 
 
+def sofa_by_hospitalization(wide, scores):
+    """
+    one row per encounter block: its last hospitalization and event time, with
+    that block's own SOFA row from clifpy
+
+    A merge on the `encounter_block` column. The previous `.join(on=...)`
+    matched the grouped block numbers against `scores`' row positions, so
+    every patient carried another block's score and `validate="1:1"` still
+    passed.
+    """
+    per_block = (
+        wide.sort_values("event_time")
+        .groupby("encounter_block", as_index=False)
+        .agg({"event_time": "max", "hospitalization_id": "last"})
+    )
+    return per_block.merge(scores, on="encounter_block", how="inner", validate="1:1")
+
+
 def stage_derive(paths, sites, logger, force: bool) -> None:
     """
     build the derived tables cocoa's collation.yaml expects
@@ -639,11 +657,10 @@ def stage_derive(paths, sites, logger, force: bool) -> None:
             override=True,
         )
         sofa.compute_sofa_scores()
-        sofa_df = (
-            sofa.wide_df.sort_values("event_time")
-            .groupby("encounter_block")
-            .agg({"event_time": "max", "hospitalization_id": "last"})
-            .join(sofa.sofa_df, how="inner", on="encounter_block", validate="1:1")
+        sofa_df = sofa_by_hospitalization(sofa.wide_df, sofa.sofa_df)
+        logger.info(
+            f"[{site}] SOFA rows for {len(sofa_df)} of "
+            f"{sofa.wide_df['encounter_block'].nunique()} encounter blocks"
         )
         sofa_df.to_parquet(data_dir / "clif_sofa.parquet")
         logger.info(f"[{site}] derived tables written to {data_dir}")
