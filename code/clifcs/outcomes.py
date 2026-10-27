@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import polars as pl
 
-from clifcs.clif import scan
+from clifcs.clif import ci_in, require_any, scan
 
 
 def icu_length_of_stay(data_dir, cohort: pl.DataFrame, cfg) -> pl.DataFrame:
@@ -78,6 +78,7 @@ def icu_length_of_stay(data_dir, cohort: pl.DataFrame, cfg) -> pl.DataFrame:
 def add_outcomes(data_dir, cohort: pl.DataFrame, cfg) -> pl.DataFrame:
     """attach ICU LOS, hospital LOS, and in-hospital mortality to the cohort"""
     expired = list(cfg.outcomes.mortality_discharge_categories)
+    require_any(cohort, "discharge_category", expired, "in-hospital mortality")
     return (
         cohort.join(
             icu_length_of_stay(data_dir, cohort, cfg),
@@ -85,7 +86,7 @@ def add_outcomes(data_dir, cohort: pl.DataFrame, cfg) -> pl.DataFrame:
             how="left",
         )
         .with_columns(
-            in_hospital_mortality=pl.col("discharge_category").is_in(expired),
+            in_hospital_mortality=ci_in("discharge_category", expired),
             hospital_los_days=(
                 pl.col("discharge_dttm") - pl.col("admission_dttm")
             ).dt.total_seconds()

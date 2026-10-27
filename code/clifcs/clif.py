@@ -133,3 +133,26 @@ def scan(
         frame = frame.with_columns(utc_naive(frame, c).alias(c) for c in dttm_cols)
 
     return frame
+
+
+def ci_in(column: str, values) -> pl.Expr:
+    """
+    `column` is one of `values`, ignoring case and surrounding spaces
+
+    CLIF 2.1 spells some categories in Title case ("Expired", "Female"); a
+    site that sends the same values in lowercase must still match. Null stays
+    null, as with a plain `is_in`.
+    """
+    wanted = [str(v).strip().lower() for v in values]
+    return pl.col(column).str.strip_chars().str.to_lowercase().is_in(wanted)
+
+
+def require_any(frame: pl.DataFrame, column: str, values, what: str) -> None:
+    """stop if `column` holds values but none of them is one of `values`"""
+    seen = frame[column].drop_nulls().unique()
+    if len(seen) and not frame.select(ci_in(column, values).any()).item():
+        raise ValueError(
+            f"{column} matches none of {list(values)}, so {what} cannot be "
+            f"computed. Values seen: {sorted(seen.cast(pl.String).to_list())[:12]}. "
+            "Map them to the CLIF 2.1 categories before running."
+        )

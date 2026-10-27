@@ -41,7 +41,7 @@ from collections.abc import Callable
 import numpy as np
 import polars as pl
 
-from clifcs.clif import has_table, scan
+from clifcs.clif import ci_in, has_table, scan
 
 # --------------------------------------------------------------- ICD code sets
 #
@@ -562,7 +562,7 @@ def attach_features(data_dir, cohort: pl.DataFrame, cfg, logger) -> pl.DataFrame
         cohort = cohort.with_columns(imv_before_onset=pl.lit(False))
     cohort = cohort.with_columns(
         imv_before_onset=pl.col("imv_before_onset").fill_null(False),
-        male=pl.col("sex_category") == "Male",
+        male=ci_in("sex_category", ["Male"]),
     )
 
     logger.info(
@@ -1439,7 +1439,7 @@ def compare_to_published(frame: pl.DataFrame, trials, logger) -> pl.DataFrame:
         published = trial.published
         ours = {
             "age": part["age_at_admission"].median() if part.height else None,
-            "pct_female": (part["sex_category"] == "Female").mean()
+            "pct_female": part.select(ci_in("sex_category", ["Female"]).mean()).item()
             if part.height
             else None,
             "lactate": part["lactate"].median() if part.height else None,

@@ -32,7 +32,7 @@ import numpy as np
 import polars as pl
 from sklearn.cluster import KMeans
 
-from clifcs.clif import scan
+from clifcs.clif import ci_in, scan
 
 #: phenotype labels, in the paper's order
 PHENOTYPES: tuple[str, ...] = (
@@ -116,8 +116,8 @@ def add_egfr(df: pl.DataFrame) -> pl.DataFrame:
     Left null when sex is not recorded as Male or Female, since the equation has
     no coefficients for that case.
     """
-    female = pl.col("sex_category") == "Female"
-    male = pl.col("sex_category") == "Male"
+    female = ci_in("sex_category", ["Female"])
+    male = ci_in("sex_category", ["Male"])
     kappa = pl.when(female).then(0.7).when(male).then(0.9).otherwise(None)
     alpha = pl.when(female).then(-0.241).when(male).then(-0.302).otherwise(None)
     ratio = pl.col("creatinine") / kappa
