@@ -16,6 +16,8 @@ import pathlib
 
 import duckdb
 import polars as pl
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 # ---------------------------------------------------------------------------
 # DuckDB reads TIMESTAMPTZ in the LOCAL SYSTEM TIMEZONE unless told otherwise.
@@ -50,7 +52,8 @@ def set_duckdb_utc() -> None:
 
 def duckdb_timezone() -> str:
     """the default connection's timezone, for the startup assertion in 01"""
-    return str(duckdb.sql("SELECT current_setting('TimeZone')").fetchone()[0])
+    # fetchall, not fetchone: duckdb 2.x relations no longer have fetchone()
+    return str(duckdb.sql("SELECT current_setting('TimeZone')").fetchall()[0][0])
 
 #: tables that key on hospitalization_id
 #:
@@ -102,6 +105,23 @@ def table_path(data_dir: pathlib.Path, table: str) -> pathlib.Path:
 
 def has_table(data_dir: pathlib.Path, table: str) -> bool:
     return table_path(data_dir, table).is_file()
+
+
+def naive_datetime_columns(data_dir: pathlib.Path, table: str) -> list[str]:
+    """
+    `*_dttm` columns stored without a timezone, read from the parquet footer
+
+    `utc_naive` treats these as UTC already. That is right when a site stores
+    UTC without a zone, and silently shifts every instant by the UTC offset
+    when it stores local time, so --check names them. Reads the schema only,
+    never rows.
+    """
+    schema = pq.read_schema(table_path(data_dir, table))
+    return [
+        f.name
+        for f in schema
+        if f.name.endswith("_dttm") and pa.types.is_timestamp(f.type) and f.type.tz is None
+    ]
 
 
 def scan(

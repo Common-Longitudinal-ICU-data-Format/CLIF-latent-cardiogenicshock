@@ -57,7 +57,12 @@ import polars as pl
 from omegaconf import OmegaConf
 
 from clifcs import ANCHORS, get_logger, load_cohort_cfg, load_paths
-from clifcs.clif import HOSPITALIZATION_LEVEL, PATIENT_LEVEL
+from clifcs.clif import (
+    HOSPITALIZATION_LEVEL,
+    PATIENT_LEVEL,
+    duckdb_timezone,
+    naive_datetime_columns,
+)
 from clifcs.cohort import (
     FilterLedger,
     attach_demographics,
@@ -165,8 +170,8 @@ def preflight(paths, sites, logger) -> bool:
     """
     check this machine can do the run, before anything expensive starts
 
-    Reads configuration and lists directories. Opens no data file, so it is
-    safe anywhere and takes a second. Returns True if the run can proceed.
+    Reads configuration, lists directories and reads table schemas, never
+    rows, so it is safe anywhere and takes about a second. Returns True if the run can proceed.
 
     Runs automatically at the start of every invocation, and on its own with
     `--check`. Automatically, because the two failures it catches -- a path
@@ -219,6 +224,15 @@ def preflight(paths, sites, logger) -> bool:
         extra = sorted(present - set(REQUIRED_TABLES))
         if extra:
             logger.info(f"         also present, never read: {', '.join(extra)}")
+        # a warning, not a failure: a site may store UTC without a zone, as
+        # UCMC's respiratory_support does
+        for table in sorted(present & set(REQUIRED_TABLES)):
+            naive = naive_datetime_columns(directory, table)
+            if naive:
+                logger.warning(
+                    f"         {table}: {', '.join(naive)} stored without a timezone; "
+                    "read as UTC. If these are local times, convert them to UTC first."
+                )
 
     logger.info("where this run will write")
     for label, target in (
@@ -1348,6 +1362,13 @@ def main() -> None:
         if path
     }
     logger = get_logger("01_site_tables", paths.log_home / "01_site_tables.log")
+    if duckdb_timezone() != "UTC":
+        # clifcs pins it on import; clifpy's dose conversion reads timestamps
+        # through this connection, so anything else shifts medication times
+        raise SystemExit(
+            f"DuckDB's session timezone is {duckdb_timezone()!r}, not UTC; "
+            "something reset it after clifcs was imported."
+        )
 
     if args.site and args.site not in paths.sites:
         parser.error(

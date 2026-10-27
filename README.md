@@ -141,8 +141,10 @@ python code/01_site_tables.py --check
 ```
 
 This reads your configuration, confirms each path resolves, and lists which of
-the 14 tables it found. **It opens no data file**, takes about a second, and is
-safe to run anywhere. Fix anything it marks `FAIL` before going further.
+the 14 tables it found. **It reads table schemas only, never rows**, takes about
+a second, and is safe to run anywhere. Fix anything it marks `FAIL` before going
+further. It also warns about timestamp columns stored without a timezone, which
+are read as UTC: if yours hold local time, convert them to UTC first.
 
 ---
 
