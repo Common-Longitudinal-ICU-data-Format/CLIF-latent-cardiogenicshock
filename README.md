@@ -236,8 +236,15 @@ output/
       bhavani_summary.csv        Bhavani sepsis phenotypes
       seymour_availability.csv   which features your site charts
       baseline_by_shock_type.csv medians and shares by coded mechanism
+      phenotype_summary_cs_phenotype.csv  the Zweck breakdown under its variant name
+      seymour_centroids.csv      Seymour cluster profiles, when refit at this site
+      bhavani_centroids.csv      Bhavani cluster profiles, when refit at this site
+      seymour_agreement.csv      refit vs published Seymour labels, when refit here
       token_prevalence_anchor-*  per-token prevalence (only with tokenizer_yaml)
       token_families_anchor-*    the same, rolled up to family (only with tokenizer_yaml)
+    models/
+      seymour_model.json         the Seymour model fitted here, when refit at this site
+      bhavani_model.json         the Bhavani model fitted here, when refit at this site
     trials/
       trial_criteria.csv         the criteria as encoded. No patient data
       trial_iqr_position_*       your medians against the published quartiles

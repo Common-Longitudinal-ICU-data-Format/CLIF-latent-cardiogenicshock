@@ -39,6 +39,7 @@ instead of travelling silently.
 from __future__ import annotations
 
 import hashlib
+import json
 import pathlib
 import secrets
 import shutil
@@ -60,6 +61,11 @@ _COUNT_TABLES = {
     "seymour_summary.csv": ("n",),
     "bhavani_summary.csv": ("n",),
     "seymour_availability.csv": ("n_measured",),
+    "phenotype_summary_cs_phenotype.csv": ("n",),
+    # written when this site refit the sepsis phenotypes
+    "seymour_centroids.csv": ("n",),
+    "bhavani_centroids.csv": ("n",),
+    "seymour_agreement.csv": ("n",),
 }
 
 #: derived statistics that must be suppressed wherever their count is
@@ -416,6 +422,21 @@ def write_counts(paths, bundle: pathlib.Path, min_cell: int, logger, site=None) 
         )
         contract.validate_counts_frame(table, name, min_cell)
         table.write_csv(out / name)
+
+    # the sepsis models this site fitted, when it refit them; only the fields
+    # the contract names may leave
+    for scheme in ("seymour", "bhavani"):
+        source = paths.cohort_home / f"{scheme}_model.json"
+        if not source.is_file():
+            continue
+        unexpected = set(json.loads(source.read_text())) - contract.MODEL_FIELDS
+        if unexpected:
+            raise contract.ContractViolation(
+                f"{source.name}: fields {sorted(unexpected)} are not in contract.MODEL_FIELDS"
+            )
+        (bundle / "models").mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, bundle / "models" / source.name)
+        logger.info(f"  models/{source.name}")
 
 
 # ============================================================ tier 1: aggregate
