@@ -52,22 +52,6 @@ from clifcs.export import contract, manifest, suppress
 from clifcs.tokenlabels import coverage, last_pre_anchor_ranks, levels
 from clifcs.tokens import family_matrix, load_pre_anchor_tokens, vocabulary
 
-#: aggregate tables copied from output/cohort/ into counts/, with the column
-#: that holds a patient count named so suppression can find it
-_COUNT_TABLES = {
-    "filter_ledger.csv": ("n_hospitalizations", "n_patients"),
-    "phenotype_summary.csv": ("n",),
-    "shock_type_summary.csv": ("n",),
-    "seymour_summary.csv": ("n",),
-    "bhavani_summary.csv": ("n",),
-    "seymour_availability.csv": ("n_measured",),
-    "phenotype_summary_cs_phenotype.csv": ("n",),
-    # written when this site refit the sepsis phenotypes
-    "seymour_centroids.csv": ("n",),
-    "bhavani_centroids.csv": ("n",),
-    "seymour_agreement.csv": ("n",),
-}
-
 #: derived statistics that must be suppressed wherever their count is
 _DERIVED = ("mortality", "median_icu_los_days", "share", "availability")
 
@@ -339,74 +323,18 @@ def trial_columns(paths, anchor: str, site: str, logger) -> pl.DataFrame:
     return frame.select("hospitalization_id", *wanted)
 
 
-def write_counts(paths, bundle: pathlib.Path, min_cell: int, logger, site=None) -> None:
-    """copy the aggregate tables across, suppressed"""
-    out = bundle / "counts"
-    out.mkdir(parents=True, exist_ok=True)
+def put_table(
+    paths, sites, name: str, table: pl.DataFrame, min_cell: int, logger,
+    *, folder: str = "counts", suppressed: bool = False,
+) -> None:
+    """
+    write one aggregate table into each site's upload folder, its only copy
 
-    # the trial tables, which are per site and per anchor and so are found by
-    # glob rather than named. Already suppressed by clifcs.trial_aggregate;
-    # re-checked here rather than re-suppressed, so a table assembled by some
-    # other route cannot skip it.
-    if site is not None:
-        trial_home = out.parent / "trials"
-        for source in sorted(paths.cohort_home.glob(f"trial_*_{site}_anchor-*.csv")):
-            table = pl.read_csv(source)
-            contract.validate_counts_frame(table, source.name, min_cell)
-            trial_home.mkdir(parents=True, exist_ok=True)
-            table.write_csv(trial_home / source.name.replace(f"_{site}", ""))
-            logger.info(f"  trials/{source.name.replace(f'_{site}', '')} ({table.height} rows)")
-        criteria = paths.cohort_home / "trial_criteria.csv"
-        if criteria.is_file():
-            trial_home.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(criteria, trial_home / "trial_criteria.csv")
-
-        # Per-token and per-family prevalence, which is what 04 draws its
-        # tornado from. Already suppressed by the tokencounts stage; re-checked
-        # here rather than re-suppressed, on the same argument as the trial
-        # tables. These are the reason a site sharing nothing patient-level can
-        # still contribute to decomposing the site effect -- which, at 97%
-        # neighbour purity, is the largest single finding in this pipeline.
-        # baseline characteristics by shock type. Medians and shares, already
-        # suppressed by the baseline stage; re-checked here like the rest.
-        for source in sorted(
-            paths.cohort_home.glob(f"baseline_by_shock_type_{site}.csv")
-        ):
-            table = pl.read_csv(source)
-            contract.validate_counts_frame(table, source.name, min_cell)
-            name = source.name.replace(f"_{site}", "")
-            table.write_csv(out / name)
-            logger.info(f"  counts/{name} ({table.height} rows)")
-
-        # Gated on the tokenizer, not merely on what is lying in cohort_home.
-        # These tables are token ids, and the manifest's `tokenizer_sha256` is
-        # what makes them comparable across sites -- so shipping them with a
-        # null hash would be worse than not shipping them, since the
-        # coordinator has no way to tell which mapping they are in.
-        #
-        # The glob alone was not enough: on a machine that HAD a tokenizer for
-        # an earlier run, last run's token tables are still in cohort_home and
-        # were picked up by a run that had skipped the token stages entirely.
-        token_patterns = (
-            ("token_prevalence", "token_families") if paths.has_tokenizer else ()
-        )
-        for pattern in token_patterns:
-            for source in sorted(
-                paths.cohort_home.glob(f"{pattern}_{site}_anchor-*.csv")
-            ):
-                table = pl.read_csv(source)
-                contract.validate_counts_frame(table, source.name, min_cell)
-                name = source.name.replace(f"_{site}", "")
-                table.write_csv(out / name)
-                logger.info(f"  counts/{name} ({table.height} rows)")
-
-    for name, count_columns in _COUNT_TABLES.items():
-        source = paths.cohort_home / name
-        if not source.is_file():
-            logger.info(f"  {name}: not produced at this site, skipping")
-            continue
-        table = pl.read_csv(source)
-        logger.info(f"  {name} ({table.height} rows)")
+    Suppressed here unless its builder already did it (the trial, baseline and
+    token tables), then checked, so the folder never holds an unchecked file,
+    even when a run stops halfway.
+    """
+    if not suppressed:
         table = suppress.suppress_counts(
             table,
             min_cell=min_cell,
@@ -420,23 +348,56 @@ def write_counts(paths, bundle: pathlib.Path, min_cell: int, logger, site=None) 
             ),
             logger=logger,
         )
-        contract.validate_counts_frame(table, name, min_cell)
-        table.write_csv(out / name)
+    contract.validate_counts_frame(table, name, min_cell)
+    for site in sites:
+        out = paths.upload_home(site) / folder / name
+        out.parent.mkdir(parents=True, exist_ok=True)
+        table.write_csv(out)
+        logger.info(f"  {out.parent.name}/{name} ({table.height} rows)")
 
-    # the sepsis models this site fitted, when it refit them; only the fields
-    # the contract names may leave
-    for scheme in ("seymour", "bhavani"):
-        source = paths.cohort_home / f"{scheme}_model.json"
-        if not source.is_file():
+
+def put_model(paths, sites, name: str, write) -> None:
+    """
+    write a fitted phenotype model into each site's models/ folder
+
+    `write(path)` saves the file; anything beyond contract.MODEL_FIELDS
+    (moments and centroids) is refused and the file removed.
+    """
+    for site in sites:
+        out = paths.upload_home(site) / "models" / name
+        out.parent.mkdir(parents=True, exist_ok=True)
+        write(out)
+        unexpected = set(json.loads(out.read_text())) - contract.MODEL_FIELDS
+        if unexpected:
+            out.unlink()
+            raise contract.ContractViolation(
+                f"{name}: fields {sorted(unexpected)} are not in contract.MODEL_FIELDS"
+            )
+
+
+def check_bundle(paths, site: str, min_cell: int, logger) -> None:
+    """
+    re-check everything the stages wrote into this site's upload folder
+
+    Every table is validated again, so a file placed there by any other route
+    cannot pass unchecked. Token tables are removed when this machine has no
+    tokenizer: they are token ids, comparable across sites only under the
+    mapping whose hash the manifest records, and a manifest without that hash
+    must not carry them.
+    """
+    bundle = paths.upload_home(site)
+    for table_file in sorted(bundle.glob("*/*.csv")):
+        if not paths.has_tokenizer and table_file.name.startswith(("token_prevalence_", "token_families_")):
+            table_file.unlink()
+            logger.warning(f"  removed {table_file.name}: no tokenizer on this machine")
             continue
-        unexpected = set(json.loads(source.read_text())) - contract.MODEL_FIELDS
+        contract.validate_counts_frame(pl.read_csv(table_file), table_file.name, min_cell)
+    for model_file in sorted(bundle.glob("models/*.json")):
+        unexpected = set(json.loads(model_file.read_text())) - contract.MODEL_FIELDS
         if unexpected:
             raise contract.ContractViolation(
-                f"{source.name}: fields {sorted(unexpected)} are not in contract.MODEL_FIELDS"
+                f"{model_file.name}: fields {sorted(unexpected)} are not in contract.MODEL_FIELDS"
             )
-        (bundle / "models").mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, bundle / "models" / source.name)
-        logger.info(f"  models/{source.name}")
 
 
 # ============================================================ tier 1: aggregate
@@ -464,8 +425,8 @@ def write_aggregate(
     """
     bundle.mkdir(parents=True, exist_ok=True)
 
-    logger.info(" counts/")
-    write_counts(paths, bundle, min_cell, logger, site=site)
+    logger.info(" checking the tables already written here")
+    check_bundle(paths, site, min_cell, logger)
 
     # the legend, from the tokenizer alone -- no patient data, and identical at
     # every site, so it travels for the reader's convenience. Absent where the
