@@ -757,7 +757,9 @@ def _pooled_token_prevalence(paths, anchor: str, logger) -> pl.DataFrame:
 
     frames = []
     for site in paths.sites:
-        path = paths.cohort_home / f"token_prevalence_{site}_anchor-{anchor}.csv"
+        path = paths.upload_home(site) / "counts" / f"token_prevalence_anchor-{anchor}.csv"
+        if not path.is_file():  # written before 01 put its tables in the upload folder
+            path = paths.cohort_home / f"token_prevalence_{site}_anchor-{anchor}.csv"
         if path.is_file():
             frames.append(pl.read_csv(path))
     if not frames:

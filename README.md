@@ -177,7 +177,10 @@ long it took, so a long run is readable as it goes:
 | `trials` | eligibility, position against published IQRs, guideline fit |
 | `export` | assemble the directory to send |
 
-Everything is written as it goes, so nothing is lost if the run stops.
+Everything is written as it goes, so nothing is lost if the run stops. Each
+stage writes its summary tables straight into `output/upload_to_box_<SITE>/`,
+already suppressed, so they exist in one place only; `output/cohort/` keeps the
+patient-level parquet files.
 
 ## If a stage fails
 
@@ -253,7 +256,8 @@ output/
       trial_coverage_*           how many trials cover each patient
 
   patient_level_data_<SITE>/   LOCAL ONLY -- never shared
-  cohort/  logs/  scratch/     working files. Not sent
+  cohort/                      patient-level parquet files. LOCAL ONLY
+  logs/  scratch/              working files. Not sent
 ```
 
 The directories are named so that what may leave is obvious without reading any

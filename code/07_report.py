@@ -59,6 +59,16 @@ LABELLINGS = [
 # ----------------------------------------------------------------- rendering
 
 
+
+def aggregate_file(paths, name: str) -> pathlib.Path:
+    """
+    an aggregate table from this machine's upload folders, where 01 writes
+    them, or from output/cohort for runs made before 01 wrote them there
+    """
+    candidates = [paths.upload_home(site) / "counts" / name for site in paths.sites]
+    candidates.append(paths.cohort_home / name)
+    return next((c for c in candidates if c.is_file()), candidates[-1])
+
 def css() -> str:
     return f"""
 :root {{
@@ -338,7 +348,7 @@ def read_model_tables(paths, name, required, logger):
 
 
 def section_cohort(paths, cfg, out: list) -> None:
-    ledger_file = paths.cohort_home / "filter_ledger.csv"
+    ledger_file = aggregate_file(paths, "filter_ledger.csv")
     if not ledger_file.is_file():
         return
     ledger = pl.read_csv(ledger_file)
@@ -424,7 +434,7 @@ def section_cohort(paths, cfg, out: list) -> None:
     # The criteria are mechanism-agnostic, so the first question a reader has
     # after seeing who was enrolled is which mechanisms that caught -- and the
     # answer reframes every number above it.
-    shock_file = paths.cohort_home / "shock_type_summary.csv"
+    shock_file = aggregate_file(paths, "shock_type_summary.csv")
     if shock_file.is_file():
         shock = pl.read_csv(shock_file)
         out.append("<h3>Shock type, from coded diagnoses</h3>")
@@ -465,7 +475,9 @@ def section_cohort(paths, cfg, out: list) -> None:
             "its subject.", "warn"))
 
         baseline_file = paths.cohort_home / "baseline_by_shock_type.csv"
-        parts = sorted(paths.cohort_home.glob("baseline_by_shock_type_*.csv"))
+        parts = sorted(
+            paths.output_home.glob("upload_to_box_*/counts/baseline_by_shock_type.csv")
+        ) or sorted(paths.cohort_home.glob("baseline_by_shock_type_*.csv"))
         if parts or baseline_file.is_file():
             frames = [pl.read_csv(f) for f in (parts or [baseline_file])]
             baseline = pl.concat(frames, how="diagonal_relaxed")
@@ -530,7 +542,7 @@ def section_cohort(paths, cfg, out: list) -> None:
         ("cs_phenotype_cardiac_origin", "Zweck (cardiac origin)"),
         ("cs_phenotype", "Zweck (all shock)"),
     ):
-        variant_file = paths.cohort_home / f"phenotype_summary_{column}.csv"
+        variant_file = aggregate_file(paths, f"phenotype_summary_{column}.csv")
         if not variant_file.is_file():
             continue
         frame = pl.read_csv(variant_file)
@@ -543,7 +555,7 @@ def section_cohort(paths, cfg, out: list) -> None:
             },
             key_column=column,
         )))
-    seymour_file = paths.cohort_home / "seymour_summary.csv"
+    seymour_file = aggregate_file(paths, "seymour_summary.csv")
     if seymour_file.is_file():
         phenotype_tabs.append(("Seymour (sepsis)", table(
             pl.read_csv(seymour_file),
@@ -554,7 +566,7 @@ def section_cohort(paths, cfg, out: list) -> None:
             },
             key_column="seymour",
         )))
-    bhavani_file = paths.cohort_home / "bhavani_summary.csv"
+    bhavani_file = aggregate_file(paths, "bhavani_summary.csv")
     if bhavani_file.is_file():
         phenotype_tabs.append(("Bhavani (temperature)", table(
             pl.read_csv(bhavani_file),
@@ -593,7 +605,7 @@ def section_cohort(paths, cfg, out: list) -> None:
         )
         out.append(tabs(phenotype_tabs))
 
-        agreement_file = paths.cohort_home / "phenotype_variant_agreement.csv"
+        agreement_file = aggregate_file(paths, "phenotype_variant_agreement.csv")
         if agreement_file.is_file():
             out.append(
                 "<p>How far the three fits put the same patient in the same "
