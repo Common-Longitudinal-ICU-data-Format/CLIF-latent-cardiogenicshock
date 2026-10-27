@@ -1177,7 +1177,8 @@ def _agreement(
         )
     return (
         joined.group_by("seymour_phenotype", "seymour_transfer")
-        .len()
+        # `n`, the count name the export suppresses and checks
+        .len(name="n")
         .sort("seymour_phenotype", "seymour_transfer")
     )
 

@@ -331,6 +331,14 @@ def is_permitted(column: str) -> bool:
     )
 
 
+#: the fields a phenotype model file may carry when a site ships the model it
+#: fitted: per-feature moments and cluster centroids, the same disclosure class
+#: as the files in models/, and never a patient row
+MODEL_FIELDS: frozenset[str] = frozenset(
+    {"scheme", "features", "centre", "scale", "centroids", "labels", "log_transform", "z_clip"}
+)
+
+
 class ContractViolation(Exception):
     """a frame carries something the consortium policy does not permit"""
 

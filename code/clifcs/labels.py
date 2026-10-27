@@ -21,7 +21,7 @@ import datetime
 import numpy as np
 import polars as pl
 
-from clifcs.clif import scan
+from clifcs.clif import ci_in, scan
 
 #: vasopressor doses converted to norepinephrine equivalents (mcg/kg/min).
 #: `factor` multiplies a dose already expressed in `unit`.
@@ -101,7 +101,7 @@ def label_mortality(
     expired = list(cfg.outcomes.mortality_discharge_categories)
     return anchors.with_columns(
         label=(
-            pl.col("discharge_category").is_in(expired)
+            ci_in("discharge_category", expired)
             & (
                 pl.col("discharge_dttm")
                 <= pl.col("anchor_dttm") + pl.duration(hours=float(horizon_hours))

@@ -19,6 +19,8 @@
 # Mirrors coreopsis recipes/preprocessing.py, so that the cohort sits inside the
 # distribution the frozen model was trained on (the `*-icu` datasets).
 base_cohort:
+  # adults only (study decision); applied before the first-hospitalization pick
+  min_age_years: !!float 18.0
   first_hospitalization_only: !!bool true
   min_hospitalization_duration_days: !!float 1.0
   require_icu: !!bool true

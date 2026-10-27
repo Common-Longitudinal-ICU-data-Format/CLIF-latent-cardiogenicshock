@@ -83,7 +83,7 @@ def _minutes(x: float) -> datetime.timedelta:
 
 
 def base_cohort(site: str, data_dir, cfg, ledger: FilterLedger, logger) -> pl.DataFrame:
-    """first hospitalization per patient, >= 24 h long, with ICU in the first 24 h"""
+    """first adult hospitalization per patient, >= 24 h long, with ICU in the first 24 h"""
     bc = cfg.base_cohort
     hosp = scan(
         data_dir,
@@ -101,6 +101,12 @@ def base_cohort(site: str, data_dir, cfg, ledger: FilterLedger, logger) -> pl.Da
 
     df = hosp.collect()
     ledger.add(site, "all hospitalizations", df)
+
+    if bc.get("min_age_years") is not None:
+        # before the first-hospitalization pick, so a patient first seen as a
+        # child enters on their first adult stay; a missing age is not adult
+        df = df.filter(pl.col("age_at_admission") >= float(bc.min_age_years))
+        ledger.add(site, f">= {float(bc.min_age_years):g} years at admission", df)
 
     if bc.first_hospitalization_only:
         # deterministic: earliest admission, ties broken on hospitalization_id,

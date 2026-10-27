@@ -41,7 +41,7 @@ from collections.abc import Callable
 import numpy as np
 import polars as pl
 
-from clifcs.clif import has_table, scan
+from clifcs.clif import ci_in, has_table, scan
 
 # --------------------------------------------------------------- ICD code sets
 #
@@ -117,6 +117,107 @@ def _normalized_code() -> pl.Expr:
         .str.replace_all(r"[.\s]", "")
         .str.to_uppercase()
     )
+
+
+def onset_vitals(
+    data_dir, cohort: pl.DataFrame, onset_hours: float = 6.0, achieved_hours: float = 24.0
+) -> pl.DataFrame:
+    """
+    MAP, heart rate, DBP and temperature at onset, and the MAP achieved after it
+
+    One row per hospitalization with a usable MAP. The `*_at_onset` values are
+    read at the lowest MAP within `onset_hours` either side of `cs_onset_dttm`,
+    the state the clinician was looking at, with ties going to the earliest
+    reading so the result does not depend on the order rows arrive in.
+    `map_achieved` is the median MAP over the `achieved_hours` after onset,
+    which is what a MAP-target recommendation is about: the pressure achieved
+    and held, not the nadir that defined the shock. Using the nadir put
+    SEPSISPAM concordance at 11.9%, which only said that a shock patient's
+    worst pressure is below 65. The scan therefore reaches past the onset
+    window; reading only onset +/- 6 h made the "24 h" median a 6 h one.
+
+    MAP is derived from SBP/DBP wherever a measured value is missing or
+    implausible. It has to be: `map` is charted for 99.9% of NU
+    hospitalizations and only 15.1% of UCMC's, so a comparison against a
+    trial's published MAP would otherwise be a comparison between sites. The
+    substitution is validated -- at NU, where both exist, DBP + (SBP-DBP)/3
+    reproduces the charted value at r = 0.995 with a median difference of
+    0.00, because that is how NU computes it.
+    """
+    onset = pl.col("cs_onset_dttm")
+    window = cohort.lazy().select(
+        "hospitalization_id",
+        "cs_onset_dttm",
+        win_start=onset - pl.duration(hours=onset_hours),
+        win_end=onset + pl.duration(hours=max(onset_hours, achieved_hours)),
+    )
+    paired = (
+        scan(data_dir, "clif_vitals", dttm_cols=("recorded_dttm",))
+        .filter(
+            pl.col("vital_category").is_in(
+                ["sbp", "dbp", "map", "heart_rate", "temp_c"]
+            )
+        )
+        .join(window, on="hospitalization_id", how="inner")
+        .filter(pl.col("recorded_dttm").is_between(pl.col("win_start"), pl.col("win_end")))
+        .select(
+            "hospitalization_id", "cs_onset_dttm", "recorded_dttm",
+            "vital_category", "vital_value",
+        )
+        .collect()
+    )
+    if not paired.height:
+        return pl.DataFrame(schema={"hospitalization_id": pl.String})
+    wide = paired.pivot(
+        on="vital_category",
+        index=["hospitalization_id", "cs_onset_dttm", "recorded_dttm"],
+        values="vital_value",
+        aggregate_function="median",
+    )
+    for name in ("sbp", "dbp", "map", "heart_rate", "temp_c"):
+        if name not in wide.columns:
+            wide = wide.with_columns(pl.lit(None, dtype=pl.Float64).alias(name))
+    wide = wide.with_columns(
+        map_best=pl.coalesce(
+            pl.when(pl.col("map").is_between(20.0, 200.0)).then(pl.col("map")),
+            pl.when(
+                pl.col("sbp").is_between(20.0, 300.0)
+                & pl.col("dbp").is_between(5.0, 200.0)
+                & (pl.col("sbp") > pl.col("dbp"))
+            ).then(pl.col("dbp") + (pl.col("sbp") - pl.col("dbp")) / 3.0),
+        ),
+        heart_rate_ok=pl.when(
+            pl.col("heart_rate").is_between(20.0, 250.0)
+        ).then(pl.col("heart_rate")),
+        # 30-43 C: temp_c carries unconverted Fahrenheit readings at these
+        # sites, the same artefact the phenotype module guards against
+        temp_ok=pl.when(pl.col("temp_c").is_between(30.0, 43.0)).then(
+            pl.col("temp_c")
+        ),
+    ).drop_nulls("map_best")
+    achieved = (
+        wide.filter(
+            pl.col("recorded_dttm").is_between(
+                onset, onset + pl.duration(hours=achieved_hours)
+            )
+        )
+        .group_by("hospitalization_id")
+        .agg(map_achieved=pl.col("map_best").median())
+    )
+    at_onset = (
+        wide.filter(pl.col("recorded_dttm") <= onset + pl.duration(hours=onset_hours))
+        .sort(["hospitalization_id", "map_best", "recorded_dttm"])
+        .group_by("hospitalization_id", maintain_order=True)
+        .agg(
+            map_at_onset=pl.col("map_best").first(),
+            heart_rate_at_onset=pl.col("heart_rate_ok").first(),
+            # the diastolic reading at that same instant, which ECLS-SHOCK
+            # reports alongside the systolic
+            dbp_at_onset=pl.col("dbp").first(),
+            temp_at_onset=pl.col("temp_ok").first(),
+        )
+    )
+    return at_onset.join(achieved, on="hospitalization_id", how="full", coalesce=True)
 
 
 def attach_features(data_dir, cohort: pl.DataFrame, cfg, logger) -> pl.DataFrame:
@@ -210,93 +311,9 @@ def attach_features(data_dir, cohort: pl.DataFrame, cfg, logger) -> pl.DataFrame
     cohort = cohort.join(sbp, on="hospitalization_id", how="left", validate="1:1")
 
     # ----------------------------------------- MAP and heart rate at onset
-    # MAP is derived from SBP/DBP wherever a measured value is missing or
-    # implausible. It has to be: `map` is charted for 99.9% of NU
-    # hospitalizations and only 15.1% of UCMC's, so a comparison against a
-    # trial's published MAP would otherwise be a comparison between sites. The
-    # substitution is validated -- at NU, where both exist, DBP + (SBP-DBP)/3
-    # reproduces the charted value at r = 0.995 with a median difference of
-    # 0.00, because that is how NU computes it.
-    paired = (
-        scan(data_dir, "clif_vitals", dttm_cols=("recorded_dttm",))
-        .filter(
-            pl.col("vital_category").is_in(
-                ["sbp", "dbp", "map", "heart_rate", "temp_c"]
-            )
-        )
-        .join(window, on="hospitalization_id", how="inner")
-        .filter(pl.col("recorded_dttm").is_between(pl.col("win_start"), pl.col("win_end")))
-        .select("hospitalization_id", "recorded_dttm", "vital_category", "vital_value")
-        .collect()
+    cohort = cohort.join(
+        onset_vitals(data_dir, cohort), on="hospitalization_id", how="left", validate="1:1"
     )
-    if paired.height:
-        wide = paired.pivot(
-            on="vital_category",
-            index=["hospitalization_id", "recorded_dttm"],
-            values="vital_value",
-            aggregate_function="median",
-        )
-        for name in ("sbp", "dbp", "map", "heart_rate", "temp_c"):
-            if name not in wide.columns:
-                wide = wide.with_columns(pl.lit(None, dtype=pl.Float64).alias(name))
-        wide = wide.with_columns(
-            map_best=pl.coalesce(
-                pl.when(pl.col("map").is_between(20.0, 200.0)).then(pl.col("map")),
-                pl.when(
-                    pl.col("sbp").is_between(20.0, 300.0)
-                    & pl.col("dbp").is_between(5.0, 200.0)
-                    & (pl.col("sbp") > pl.col("dbp"))
-                ).then(pl.col("dbp") + (pl.col("sbp") - pl.col("dbp")) / 3.0),
-            ),
-            heart_rate_ok=pl.when(
-                pl.col("heart_rate").is_between(20.0, 250.0)
-            ).then(pl.col("heart_rate")),
-            # 30-43 C: temp_c carries unconverted Fahrenheit readings at these
-            # sites, the same artefact the phenotype module guards against
-            temp_ok=pl.when(pl.col("temp_c").is_between(30.0, 43.0)).then(
-                pl.col("temp_c")
-            ),
-        )
-        # the lowest MAP and the heart rate at that same instant, which is what
-        # a baseline table records: the state the clinician was looking at
-        # The median MAP over the 24 h *after* onset, which is what a
-        # MAP-target recommendation is about: the pressure achieved and held,
-        # not the nadir that defined the shock. Using the nadir put
-        # SEPSISPAM concordance at 11.9%, which only said that a shock
-        # patient's worst pressure is below 65 -- true of nearly all of them
-        # and not a statement about treatment.
-        achieved = (
-            wide.drop_nulls("map_best")
-            .join(
-                cohort.select("hospitalization_id", "cs_onset_dttm"),
-                on="hospitalization_id",
-                how="inner",
-            )
-            .filter(
-                pl.col("recorded_dttm").is_between(
-                    pl.col("cs_onset_dttm"),
-                    pl.col("cs_onset_dttm") + pl.duration(hours=24),
-                )
-            )
-            .group_by("hospitalization_id")
-            .agg(map_achieved=pl.col("map_best").median())
-        )
-        at_onset = (
-            wide.drop_nulls("map_best")
-            .sort(["hospitalization_id", "map_best"])
-            .group_by("hospitalization_id")
-            .agg(
-                map_at_onset=pl.col("map_best").first(),
-                heart_rate_at_onset=pl.col("heart_rate_ok").first(),
-                # the diastolic reading at that same instant, which ECLS-SHOCK
-                # reports alongside the systolic
-                dbp_at_onset=pl.col("dbp").first(),
-                temp_at_onset=pl.col("temp_ok").first(),
-            )
-        )
-        cohort = cohort.join(
-            at_onset, on="hospitalization_id", how="left", validate="1:1"
-        ).join(achieved, on="hospitalization_id", how="left", validate="1:1")
     for name in (
         "map_at_onset",
         "heart_rate_at_onset",
@@ -545,7 +562,7 @@ def attach_features(data_dir, cohort: pl.DataFrame, cfg, logger) -> pl.DataFrame
         cohort = cohort.with_columns(imv_before_onset=pl.lit(False))
     cohort = cohort.with_columns(
         imv_before_onset=pl.col("imv_before_onset").fill_null(False),
-        male=pl.col("sex_category") == "Male",
+        male=ci_in("sex_category", ["Male"]),
     )
 
     logger.info(
@@ -1422,7 +1439,7 @@ def compare_to_published(frame: pl.DataFrame, trials, logger) -> pl.DataFrame:
         published = trial.published
         ours = {
             "age": part["age_at_admission"].median() if part.height else None,
-            "pct_female": (part["sex_category"] == "Female").mean()
+            "pct_female": part.select(ci_in("sex_category", ["Female"]).mean()).item()
             if part.height
             else None,
             "lactate": part["lactate"].median() if part.height else None,
@@ -2127,6 +2144,9 @@ def assign_guideline(
     for trial in reversed(specificity):
         inside = pl.col(f"elig_{trial.key}") & pl.col(f"inside_t1_{trial.key}")
         assigned = pl.when(inside).then(pl.lit(trial.label)).otherwise(assigned)
+        # the fit has to move with the assignment, or a patient reassigned to
+        # a trial they sit inside keeps the "criteria only" of the one they left
+        fit = pl.when(inside).then(pl.lit("criteria and population")).otherwise(fit)
 
     out = frame.with_columns(assigned_guideline=assigned, guideline_fit=fit)
 

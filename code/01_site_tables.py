@@ -58,7 +58,12 @@ import polars as pl
 from omegaconf import OmegaConf
 
 from clifcs import ANCHORS, get_logger, load_cohort_cfg, load_paths
-from clifcs.clif import HOSPITALIZATION_LEVEL, PATIENT_LEVEL
+from clifcs.clif import (
+    HOSPITALIZATION_LEVEL,
+    PATIENT_LEVEL,
+    duckdb_timezone,
+    naive_datetime_columns,
+)
 from clifcs.cohort import (
     FilterLedger,
     attach_demographics,
@@ -68,6 +73,7 @@ from clifcs.cohort import (
     hemodynamic_criterion,
 )
 from clifcs.config import CONFIG_HOME
+from clifcs.export.writer import put_model, put_table
 from clifcs.onset_winnower import OnsetWinnower
 from clifcs.outcomes import add_outcomes
 from clifcs.shock_type import shock_type_flags
@@ -166,8 +172,8 @@ def preflight(paths, sites, logger) -> bool:
     """
     check this machine can do the run, before anything expensive starts
 
-    Reads configuration and lists directories. Opens no data file, so it is
-    safe anywhere and takes a second. Returns True if the run can proceed.
+    Reads configuration, lists directories and reads table schemas, never
+    rows, so it is safe anywhere and takes about a second. Returns True if the run can proceed.
 
     Runs automatically at the start of every invocation, and on its own with
     `--check`. Automatically, because the two failures it catches -- a path
@@ -220,6 +226,15 @@ def preflight(paths, sites, logger) -> bool:
         extra = sorted(present - set(REQUIRED_TABLES))
         if extra:
             logger.info(f"         also present, never read: {', '.join(extra)}")
+        # a warning, not a failure: a site may store UTC without a zone, as
+        # UCMC's respiratory_support does
+        for table in sorted(present & set(REQUIRED_TABLES)):
+            naive = naive_datetime_columns(directory, table)
+            if naive:
+                logger.warning(
+                    f"         {table}: {', '.join(naive)} stored without a timezone; "
+                    "read as UTC. If these are local times, convert them to UTC first."
+                )
 
     logger.info("where this run will write")
     for label, target in (
@@ -466,9 +481,15 @@ def stage_cohort(
     phenotype_model=None,
     sepsis_cfg=None,
     sepsis_models: dict | None = None,
+    min_cell: int = 11,
 ) -> pl.DataFrame:
     """identify cardiogenic shock at each site and assemble the cohort table"""
     paths.cohort_home.mkdir(parents=True, exist_ok=True)
+    # Aggregate tables are written once, straight into each site's upload
+    # folder. A new cohort starts that folder afresh, so tables from an
+    # earlier cohort cannot ship alongside this one.
+    for site in paths.sites:
+        shutil.rmtree(paths.upload_home(site), ignore_errors=True)
     ledger = FilterLedger()
     per_site = []
 
@@ -517,14 +538,13 @@ def stage_cohort(
         cohort, cfg, logger, model_base=phenotype_model
     )
     for column, model in models.items():
-        save_phenotype_model(
-            variant_model_path(
-                paths.cohort_home / "phenotype_model.json", column
-            ),
-            **model,
+        put_model(
+            paths, paths.sites,
+            variant_model_path(pathlib.Path("phenotype_model.json"), column).name,
+            lambda path, model=model: save_phenotype_model(path, **model),
         )
     for column, table in centroid_tables.items():
-        table.write_csv(paths.cohort_home / f"phenotype_centroids_{column}.csv")
+        put_table(paths, paths.sites, f"phenotype_centroids_{column}.csv", table, min_cell, logger)
     centroids = centroid_tables.get("cs_phenotype")
     phenotype_summary = summarize(cohort, logger)
     shock_type_summary = summarize_shock_type(cohort, logger)
@@ -536,10 +556,11 @@ def stage_cohort(
         paths, cohort, sepsis_cfg, logger, models=sepsis_models
     )
     for name, table in sepsis_tables.items():
-        table.write_csv(paths.cohort_home / f"{name}.csv")
+        put_table(paths, paths.sites, f"{name}.csv", table, min_cell, logger)
     for scheme, model in sepsis_fitted.items():
-        sepsis_phenotype.save_model(
-            paths.cohort_home / f"{scheme}_model.json", model, scheme
+        put_model(
+            paths, paths.sites, f"{scheme}_model.json",
+            lambda path, model=model, scheme=scheme: sepsis_phenotype.save_model(path, model, scheme),
         )
     # A scheme that was APPLIED leaves no centroids and no model, so anything
     # of that shape already in the directory is from an earlier run that
@@ -573,11 +594,11 @@ def stage_cohort(
     paths.cohort_home.mkdir(parents=True, exist_ok=True)
     cohort.write_parquet(paths.cohort_home / "cohort.parquet")
     ledger_frame = ledger.to_frame()
-    ledger_frame.write_csv(paths.cohort_home / "filter_ledger.csv")
+    put_table(paths, paths.sites, "filter_ledger.csv", ledger_frame, min_cell, logger)
     if centroids is not None:
-        centroids.write_csv(paths.cohort_home / "phenotype_centroids.csv")
-    phenotype_summary.write_csv(paths.cohort_home / "phenotype_summary.csv")
-    shock_type_summary.write_csv(paths.cohort_home / "shock_type_summary.csv")
+        put_table(paths, paths.sites, "phenotype_centroids.csv", centroids, min_cell, logger)
+    put_table(paths, paths.sites, "phenotype_summary.csv", phenotype_summary, min_cell, logger)
+    put_table(paths, paths.sites, "shock_type_summary.csv", shock_type_summary, min_cell, logger)
 
     # the onset table the onset-anchored winnower reads
     cohort.select("hospitalization_id", "patient_id", "site", "cs_onset_dttm").write_parquet(
@@ -662,6 +683,24 @@ def stage_subset(paths, cohort: pl.DataFrame, sites, logger, force: bool) -> Non
 # ============================================================ stage: derive
 
 
+def sofa_by_hospitalization(wide, scores):
+    """
+    one row per encounter block: its last hospitalization and event time, with
+    that block's own SOFA row from clifpy
+
+    A merge on the `encounter_block` column. The previous `.join(on=...)`
+    matched the grouped block numbers against `scores`' row positions, so
+    every patient carried another block's score and `validate="1:1"` still
+    passed.
+    """
+    per_block = (
+        wide.sort_values("event_time")
+        .groupby("encounter_block", as_index=False)
+        .agg({"event_time": "max", "hospitalization_id": "last"})
+    )
+    return per_block.merge(scores, on="encounter_block", how="inner", validate="1:1")
+
+
 def stage_derive(paths, sites, logger, force: bool) -> None:
     """
     build the derived tables cocoa's collation.yaml expects
@@ -734,11 +773,10 @@ def stage_derive(paths, sites, logger, force: bool) -> None:
             override=True,
         )
         sofa.compute_sofa_scores()
-        sofa_df = (
-            sofa.wide_df.sort_values("event_time")
-            .groupby("encounter_block")
-            .agg({"event_time": "max", "hospitalization_id": "last"})
-            .join(sofa.sofa_df, how="inner", on="encounter_block", validate="1:1")
+        sofa_df = sofa_by_hospitalization(sofa.wide_df, sofa.sofa_df)
+        logger.info(
+            f"[{site}] SOFA rows for {len(sofa_df)} of "
+            f"{sofa.wide_df['encounter_block'].nunique()} encounter blocks"
         )
         sofa_df.to_parquet(data_dir / "clif_sofa.parquet")
         logger.info(f"[{site}] derived tables written to {data_dir}")
@@ -985,13 +1023,13 @@ def stage_tokencounts(paths, sites, logger, min_cell: int) -> None:
                     .otherwise(pl.col("total_occurrences")),
                 ).with_columns(prevalence=pl.col("n_patients") / pl.col("n_cohort"))
                 suppressed = int(table.select(pl.col("n_patients").is_null().sum()).item())
-                contract.validate_counts_frame(table, name, min_cell)
-                out = paths.cohort_home / f"{name}_{site}_anchor-{anchor}.csv"
-                table.sort(
-                    "total_occurrences", descending=True, nulls_last=True
-                ).write_csv(out)
+                put_table(
+                    paths, [site], f"{name}_anchor-{anchor}.csv",
+                    table.sort("total_occurrences", descending=True, nulls_last=True),
+                    min_cell, logger, suppressed=True,
+                )
                 logger.info(
-                    f"[{site}/{anchor}] {out.name}: {table.height} rows, "
+                    f"[{site}/{anchor}] {name}: {table.height} rows, "
                     f"{suppressed} suppressed below n={min_cell}"
                 )
 
@@ -999,7 +1037,7 @@ def stage_tokencounts(paths, sites, logger, min_cell: int) -> None:
 # ======================================================== stage: baseline
 
 
-def stage_phenotypes(paths, logger) -> None:
+def stage_phenotypes(paths, logger, min_cell: int) -> None:
     """
     per-denominator Zweck summaries, from the cohort table alone
 
@@ -1034,21 +1072,18 @@ def stage_phenotypes(paths, logger) -> None:
         summary = summarize(cohort, logger, column=column)
         if summary.is_empty():
             continue
-        summary.write_csv(paths.cohort_home / f"phenotype_summary_{column}.csv")
+        put_table(paths, paths.sites, f"phenotype_summary_{column}.csv", summary, min_cell, logger)
 
     # the bare name keeps writing phenotype_summary.csv too, so anything still
     # reading the old filename is not silently left with nothing
     if "cs_phenotype" in cohort.columns:
         base = summarize(cohort, logger, column="cs_phenotype")
         if not base.is_empty():
-            base.write_csv(paths.cohort_home / "phenotype_summary.csv")
+            put_table(paths, paths.sites, "phenotype_summary.csv", base, min_cell, logger)
 
     agreement = variant_agreement(cohort, logger)
     if not agreement.is_empty():
-        agreement.write_csv(paths.cohort_home / "phenotype_variant_agreement.csv")
-        logger.info(
-            f"wrote {paths.cohort_home / 'phenotype_variant_agreement.csv'}"
-        )
+        put_table(paths, paths.sites, "phenotype_variant_agreement.csv", agreement, min_cell, logger)
 
 
 def stage_baseline(paths, sites, logger, min_cell: int) -> None:
@@ -1082,11 +1117,10 @@ def stage_baseline(paths, sites, logger, min_cell: int) -> None:
         if not table.height:
             logger.warning(f"[{site}] baseline table is empty")
             continue
-        out = paths.cohort_home / f"baseline_by_shock_type_{site}.csv"
-        table.write_csv(out)
+        put_table(paths, [site], "baseline_by_shock_type.csv", table, min_cell, logger, suppressed=True)
         blanked = int(table.select(pl.col("n").is_null().sum()).item())
         logger.info(
-            f"  wrote {out.name}: {table.height} rows across "
+            f"  baseline_by_shock_type.csv: {table.height} rows across "
             f"{table['shock_type'].n_unique()} shock types"
             + (f", {blanked} suppressed below n={min_cell}" if blanked else "")
         )
@@ -1267,15 +1301,16 @@ def stage_trials(paths, sites, logger, min_cell: int) -> None:
                 paths, part, trials, site, anchor, logger, min_cell
             )
             for name, table in tables.items():
-                out = paths.cohort_home / f"{name}_{site}_anchor-{anchor}.csv"
-                table.write_csv(out)
-                logger.info(f"  wrote {out.name}")
+                put_table(
+                    paths, [site], f"{name}_anchor-{anchor}.csv", table, min_cell,
+                    logger, folder="trials", suppressed=True,
+                )
 
     # the published criteria and what can be applied: literature only, no
     # patient data, identical at every site
     criteria = criteria_frame(trial_cfg)
     if criteria.height:
-        criteria.write_csv(paths.cohort_home / "trial_criteria.csv")
+        put_table(paths, sites, "trial_criteria.csv", criteria, min_cell, logger, folder="trials", suppressed=True)
 
 
 def stage_export(paths, sites, logger, min_cell: int) -> None:
@@ -1420,6 +1455,13 @@ def main() -> None:
     cfg = load_cohort_cfg()
     sepsis_cfg = OmegaConf.load(CONFIG_HOME / "phenotypes_sepsis.yaml")
     logger = get_logger("01_site_tables", paths.log_home / "01_site_tables.log")
+    if duckdb_timezone() != "UTC":
+        # clifcs pins it on import; clifpy's dose conversion reads timestamps
+        # through this connection, so anything else shifts medication times
+        raise SystemExit(
+            f"DuckDB's session timezone is {duckdb_timezone()!r}, not UTC; "
+            "something reset it after clifcs was imported."
+        )
 
     if args.site and args.site not in paths.sites:
         parser.error(
@@ -1598,6 +1640,7 @@ def main() -> None:
                     stage_cohort,
                     paths, cfg, logger, args.phenotype_model,
                     sepsis_cfg=sepsis_cfg, sepsis_models=sepsis_models,
+                    min_cell=args.min_cell,
                 )
             elif stage == "subset":
                 if cohort is None:
@@ -1630,7 +1673,7 @@ def main() -> None:
                           stage_tokencounts, paths, sites, logger, args.min_cell)
             elif stage == "phenotypes":
                 run_stage(stage, position, total, logger,
-                          stage_phenotypes, paths, logger)
+                          stage_phenotypes, paths, logger, args.min_cell)
             elif stage == "baseline":
                 run_stage(stage, position, total, logger,
                           stage_baseline, paths, sites, logger, args.min_cell)

@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import polars as pl
 
+from clifcs.clif import ci_in
 from clifcs.export import suppress
 from clifcs.trials import (
     VARIABLE_CONFIDENCE,
@@ -411,7 +412,7 @@ def coverage_table(
             "mortality": pl.col("in_hospital_mortality").mean(),
             "median_icu_los_days": pl.col("icu_los_days").median(),
             "median_age": pl.col("age_at_admission").median(),
-            "share_female": (pl.col("sex_category") == "Female").mean(),
+            "share_female": ci_in("sex_category", ["Female"]).mean(),
         }
         # the in-type denominator, reported rather than assumed: a patient whose
         # shock is coded `none coded` matches no trial's literature at all, and

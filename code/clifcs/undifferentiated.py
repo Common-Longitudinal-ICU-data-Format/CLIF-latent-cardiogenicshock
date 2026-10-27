@@ -60,7 +60,7 @@ from sklearn.metrics import brier_score_loss, roc_auc_score
 from sklearn.model_selection import StratifiedGroupKFold
 from sklearn.preprocessing import StandardScaler
 
-from clifcs.clif import has_table, scan
+from clifcs.clif import ci_in, has_table, scan
 
 #: the label `shock_type` gives a patient carrying no shock code
 UNDIFFERENTIATED = "none coded"
@@ -118,7 +118,7 @@ def describe_groups(cohort: pl.DataFrame, logger) -> pl.DataFrame:
         pl.col("age_at_admission").median().alias("median_age"),
         pl.col("lactate").median().alias("median_lactate"),
         pl.col("icu_los_days").median().alias("median_icu_los"),
-        (pl.col("sex_category") == "Female").mean().alias("pct_female"),
+        ci_in("sex_category", ["Female"]).mean().alias("pct_female"),
     ]
     if "sofa_total" in cohort.columns:
         severity.append(pl.col("sofa_total").median().alias("median_sofa"))
