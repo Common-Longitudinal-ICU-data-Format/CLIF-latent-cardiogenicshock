@@ -43,6 +43,7 @@ on, and the command to resume from there.
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import pathlib
 import platform
@@ -346,6 +347,57 @@ def _origin(cause: BaseException) -> str:
     return f"{rel.as_posix()}:{frame.lineno} in {frame.name}()"
 
 
+#: one row per stage this invocation attempted, in the order it attempted them
+#:
+#: Written out as `run_stages.csv` and carried in the bundle, which is the only
+#: part of `output/logs/01_site_tables.log` that can travel. The log itself
+#: cannot: it prints the attrition ledger and the per-phenotype counts
+#: unsuppressed, and it names `data_dir`, `output_home` and `scratch_home` as
+#: absolute paths on the site's filesystem. This carries a stage name, a status
+#: and a duration -- no counts, no paths, no free text -- and it answers the
+#: question the coordinator actually has when a bundle looks thin, which is
+#: whether the run finished.
+STAGE_LEDGER: list[dict] = []
+
+
+def write_ledger(paths) -> None:
+    """
+    the stage ledger as it stands, rewritten after every stage
+
+    Rewritten after each stage rather than once at the end, so a run that dies
+    in `derive` still leaves a ledger ending at the stage that failed -- the
+    same argument as writing every table as it goes.
+
+    Merged with what is already there rather than replacing it, because a
+    stage can be rerun on its own. `--stage export` knows nothing about the
+    `cohort` run from two days ago, and overwriting would turn the ledger into
+    a record of the last *invocation* when what it has to be is a record of the
+    last attempt at each stage -- which is what `output/cohort/` itself is.
+    """
+    if not STAGE_LEDGER:
+        return
+    attempted = {row["stage"] for row in STAGE_LEDGER}
+    rows = list(STAGE_LEDGER)
+
+    out = paths.cohort_home / "run_stages.csv"
+    if out.is_file():
+        try:
+            previous = pl.read_csv(out)
+        except Exception:
+            previous = None  # unreadable, so there is nothing to preserve
+        if previous is not None and "stage" in previous.columns:
+            rows += [
+                row
+                for row in previous.iter_rows(named=True)
+                if row["stage"] not in attempted
+            ]
+
+    order = {stage: i for i, stage in enumerate(STAGES)}
+    rows.sort(key=lambda row: order.get(row["stage"], len(order)))
+    paths.cohort_home.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(rows).write_csv(out)
+
+
 def run_stage(name, position, total, logger, fn, *args, **kwargs):
     """
     run one stage, announcing it and timing it, and label any failure with it
@@ -357,10 +409,25 @@ def run_stage(name, position, total, logger, fn, *args, **kwargs):
     """
     logger.info(f"=== [{position}/{total}] {name}: {STAGE_PURPOSE.get(name, '')}")
     started = time.monotonic()
+
+    def record(status: str) -> None:
+        STAGE_LEDGER.append(
+            {
+                "stage": name,
+                "status": status,
+                "seconds": round(time.monotonic() - started, 1),
+                "finished_utc": dt.datetime.now(dt.timezone.utc).isoformat(
+                    timespec="seconds"
+                ),
+            }
+        )
+
     try:
         result = fn(*args, **kwargs)
     except Exception as cause:
+        record("failed")
         raise StageFailed(name, cause) from cause
+    record("ok")
     logger.info(
         f"=== [{position}/{total}] {name} finished in "
         f"{time.monotonic() - started:,.0f}s"
@@ -482,12 +549,19 @@ def stage_cohort(
     # exactly that, and a derivation site copies `<scheme>_model.json` into
     # models/. Left behind, they describe a fit that no longer governs any
     # label in cohort.parquet.
+    #
+    # `seymour_agreement.csv` goes with them. It cross-tabulates the local
+    # refit against the published Table 2 profiles, so it only exists on the
+    # refit branch, and its cells are small enough to fall under `min_cell` --
+    # which is why it is not in the export contract and must not be left where
+    # a reader could take it for a shippable table.
     for scheme in ("seymour", "bhavani"):
         if scheme in sepsis_fitted:
             continue
         for stale in (
             paths.cohort_home / f"{scheme}_centroids.csv",
             paths.cohort_home / f"{scheme}_model.json",
+            paths.cohort_home / f"{scheme}_agreement.csv",
         ):
             if stale.is_file():
                 stale.unlink()
@@ -1225,9 +1299,11 @@ def stage_export(paths, sites, logger, min_cell: int) -> None:
 
     for site in sites:
         bundle = paths.upload_home(site)
-        if bundle.exists():
-            shutil.rmtree(bundle)
         logger.info(f"=== {site} -> {bundle}")
+        # Only what tier 1 owns. A recursive delete stood here and took
+        # patient/, purity/ and counts/token_coverage.csv with it, so
+        # re-exporting to pick up one table destroyed the embeddings.
+        writer.clear_tier1(bundle, logger)
         writer.write_aggregate(
             paths, site, bundle, salt, min_cell, embedding_dim, logger
         )
@@ -1564,7 +1640,14 @@ def main() -> None:
             elif stage == "export":
                 run_stage(stage, position, total, logger,
                           stage_export, paths, sites, logger, args.min_cell)
+            # After the stage, so the ledger on disk never claims a stage
+            # finished that did not. The consequence is that the copy `export`
+            # puts in the bundle carries every stage up to but not including
+            # `export` itself -- which is legible, since a bundle that exists
+            # is evidence that export ran.
+            write_ledger(paths)
     except StageFailed as failure:
+        write_ledger(paths)
         report_failure(failure, logger)
         raise SystemExit(1) from failure
 
