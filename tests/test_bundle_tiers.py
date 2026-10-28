@@ -215,3 +215,92 @@ def test_ledger_merges_a_file_written_before_peak_memory_was_recorded(
     assert ledger["stage"].to_list() == ["cohort", "export"]
     assert ledger.filter(pl.col("stage") == "cohort")["peak_rss_mb"][0] is None
     assert ledger.filter(pl.col("stage") == "export")["peak_rss_mb"][0] == 812.5
+
+
+# ----------------------------------- export must not clear what it no longer
+# ----------------------------------- rewrites
+
+
+class BundlePaths(FakePaths):
+    """enough of Paths for `write_aggregate` to reach its own guard
+
+    `has_tokenizer` is false so the call does not need a real tokenizer.yaml:
+    the check under test sits before that branch.
+    """
+
+    def __init__(self, home: pathlib.Path, bundle: pathlib.Path):
+        super().__init__(home)
+        self._bundle = bundle
+        self.has_tokenizer = False
+
+    def upload_home(self, site: str) -> pathlib.Path:
+        return self._bundle
+
+
+def test_export_does_not_clear_the_tables_it_no_longer_writes():
+    """
+    THE REGRESSION, and the reason the five tests above could not catch it.
+
+    They check `clear_tier1` in isolation: it deletes counts/*.csv and
+    trials/*.csv and spares tier 2. All true, and all correct while export
+    REGENERATED those tables from output/cohort/. Once `put_table` began
+    writing the only copy straight into the bundle as each stage produced it,
+    and `write_aggregate` merely re-checked what was there, the same call
+    became a plain delete: export emptied counts/ and trials/, `check_bundle`
+    globbed two empty directories and passed, and the run reported success
+    with a three-file bundle.
+
+    Asserted against the source because the SEQUENCE was wrong, not the
+    function -- `clear_tier1` is still correct, and still tested above.
+    """
+    source = (ROOT / "code" / "01_site_tables.py").read_text(encoding="utf-8")
+    export = source.split("def stage_export(")[1].split("\ndef ")[0]
+    # comments stripped: the fix leaves a comment saying what used to stand
+    # here and naming the function, so a bare substring test matches its own
+    # explanation and fails on the fixed code
+    code = "\n".join(
+        line for line in export.splitlines() if not line.lstrip().startswith("#")
+    )
+
+    assert "clear_tier1" not in code, (
+        "stage_export clears tier-1 tables again. Nothing in export rewrites "
+        "them -- put_table authors them during the earlier stages -- so "
+        "clearing them here empties the bundle."
+    )
+
+
+def test_a_bundle_with_no_aggregate_tables_is_refused(tmp_path, logger):
+    """
+    the tripwire that makes the failure above loud instead of silent
+
+    `check_bundle` validates the files it finds and has no notion of what
+    ought to be there, so an emptied counts/ is indistinguishable from a clean
+    one. `filter_ledger.csv` is written for every site unconditionally, so an
+    empty counts/ means the tables are not here.
+    """
+    from clifcs.export import contract
+
+    bundle = make_bundle(tmp_path)
+    for stale in (bundle / "counts").glob("*.csv"):
+        stale.unlink()
+
+    with pytest.raises(contract.ContractViolation, match="nothing to send"):
+        writer.write_aggregate(
+            BundlePaths(tmp_path, bundle), "SITE", bundle, "salt", 11, 0, logger
+        )
+
+
+def test_a_populated_bundle_passes_the_tripwire(tmp_path, logger):
+    """
+    the guard must not fire on the case it exists to let through -- a bundle
+    whose counts/ holds tables gets past it and on to the rest of the export
+    """
+    from clifcs.export import contract
+
+    bundle = make_bundle(tmp_path)
+    try:
+        writer.write_aggregate(
+            BundlePaths(tmp_path, bundle), "SITE", bundle, "salt", 11, 0, logger
+        )
+    except contract.ContractViolation as exc:
+        assert "nothing to send" not in str(exc), "the tripwire fired on a real bundle"

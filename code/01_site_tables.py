@@ -1562,10 +1562,20 @@ def stage_export(paths, sites, logger, min_cell: int) -> None:
     for site in sites:
         bundle = paths.upload_home(site)
         logger.info(f"=== {site} -> {bundle}")
-        # Only what tier 1 owns. A recursive delete stood here and took
-        # patient/, purity/ and counts/token_coverage.csv with it, so
-        # re-exporting to pick up one table destroyed the embeddings.
-        writer.clear_tier1(bundle, logger)
+        # NOTHING IS CLEARED HERE. `writer.clear_tier1(bundle, logger)`
+        # stood here, and it was correct only while export regenerated the
+        # aggregate tables from output/cohort/. It no longer does: `put_table`
+        # writes the single copy straight into this folder as each stage
+        # produces it, and `write_aggregate` re-checks what is already here.
+        # Clearing tables nothing rewrites emptied counts/ and trials/, and
+        # `check_bundle` -- which validates what it finds, having no notion of
+        # what ought to be there -- passed over the empty directories without
+        # complaint. The run reported success and the bundle held three files.
+        #
+        # A fresh start for the folder belongs where the cohort changes, and
+        # `stage_cohort` already does it: a new cohort invalidates every table
+        # here, tier 2's embeddings included, which is why that one is a
+        # recursive delete and this one is nothing at all.
         writer.write_aggregate(
             paths, site, bundle, salt, min_cell, embedding_dim, logger
         )

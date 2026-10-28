@@ -570,6 +570,21 @@ def write_aggregate(
     logger.info(" checking the tables already written here")
     check_bundle(paths, site, min_cell, logger)
 
+    # A BUNDLE WITH NO AGGREGATE TABLES IS A FAILED RUN, NOT A THIN ONE.
+    # `check_bundle` validates the files it finds and cannot tell an empty
+    # counts/ from a suppressed one, so an export that destroyed or never
+    # received the tables looked identical to a clean one. `filter_ledger.csv`
+    # is written by `stage_cohort` for every site unconditionally, so its
+    # absence means the tables are not here -- either the stages that author
+    # them have not run, or something removed them between then and now.
+    if not sorted(bundle.glob("counts/*.csv")):
+        raise contract.ContractViolation(
+            f"{bundle.name} holds no counts/*.csv, so there is nothing to "
+            "send. The aggregate tables are written into this folder by the "
+            "earlier stages, not by export -- run the cohort stage onward, "
+            "and do not clear the folder at export time."
+        )
+
     # the legend, from the tokenizer alone -- no patient data, and identical at
     # every site, so it travels for the reader's convenience. Absent where the
     # site holds no tokenizer, in which case the bundle carries no token tables
