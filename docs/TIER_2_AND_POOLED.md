@@ -147,8 +147,11 @@ where several contributing sites share a filesystem:
 
 ```bash
 python code/05_site_correction.py --anchor onset --save-map
-sbatch hpc/06_trajectories.sbatch
+python code/09_trajectories.py --anchor onset
 ```
+
+On a cluster, wrap that second line in whatever your scheduler wants: it is the
+only step here that needs a GPU, and it asks for one GPU and about 32 GB.
 
 It applies the affine map `05` fitted at the anchor to every grid point *before*
 projecting, then draws the flow for both readings of cardiogenic shock — the ICD

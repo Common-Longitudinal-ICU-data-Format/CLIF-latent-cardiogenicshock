@@ -177,12 +177,19 @@ def summarize(cohort: pl.DataFrame, logger) -> pl.DataFrame:
                 mortality=pl.col("in_hospital_mortality").mean(),
                 median_icu_los_days=pl.col("icu_los_days").median(),
             )
-            .with_columns(site=pl.lit(site), share=pl.col("n") / part.height)
+            .with_columns(
+                site=pl.lit(site),
+                # the denominator `share` is over, exported so the share can be
+                # checked rather than floating free of the table
+                n_total=pl.lit(part.height, dtype=pl.Int64),
+                share=pl.col("n") / part.height,
+            )
             .sort("shock_type")
         )
         rows.append(summary)
     out = pl.concat(rows).select(
-        "site", "shock_type", "n", "share", "mortality", "median_icu_los_days"
+        "site", "shock_type", "n", "n_total", "share", "mortality",
+        "median_icu_los_days",
     )
 
     logger.info("shock type from coded diagnoses (labelling only, not a filter):")

@@ -528,12 +528,15 @@ def section_cohort(paths, cfg, out: list) -> None:
                     )
                 )
                 .otherwise(
-                    pl.when(pl.col("share").is_null())
+                    # n_positive (share_positive%). `n_measured` used to hold
+                    # the positives; it is now the denominator, so rendering it
+                    # here would print the wrong number in the numerator slot.
+                    pl.when(pl.col("share_positive").is_null())
                     .then(pl.lit(""))
                     .otherwise(
-                        pl.col("n_measured").cast(pl.String)
+                        pl.col("n_positive").cast(pl.String)
                         + pl.lit(" (")
-                        + (pl.col("share") * 100).round(1).cast(pl.String)
+                        + (pl.col("share_positive") * 100).round(1).cast(pl.String)
                         + pl.lit("%)")
                     )
                 )
@@ -582,8 +585,12 @@ def section_cohort(paths, cfg, out: list) -> None:
         phenotype_tabs.append(("Seymour (sepsis)", table(
             pl.read_csv(seymour_file),
             {
-                "n": thousands, "n_NU": thousands, "n_UCMC": thousands,
-                "share": pct, "share_NU": pct, "share_UCMC": pct,
+                # share_<site> no longer travels -- it was a rate over a
+                # denominator this table does not carry. n_total is the
+                # denominator `share` is over.
+                "n": thousands, "n_total": thousands,
+                "n_NU": thousands, "n_UCMC": thousands, "n_RUSH": thousands,
+                "share": pct,
                 "mortality": pct, "median_icu_los_days": num(1),
             },
             key_column="seymour",
@@ -593,8 +600,12 @@ def section_cohort(paths, cfg, out: list) -> None:
         phenotype_tabs.append(("Bhavani (temperature)", table(
             pl.read_csv(bhavani_file),
             {
-                "n": thousands, "n_NU": thousands, "n_UCMC": thousands,
-                "share": pct, "share_NU": pct, "share_UCMC": pct,
+                # share_<site> no longer travels -- it was a rate over a
+                # denominator this table does not carry. n_total is the
+                # denominator `share` is over.
+                "n": thousands, "n_total": thousands,
+                "n_NU": thousands, "n_UCMC": thousands, "n_RUSH": thousands,
+                "share": pct,
                 "mortality": pct, "median_icu_los_days": num(1),
             },
             key_column="bhavani",
@@ -1075,7 +1086,14 @@ def trajectory_coverage(paths, logger=None) -> tuple[str, str]:
     # about, and an uncorrected run is the one a reader assumes unless told.
     home = paths.output_home / "patient_level_data" / "GEM-all"
     candidates = []
-    for subset in SUBSET_ORDER:
+    # The COHORT being rendered comes first. Without this the order was a
+    # fixed preference list headed by cardiogenic, so the septic report
+    # measured its own staleness against the cardiogenic grid and quoted the
+    # cardiogenic patient count in its sections 4-6 caveat.
+    order = ([COHORT] if COHORT else []) + [
+        s for s in SUBSET_ORDER if s != COHORT
+    ]
+    for subset in order:
         candidates.append(home / f"trajectory_projections_{subset}.parquet")
         candidates.extend(
             sorted(home.glob(f"trajectory_projections_{subset}_corrected-*.parquet"))
@@ -1972,11 +1990,18 @@ def section_longitudinal(paths, out: list) -> None:
     were a property of the projection would hide that.
     """
     homes = trajectory_homes(paths)
+    # A PATH THAT CANNOT EXIST, not None. Every use of this is
+    # `figure(septic_home / name)`, and figure() already returns "" for a
+    # missing file -- so an unresolvable directory should make the figures
+    # vanish, which is what it means. Defaulting to None instead turned each
+    # of those into `None / name`, and the cardiogenic report crashed on
+    # whichever one it reached first; three had already been guarded
+    # individually by the time this was traced to the default.
     septic_home = next(
         (info["home"] for info in homes.values()
          if info["subset"] == "septic"
          and info["correction"] == PREFERRED_CORRECTION),
-        None,
+        paths.output_home / "figures" / "__no_septic_projection__",
     )
     tables_home = paths.output_home / "tables" / "GEM-all"
     movement_file = tables_home / f"state_movement_{COHORT or 'septic'}.csv"
@@ -2131,7 +2156,7 @@ def section_longitudinal(paths, out: list) -> None:
         )
         out.append(tabs(character_tabs))
 
-    if septic_home is not None:
+    if septic_home.is_dir():
         panels = [
             ("Care state (per timepoint)",
              figure(septic_home / "trajectory_flow_care_state.png",
@@ -2209,6 +2234,13 @@ def section_longitudinal(paths, out: list) -> None:
     # each other. The circular graphs off the projection say the same thing
     # and can be read.
 
+    # Guarded on the projection directory, not on the factor graph above.
+    # These panels sat inside `if factor_dag:` -- an unrelated condition --
+    # and dereferenced septic_home without checking it, so every one of
+    # them vanished whenever the factor DAG was missing and the cohort
+    # reports crashed outright whenever the projection directory was not
+    # resolvable.
+    if septic_home.is_dir():
         state_views = [
             (label, figure(septic_home / f"trajectory_{tag}.png", note))
             for tag, label, note in (
@@ -2345,7 +2377,7 @@ def section_longitudinal(paths, out: list) -> None:
     )
     for index in range(1, 13):
         panes = []
-        if septic_home is not None:
+        if septic_home.is_dir():
             panes.append(
                 figure(septic_home / f"paths_over_growth_{index:02d}.png", "")
             )
@@ -2603,11 +2635,18 @@ def section_state_space(paths, out: list) -> None:
     together is the point.
     """
     homes = trajectory_homes(paths)
+    # A PATH THAT CANNOT EXIST, not None. Every use of this is
+    # `figure(septic_home / name)`, and figure() already returns "" for a
+    # missing file -- so an unresolvable directory should make the figures
+    # vanish, which is what it means. Defaulting to None instead turned each
+    # of those into `None / name`, and the cardiogenic report crashed on
+    # whichever one it reached first; three had already been guarded
+    # individually by the time this was traced to the default.
     septic_home = next(
         (info["home"] for info in homes.values()
          if info["subset"] == "septic"
          and info["correction"] == PREFERRED_CORRECTION),
-        None,
+        paths.output_home / "figures" / "__no_septic_projection__",
     )
     tables_home = paths.output_home / "tables" / "GEM-all"
     figures_home = paths.output_home / "figures" / "GEM-all"
@@ -2811,7 +2850,7 @@ def section_state_space(paths, out: list) -> None:
             key_column="cluster",
         ))
 
-    if septic_home is not None:
+    if septic_home.is_dir():
         overlays = [
             (label, figure(septic_home / f"trajectory_flow_overlay_{tag}.png", note))
             for tag, label, note in (
@@ -3017,7 +3056,788 @@ def section_state_space(paths, out: list) -> None:
             key_column="quadrant",
         ))
 
-    if septic_home is not None:
+    partition_file = tables_home / f"variance_partition_{COHORT or 'septic'}.csv"
+    if partition_file.is_file():
+        out.append('<h3>What each description contributes to the outcome</h3>')
+        out.append(
+            "<p>The sentence and the embedding are two readings of the same "
+            "48 hours, so the question is not which predicts death but how "
+            "much either one adds to the other. Three models are fitted "
+            "&mdash; sentence, embedding, both &mdash; and their shares "
+            "partitioned by commonality analysis.</p>"
+        )
+        out.append(callout(
+            "<b>The partition is taken on pseudo-R&sup2;, not AUC.</b> AUC "
+            "does not decompose additively, so unique and shared shares "
+            "computed from it would not sum to the total. McFadden's "
+            "pseudo-R&sup2; from the cross-validated log loss does, and the "
+            "AUC column is carried alongside for reading only.<br><br>"
+            "<b>Log stream length and site are in the sentence-side model, "
+            "not in a footnote.</b> The embedding's unique share is therefore "
+            "measured over and above documentation volume and hospital. "
+            "Without that, position in the projection explains "
+            "R&sup2;&nbsp;0.45 of log stream length, so part of what looked "
+            "like physiology would be chart density.<br><br>"
+            "<b>The pairing is not symmetric,</b> which is where the "
+            "text-and-image analogy stops. The sentence is a deterministic "
+            "function of a subset of what GEM already read: it consumed the "
+            "MAP values and the pressor doses, and the sentence is those same "
+            "facts thresholded. So 'can the embedding predict the sentence' "
+            "is near-trivially yes; the informative direction is what each "
+            "has left over, which the next two subsections take up."
+        ))
+        out.append(table(
+            pl.read_csv(partition_file),
+            {"auc": num(4), "pseudo_r2": num(4)},
+            key_column="model",
+        ))
+
+    residual_file = tables_home / f"residual_tokens_{COHORT or 'septic'}.csv"
+    if residual_file.is_file():
+        frame = pl.read_csv(residual_file).head(20)
+        out.append('<h3>What the embedding carries that the sentence does not</h3>')
+        out.append(
+            "<p>The embedding is regressed on the sentence and the residual "
+            "kept &mdash; the part of where GEM placed the patient that their "
+            "MAP and pressor course does not account for. That residual "
+            "predicts death on its own, and it still does "
+            "<b>within groups of patients whose sentences are character for "
+            "character identical</b>, which is the strictest available "
+            "version of same course, different outcome. Below: the tokens "
+            "most associated with the residual direction that points towards "
+            "death.</p>"
+        )
+        out.append(table(
+            frame,
+            {"patients_with_token": thousands, "residual_score_gap": num(3)},
+            key_column="token",
+        ))
+
+    mirror_file = tables_home / f"sentence_residual_outcomes_{COHORT or 'septic'}.csv"
+    words_file = tables_home / f"sentence_residual_words_{COHORT or 'septic'}.csv"
+    site_file = tables_home / f"sentence_residual_site_{COHORT or 'septic'}.csv"
+    directions_file = (
+        tables_home / f"sentence_residual_directions_{COHORT or 'septic'}.csv"
+    )
+    if any(f.is_file() for f in (mirror_file, words_file, site_file)):
+        out.append(
+            '<h3>Why do similar embeddings diverge into different '
+            'sentences?</h3>'
+        )
+        out.append(
+            "<p>The subsection above runs <code>embedding ~ sentence</code>. "
+            "This one runs the mirror, <code>sentence ~ g(embedding)</code>, "
+            "so the residual is the part of the treatment course the "
+            "embedding did <b>not</b> anticipate. Two patients the model "
+            "places together whose courses then part company appear here as "
+            "large residuals pointing opposite ways.</p>"
+        )
+        out.append(callout(
+            "<b>None of the three variance components above answers this "
+            "question.</b> Unique-to-sentence, unique-to-embedding and shared "
+            "are all partitions of what predicts the <i>outcome</i>. A "
+            "patient can sit entirely inside the shared component and still "
+            "have been treated unusually for where the model placed them. The "
+            "divergence has to be measured against a prediction of the "
+            "sentence, which is what this builds.<br><br>"
+            "<b>A large residual is not unwarranted variation.</b> Two "
+            "readings survive every number below: the clinicians responded to "
+            "something real that neither the 15-state sequence nor the "
+            "embedding encoded, or the patient was treated differently for "
+            "reasons that had nothing to do with them. Nothing in the "
+            "divergence separates these, which is why the outcome table is "
+            "here &mdash; if the divergence carries no outcome signal the "
+            "first reading has little to stand on.<br><br>"
+            "<b>Residuals are out of fold.</b> An in-sample residual from a "
+            "50-component ridge is shrunk towards zero wherever the model "
+            "interpolated, which would make 'unanticipated' partly a "
+            "statement about fold membership."
+        ))
+        out.append(callout(
+            "<b>This construction came out weak, and the weakness is the "
+            "first result.</b> The expectation was that predicting the "
+            "sentence from the embedding would be near-trivial, since GEM "
+            "read the same MAP values and pressor doses the sentence "
+            "thresholds. Out of fold the embedding anticipates only "
+            "<b>5.7%</b> (septic) and <b>6.8%</b> (cardiogenic) of the "
+            "sentence's variance: a 50-component linear map cannot say which "
+            "of ~85 sparse BPE words a patient receives, even having read the "
+            "underlying numbers.<br><br>"
+            "That makes the residual nearly equal to the centred word counts "
+            "themselves &mdash; 'unanticipated treatment course' and "
+            "'treatment course' are almost the same vector. So "
+            "<code>divergence_alone</code> below is <b>not</b> a measure of "
+            "divergence; it is the sentence under another name, which is why "
+            "it lands near the AUC the sentence reaches outright in the "
+            "partition table above. <b>Read "
+            "<code>increment_over_embedding</code> and nothing else.</b> The "
+            "divergence-alone column is kept so that the collapse is visible "
+            "rather than left to be inferred.",
+            kind="warn",
+        ))
+        if words_file.is_file():
+            frame = pl.read_csv(words_file, schema_overrides={"word": pl.String})
+            shown = frame.filter(pl.col("share_of_patients") > 0.02).head(15)
+            if not shown.is_empty():
+                out.append('<h4>Which words went unanticipated</h4>')
+                out.append(
+                    "<p>Per-word out-of-fold R&sup2;, lowest first, among "
+                    "words appearing in more than 2% of patients. "
+                    "<code>direction</code> reads the dynamics field of the "
+                    "states the word spells: a word is an escalation if more "
+                    "of its letters are rising than falling.</p>"
+                )
+                out.append(table(
+                    shown,
+                    {"patients": thousands, "share_of_patients": pct,
+                     "variance_anticipated": num(3),
+                     "mean_residual_when_present": num(3)},
+                    key_column="word",
+                ))
+        if directions_file.is_file():
+            frame = pl.read_csv(directions_file)
+            if not frame.is_empty():
+                out.append(
+                    "<p>Grouped by what the word spells, which asks whether "
+                    "the failure is one-sided &mdash; a model that "
+                    "anticipates weans but not escalations is failing at the "
+                    "clinically consequential end.</p>"
+                )
+                out.append(table(
+                    frame,
+                    {"words": thousands,
+                     "median_variance_anticipated": num(3),
+                     "patient_weighted_variance_anticipated": num(3)},
+                    key_column="direction",
+                ))
+        if site_file.is_file():
+            frame = pl.read_csv(site_file)
+            out.append('<h4>How much of the divergence is the hospital</h4>')
+            out.append(
+                "<p>Site is added to the predictor and the drop in residual "
+                "measures the practice-variation share directly. The "
+                "per-site rows ask the stronger question: can the hospital be "
+                "read back <i>off</i> the divergence? If it can, the "
+                "unanticipated part of the treatment course carries a "
+                "practice signature whatever else it carries. The last row "
+                "holds the absorbed share rather than an AUC.</p>"
+            )
+            out.append(table(
+                frame,
+                {"patients": thousands, "auc_from_divergence": num(4)},
+                key_column="site",
+            ))
+        if mirror_file.is_file():
+            frame = pl.read_csv(mirror_file)
+            out.append('<h4>Does the divergence predict outcome</h4>')
+            out.append(
+                "<p>Four outcomes, each scored three ways. Only the "
+                "<code>increment_over_embedding</code> column is evidence "
+                "that <i>how</i> the patient was treated mattered beyond "
+                "where the model placed them.</p>"
+            )
+            out.append(callout(
+                "<b>Magnitude alone conflates treated unusually with "
+                "sicker.</b> A patient placed in a crowded, mild region who "
+                "then escalates has both a large residual and a bad outcome, "
+                "and severity explains both &mdash; hence the "
+                "embedding-alone column as the baseline rather than the base "
+                "rate.<br><br>"
+                "<b>Mortality is the primary and the only clean one.</b> "
+                "ICU-free days to 28 replaces length of stay because dying on "
+                "day two produces a stay of two days, which in a "
+                "mortality-adjacent analysis inverts the result; death scores "
+                "zero. New ventilation and new dialysis are counted only when "
+                "they begin after +48h, past the window the sentence covers, "
+                "but GEM read the RESP and CRRT tokens inside it, so some "
+                "circularity survives &mdash; the "
+                "<code>partly_circular</code> column marks them.<br><br>"
+                "<b>Read <code>n_events</code> before the AUC.</b> New "
+                "dialysis runs around 3% of the cohort, so a five-fold split "
+                "leaves a few dozen events per fold and the estimate swings "
+                "on a handful of patients. Outcomes with fewer than 50 events "
+                "are omitted rather than reported with a caveat."
+            ))
+            out.append(table(
+                frame,
+                {"n": thousands, "n_events": thousands,
+                 "embedding_alone": num(3), "divergence_alone": num(3),
+                 "both": num(3), "increment_over_embedding": num(3)},
+                key_column="outcome",
+            ))
+
+
+    fine_sites = tables_home / f"fine_state_site_lengths_{COHORT or 'septic'}.csv"
+    fine_vocab = tables_home / f"fine_bpe_vocabulary_{COHORT or 'septic'}.csv"
+    fine_coarse = tables_home / f"fine_versus_coarse_{COHORT or 'septic'}.csv"
+    fine_hidden = tables_home / f"fine_hidden_transitions_{COHORT or 'septic'}.csv"
+    if any(f.is_file() for f in (fine_sites, fine_vocab, fine_coarse)):
+        out.append('<h3>Inside the 6-hour window</h3>')
+        out.append(
+            "<p>Everything above gives a patient <b>one letter per 6-hour "
+            "window</b>, so a week is 28 letters and whatever happened "
+            "between grid points is gone. A patient titrated up three times "
+            "and then weaned between hour 12 and hour 18 carries the same "
+            "letter as one left untouched, because both are summarised by "
+            "whatever was running at hour 18. This subsection goes back to the "
+            "raw CLIF tables and builds the finer sequence: within each "
+            "window, as many letters as the patient had distinct states, "
+            "closed by an end-of-window marker.</p>"
+        )
+        out.append(formula(
+            "3_3_3_3A3_34646_6_6_6_",
+            "|  |  |  |  | |",
+            "window 1 holds one state; window 5 holds three, a rise then two falls",
+        ))
+        out.append(callout(
+            "<b>The marker earns its place here and not above.</b> On the "
+            "6-hour sequences one letter <i>is</i> one window, so a separator "
+            "after every letter would make every letter its own word and "
+            "block every merge &mdash; BPE would learn nothing. Here there are "
+            "several letters per window, so <code>_</code> is a real boundary "
+            "with something either side of it, and a BPE word becomes a "
+            "<b>within-window manoeuvre</b> rather than an arbitrary "
+            "span.<br><br>"
+            "<b>Every word in this vocabulary is movement, by "
+            "construction.</b> Runs are collapsed inside a window and merges "
+            "cannot cross a boundary, so no word can carry the same state "
+            "twice running. The coarse vocabulary's three commonest entries "
+            "were <code>00</code>, <code>000</code> and <code>0000</code> "
+            "&mdash; three separate words all meaning 'stayed off pressors'. "
+            "None of them can exist here, which is most of the reason this is "
+            "worth building."
+        ))
+        if fine_sites.is_file():
+            frame = pl.read_csv(fine_sites)
+            widest = (
+                frame["widest_ratio"][0]
+                if "widest_ratio" in frame.columns else None
+            )
+            out.append('<h4>Letters per patient by site</h4>')
+            out.append(
+                "<p><b>Read this table before the vocabulary.</b> If one "
+                "hospital charts twice as many states per patient as another, "
+                "the words BPE learns are partly a vocabulary of charting "
+                "habits and every comparison below inherits it."
+                + (f" The widest site-to-site ratio is <b>{widest:.2f}&times;</b>."
+                   if widest is not None else "")
+                + "</p>"
+            )
+            out.append(callout(
+                "<b>Two guards make that ratio small, and a third confound is "
+                "reported rather than fixed.</b> MAP is resampled hourly "
+                "rather than read per measurement, because monitoring "
+                "intensity is not a clinical decision &mdash; an arterial "
+                "line gives a MAP a minute and a cuff gives a handful a day. "
+                "Runs are then collapsed within each window, so a window's "
+                "length counts <i>state changes</i> rather than samples. What "
+                "remains is that dose changes <i>are</i> read as events, "
+                "because a new infusion rate is a recorded action rather than "
+                "an observation; a site that re-charts a running infusion "
+                "hourly will still show more events than one that charts only "
+                "genuine changes."
+            ))
+            out.append(table(
+                frame.drop("widest_ratio")
+                if "widest_ratio" in frame.columns else frame,
+                {"patients": thousands, "median_letters": num(0),
+                 "ratio_to_pooled": num(2),
+                 "median_windows_with_a_change": num(0),
+                 "median_max_letters_in_a_window": num(0)},
+                key_column="site",
+            ))
+        if fine_coarse.is_file():
+            frame = pl.read_csv(fine_coarse)
+            out.append('<h4>What 6-hour resolution could not see</h4>')
+            out.append(
+                "<p>The coarse letter for a window is the state at the "
+                "window's <b>end</b>, so wherever a window held more than one "
+                "state the coarse version kept the last and dropped the rest. "
+                "The two counts say different things: how often a window held "
+                "any change at all, and how often the window <i>began</i> in a "
+                "different state than the one it was labelled with &mdash; "
+                "which is not a summary but a misreading.</p>"
+            )
+            out.append(table(
+                frame,
+                {"patients": thousands, "windows": thousands,
+                 "windows_with_a_change": thousands,
+                 "share_with_a_change": pct,
+                 "windows_misread_by_coarse": thousands,
+                 "share_misread_by_coarse": pct},
+                key_column="patients",
+            ))
+        if fine_hidden.is_file():
+            frame = pl.read_csv(fine_hidden).head(12)
+            out.append(
+                "<p>The transitions the coarse letter hides, commonest "
+                "first. These are dominated by pressors coming off inside the "
+                "window: the coarse sequence does record the wean, but "
+                "timestamps it at the next grid point, up to six hours "
+                "late.</p>"
+            )
+            out.append(table(
+                frame,
+                {"windows": thousands, "share_of_misread": pct},
+                key_column="began_as",
+            ))
+        if fine_vocab.is_file():
+            frame = pl.read_csv(
+                fine_vocab, schema_overrides={"word": pl.String}
+            ).filter(pl.col("length") > 1).head(20)
+            if not frame.is_empty():
+                out.append('<h4>The within-window vocabulary</h4>')
+                out.append(
+                    "<p>The commonest multi-state words, each one a manoeuvre "
+                    "that fits inside a single 6-hour window. "
+                    "<code>meaning</code> spells the states out in "
+                    "order.</p>"
+                )
+                out.append(table(
+                    frame,
+                    {"occurrences": thousands, "patients": thousands,
+                     "share_of_patients": pct},
+                    key_column="word",
+                ))
+
+
+    ngram_file = tables_home / f"sentence_ngrams_fine_{COHORT or 'septic'}.csv"
+    pattern_file = tables_home / f"sentence_patterns_fine_{COHORT or 'septic'}.csv"
+    byclass_file = (
+        tables_home / f"sentence_patterns_by_class_fine_{COHORT or 'septic'}.csv"
+    )
+    if any(f.is_file() for f in (ngram_file, pattern_file, byclass_file)):
+        out.append('<h3>What order the words come in</h3>')
+        out.append(
+            "<p>The vocabulary says which units exist and the neighbour "
+            "columns say what sits either side of each one. This asks the next "
+            "question: which <b>ordered</b> patterns recur across patients, "
+            "and which of them separate the latent classes.</p>"
+        )
+        out.append(callout(
+            "<b>There is no such thing as the commonest sentence here.</b> "
+            "Between 93% and 98% of these sentences occur exactly once, and "
+            "the only common one is the degenerate 'never on pressors'. The "
+            "distribution over whole sentences is almost flat and has nothing "
+            "to report. Sub-sentences do, which is why this section mines "
+            "patterns rather than ranking sentences.<br><br>"
+            "<b>Two views, kept apart.</b> Word n-grams are contiguous &mdash; "
+            "strictly what comes next. Sequential patterns allow gaps, so a "
+            "wean followed three days later by coming off pressors counts as "
+            "one story whatever sat between; a trigram can only express that "
+            "if the gap is exactly zero.<br><br>"
+            "<b>Only CLOSED patterns are kept, and without that the output is "
+            "unreadable.</b> A pattern is closed when no longer pattern "
+            "containing it has the same support. The raw enumeration returns "
+            "<code>6_ 6_ 6_</code>, then <code>6_ 6_ 6_ 6_</code>, then "
+            "<code>6_ 6_ 6_ 6_ 6_</code> as three findings carried by nearly "
+            "the same patients.<br><br>"
+            "<b>Support is per patient, not per occurrence.</b> A pattern "
+            "appearing eight times in one week is one patient's worth of "
+            "evidence; counting occurrences would rank the vocabulary by "
+            "whoever stayed longest."
+        ))
+        out.append(callout(
+            "<b>The coarse sentences yield nothing, and that is reported "
+            "rather than hidden.</b> At a median of 4 words and 93% unique, "
+            "<b>no gapped pattern cleared a 5% support floor at all</b> and "
+            "the contiguous n-grams barely cleared 1%. Everything in this "
+            "subsection is from the fine-grained sequences, where the median "
+            "sentence runs 31 words. Order-aware mining needs somewhere to "
+            "put the gap.",
+            kind="warn",
+        ))
+        if pattern_file.is_file():
+            frame = pl.read_csv(
+                pattern_file, schema_overrides={"pattern": pl.String}
+            )
+            moves = frame.filter(~pl.col("is_a_run")).head(15)
+            if not moves.is_empty():
+                out.append('<h4>Patterns involving a change of word</h4>')
+                out.append(
+                    "<p>Runs of a single repeated word are reported "
+                    "separately below: <code>0_ 0_ 0_</code> is three "
+                    "consecutive windows off pressors, which is true of three "
+                    "quarters of the cohort and is not a sequence of care in "
+                    "any interesting sense. These are the patterns where the "
+                    "word actually changes.</p>"
+                )
+                out.append(table(
+                    moves.drop("contiguous", strict=False),
+                    {"patients": thousands, "share_of_patients": pct},
+                    key_column="pattern",
+                ))
+            runs = frame.filter(pl.col("is_a_run")).head(6)
+            if not runs.is_empty():
+                out.append(table(
+                    runs.drop("contiguous", strict=False),
+                    {"patients": thousands, "share_of_patients": pct},
+                    key_column="pattern",
+                ))
+        if byclass_file.is_file():
+            frame = pl.read_csv(
+                byclass_file, schema_overrides={"pattern": pl.String}
+            ).filter(pl.col("p_adjusted") < 0.05)
+            if not frame.is_empty():
+                out.append('<h4>Which patterns separate the latent classes</h4>')
+                out.append(
+                    "<p>Each pattern tested as a per-patient presence flag, "
+                    "one class against all others pooled. Small cells "
+                    "suppressed at 11 and Bonferroni over every (pattern, "
+                    "class) test. <b>The latent classes are the only "
+                    "clustering used here</b> &mdash; this is not a "
+                    "comparison of clustering methods.</p>"
+                )
+                out.append(callout(
+                    "<b>The number of significant tests overstates the number "
+                    "of findings.</b> Closed-pattern filtering removes "
+                    "support-identical duplicates, but patterns whose support "
+                    "differs slightly survive as separate rows and say much "
+                    "the same thing &mdash; a class enriched for "
+                    "<code>6_ 6_ 6_ 646_</code> is usually also enriched for a "
+                    "dozen near-variants. Read the table as a handful of "
+                    "stories told repeatedly, not as hundreds of independent "
+                    "results."
+                ))
+                shown = []
+                for cluster in sorted(frame["cluster"].unique().to_list()):
+                    part = frame.filter(pl.col("cluster") == cluster)
+                    shown.append(
+                        part.sort("log2_ratio", descending=True).head(5)
+                    )
+                    shown.append(part.sort("log2_ratio").head(3))
+                out.append(table(
+                    pl.concat(shown).unique(subset=["cluster", "pattern"])
+                    .sort(["cluster", "log2_ratio"], descending=[False, True]),
+                    {"patients_in_cluster_with_pattern": thousands,
+                     "prevalence_in_cluster": pct,
+                     "prevalence_elsewhere": pct,
+                     "log2_ratio": num(2), "p": num(5), "p_adjusted": num(4)},
+                    key_column="cluster",
+                ))
+                out.append(callout(
+                    "<b>Do not read the hypotension patterns as "
+                    "undertreatment.</b> The pattern that most distinguishes "
+                    "the highest-mortality class in each cohort is a run of "
+                    "<code>7_</code> &mdash; MAP below 65 with <b>no "
+                    "vasopressor running</b>, sustained over several windows. "
+                    "Three readings produce that string and this analysis "
+                    "cannot separate them:<br><br>"
+                    "&bull; <b>Withdrawal of support.</b> A patient "
+                    "transitioned to comfort care has a low MAP and no "
+                    "pressors. Given these classes carry 56% and 67% "
+                    "mortality, this is very likely the dominant reading, and "
+                    "it would make the pattern a marker of end-of-life care "
+                    "rather than of anything done wrong.<br>"
+                    "&bull; <b>Genuinely unsupported hypotension</b> &mdash; "
+                    "the clinically interesting reading, and the one that "
+                    "cannot be claimed without knowing the code status.<br>"
+                    "&bull; <b>The hysteresis band.</b> MAP must exceed 65 to "
+                    "leave the low state, so a patient recovering to 60 stays "
+                    "labelled low until they clear 65.<br><br>"
+                    "Code status and treatment-limitation orders would settle "
+                    "it and are not in this extract. Until they are, the "
+                    "<code>7_</code> runs should be read as <i>a marker of "
+                    "dying</i>, not as a target.",
+                    kind="warn",
+                ))
+                out.append(
+                    "<p>Reading the symbols: <code>0</code> MAP&gt;65 off "
+                    "pressors, <code>3</code> MAP&gt;65 norepinephrine alone "
+                    "steady, <code>6</code> MAP&gt;65 norepinephrine plus "
+                    "another agent steady, <code>7</code> MAP&lt;65 off "
+                    "pressors, <code>D</code> MAP&lt;65 on a combination. A "
+                    "multi-character word is movement inside one window "
+                    "(<code>646_</code> is combination steady, up, steady, "
+                    "closing the window); a trailing <code>_</code> means the "
+                    "word closes a 6-hour window. The full 15-state legend is "
+                    "at the top of this section.</p>"
+                )
+
+
+    wean_before = tables_home / f"wean_preceding_words_{COHORT or 'septic'}.csv"
+    wean_family = tables_home / f"wean_by_family_{COHORT or 'septic'}.csv"
+    wean_split = tables_home / f"wean_held_vs_restarted_{COHORT or 'septic'}.csv"
+    wean_class = tables_home / f"wean_restart_by_growth_cluster_{COHORT or 'septic'}.csv"
+    wean_site = tables_home / f"wean_restart_by_site_{COHORT or 'septic'}.csv"
+    if any(f.is_file() for f in (wean_before, wean_family, wean_split)):
+        out.append('<h3>When a wean holds, and when the pressors go back on</h3>')
+        out.append(
+            "<p>Reading the vocabulary forward: what comes <i>before</i> a "
+            "patient is off pressors, and once a wean has happened, what "
+            "decides whether it lasts.</p>"
+        )
+        if wean_before.is_file():
+            frame = pl.read_csv(
+                wean_before, schema_overrides={"preceding_word": pl.String}
+            ).head(12)
+            out.append(
+                "<p><b>94% of <code>0_</code> words follow another "
+                "<code>0_</code></b> &mdash; the patient was already off "
+                "pressors and nothing happened. The weaning words are the "
+                "remainder, and the commonest is <code>30_</code>: "
+                "norepinephrine steady, then off, inside six hours, with no "
+                "documented taper. It outnumbers the tapered "
+                "<code>3230_</code> two to three times.</p>"
+            )
+            out.append(table(
+                frame,
+                {"occurrences": thousands, "share": pct},
+                key_column="preceding_word",
+            ))
+        out.append(callout(
+            "<b>A fixed 24-hour lookahead, not 'did it ever fail'.</b> The "
+            "obvious definition &mdash; no pressor anywhere in the rest of the "
+            "sentence &mdash; is dominated by how much sentence was left. A "
+            "wean at hour 150 has four windows in which to fail and one at "
+            "hour 12 has twenty-five, so 'held' would mostly mean 'weaned "
+            "late'. Every wean is scored over the same horizon, and weans "
+            "without a full 24 hours of record after them are <b>dropped, not "
+            "counted as successes</b> &mdash; a patient whose record stops two "
+            "windows later has no subsequent pressor word, and reading that as "
+            "a durable wean would count dying as recovering.<br><br>"
+            "<b>The unit is the wean, not the patient.</b> A patient weaned "
+            "four times contributes four rows, and patients weaned repeatedly "
+            "are not a random sample. The median patient here contributes two."
+        ))
+        if wean_family.is_file():
+            out.append('<h4>Abrupt stops against documented tapers</h4>')
+            out.append(
+                "<p>Families are matched on the word with its window marker "
+                "<b>stripped</b>: <code>30</code> and <code>30_</code> are one "
+                "clinical event, differing only in whether the 6-hour window "
+                "happened to end at the wean. An earlier version matched the "
+                "full word and so filed <code>30</code> &mdash; two thirds as "
+                "common as <code>30_</code> &mdash; under 'other', which both "
+                "lost a third of the abrupt weans and gave 'other' a restart "
+                "rate that was mostly an artefact.</p>"
+            )
+            out.append(table(
+                pl.read_csv(wean_family),
+                {"weans": thousands, "patients": thousands,
+                 "closed_the_window": pct, "restarted_within_24h": pct,
+                 "median_hours_from_onset": num(0),
+                 "median_consecutive_0_after": num(0)},
+                key_column="family",
+            ))
+            out.append(callout(
+                "<b>Most weans do not hold 24 hours</b> &mdash; the restart "
+                "rate runs around 50&ndash;60% in every family. Tapering is "
+                "associated with a few points fewer restarts for "
+                "norepinephrine alone and with nothing at all for "
+                "combinations, which is a weak and inconsistent signal.<br><br>"
+                "<b>Do not read it as evidence that tapering works.</b> Weaning "
+                "is not randomised: a clinician walks the dose down on the "
+                "patient they are worried about, so the taper arm is selected "
+                "for concern and the comparison is confounded by indication in "
+                "the direction that would hide a benefit. The honest reading "
+                "is that this design cannot separate the effect of the taper "
+                "from the reason for it.<br><br>"
+                "<b>'Restarted inside the window' is definitional.</b> Those "
+                "words come off pressors and go back on within the same six "
+                "hours, so their high restart rate restates their own "
+                "spelling. They are listed to account for every wean, not as "
+                "a finding.",
+                kind="warn",
+            ))
+        if wean_split.is_file():
+            out.append(
+                '<h4>Within one word: what separates the weans that held</h4>'
+            )
+            out.append(
+                "<p>Every occurrence of <code>30</code> &mdash; the commonest "
+                "wean &mdash; split by whether pressors went back on. "
+                "Standardised differences, so the columns are comparable "
+                "across measures on different scales.</p>"
+            )
+            out.append(table(
+                pl.read_csv(wean_split),
+                {"held_median": num(3), "restarted_median": num(3),
+                 "standardised_difference": num(3)},
+                key_column="measure",
+            ))
+            out.append(callout(
+                "<b>The physiology at the moment of weaning barely moves.</b> "
+                "MAP is the measure a bedside decision would lean on and its "
+                "standardised difference is under 0.1 in both cohorts &mdash; "
+                "the patients whose weans failed looked, at that moment, like "
+                "the patients whose weans held. Residual dose and timing carry "
+                "a little (weans that fail happen earlier and from slightly "
+                "higher doses), but nothing here is of a size that would "
+                "support a bedside rule."
+            ))
+        if wean_class.is_file():
+            out.append(table(
+                pl.read_csv(wean_class),
+                {"weans": thousands, "restarted": pct},
+                key_column="growth_cluster",
+            ))
+            out.append(callout(
+                "<b>The latent class separates restart rates far more than any "
+                "measurement does &mdash; and it is partly circular.</b> The "
+                "classes come from latent class growth over the whole seven "
+                "days, and the restart being predicted happens inside that "
+                "window. So a class is defined in part by having a trajectory "
+                "with these restarts in it. This is a <i>redescription</i> of "
+                "the classes, not a predictor that could be read before the "
+                "fact, and the gap between the best and worst class should be "
+                "read as confirming that the classes capture pressor "
+                "instability, not as a way to forecast a wean.",
+                kind="warn",
+            ))
+        if wean_site.is_file():
+            out.append(table(
+                pl.read_csv(wean_site),
+                {"weans": thousands, "restarted": pct},
+                key_column="site",
+            ))
+            out.append(
+                "<p>The per-site spread is the one comparison here that is "
+                "<b>not</b> circular, since site is fixed before any of this "
+                "happens. It is also small &mdash; a few percentage points "
+                "&mdash; and these cohorts differ in case mix by site, so it "
+                "is reported as a description rather than as practice "
+                "variation.</p>"
+            )
+
+
+    wean_map = figures_home / f"wean_embedding_{COHORT or 'septic'}.png"
+    wean_stats = tables_home / f"wean_embedding_{COHORT or 'septic'}.csv"
+    wean_cov = tables_home / f"wean_embedding_covariates_{COHORT or 'septic'}.csv"
+    if wean_stats.is_file() or wean_map.is_file():
+        out.append('<h4>Where the weans sit in the embedding</h4>')
+        out.append(
+            "<p>Two panels: every wean placed against the whole grid, and the "
+            "same weans tiled into hexagons coloured by how often the wean "
+            "failed. The palette diverges about the <b>pooled</b> restart "
+            "rate rather than about 50%, since roughly half of all weans "
+            "restart and a palette centred on a half would call the average "
+            "cell high or low purely from the base rate.</p>"
+        )
+        shown = figure(wean_map, "")
+        if shown:
+            out.append(shown)
+        out.append(callout(
+            "<b>Only weans inside the embedding window can be placed.</b> The "
+            "grid runs &minus;24h to +48h; the wean sequences run the full "
+            "week. About two thirds are placed, and the third that are not "
+            "sit at a median 84h against 12&ndash;18h for those kept &mdash; "
+            "so this describes <b>early weaning specifically</b>, not weaning. "
+            "The dropped weans restart at almost exactly the same rate as the "
+            "kept ones, so nothing is being selected on the outcome, only on "
+            "timing."
+        ))
+        if wean_stats.is_file():
+            out.append(
+                "<p>Clustering is tested rather than eyeballed. A hexagon map "
+                "of a rate always looks patchy: with a few hundred events over "
+                "sixty-odd cells the rates vary by sampling alone. The "
+                "permutation test asks whether the map is patchier than "
+                "redrawing each cell's failures from the pooled rate would "
+                "make it; Moran's I asks the sharper question of whether "
+                "high-restart cells sit <i>next to</i> other high-restart "
+                "cells, since a map can be over-dispersed without being "
+                "spatially organised.</p>"
+            )
+            out.append(table(
+                pl.read_csv(wean_stats),
+                {"weans_placed": thousands, "weans_total": thousands,
+                 "hexagons": thousands, "pooled_restart": pct,
+                 "rate_min": pct, "rate_max": pct,
+                 "weighted_variance": num(5), "weighted_variance_null": num(5),
+                 "p_patchiness": num(4), "morans_i": num(4),
+                 "p_morans_i": num(4)},
+                key_column="hexagons",
+            ))
+        if wean_cov.is_file():
+            out.append(
+                "<p>And what those regions are made of &mdash; each covariate "
+                "averaged per hexagon and correlated against the restart "
+                "rate, every one binned on the <b>same</b> point set so the "
+                "cells line up.</p>"
+            )
+            out.append(table(
+                pl.read_csv(wean_cov),
+                {"hexagons": thousands,
+                 "correlation_with_restart_rate": num(3)},
+                key_column="covariate",
+            ))
+            out.append(callout(
+                "<b>The regions are real, and they are not news.</b> "
+                "Patchiness runs six times the null and Moran's I lands near "
+                "+0.54, both p&nbsp;&lt;&nbsp;0.0001 &mdash; weans genuinely "
+                "cluster by outcome in this space. But the high-restart "
+                "regions are the <i>early, sicker, more heavily charted</i> "
+                "part of the map: the rate correlates around &minus;0.5 to "
+                "&minus;0.65 with hours from onset, &minus;0.25 to &minus;0.55 "
+                "with log stream length, and +0.32 to +0.61 with mortality. "
+                "Those are the axes this projection was already known to "
+                "encode, so there is no basis here for saying the embedding "
+                "knows something specific about weaning.<br><br>"
+                "<b>Do not read these correlations against the effect sizes "
+                "above.</b> These are <b>ecological</b> correlations over "
+                "~65 hexagons; the standardised differences in the previous "
+                "subsection are per patient. MAP separates held from "
+                "restarted at SMD&nbsp;+0.002 <i>per patient</i> while "
+                "correlating +0.25 with the restart rate <i>per hexagon</i>, "
+                "and those do not conflict. Aggregating averages away the "
+                "within-cell noise and leaves the between-region component, "
+                "which inflates the correlation; an r of &minus;0.65 across "
+                "cells is compatible with no association across patients. The "
+                "aggregate numbers say what the map is organised by. They say "
+                "nothing about what predicts an individual wean, and reading "
+                "them as if they did is the ecological fallacy.",
+                kind="warn",
+            ))
+
+    stability_file = tables_home / f"bpe_stability_{COHORT or 'septic'}.csv"
+    if stability_file.is_file():
+        out.append('<h3>How much the vocabulary depends on the sample size</h3>')
+        out.append(
+            "<p>BPE refitted on nested subsamples, each compared against the "
+            "full-cohort fit. Agreement is the longest common <b>prefix</b> "
+            "of the two merge lists, because BPE is sequential: merge "
+            "<i>k</i> is chosen from a corpus already rewritten by merges "
+            "1&hellip;<i>k</i>&minus;1, so once two fits diverge everything "
+            "after is incomparable even where individual pairs coincide. The "
+            "<code>merges_in_common_any_order</code> column ignores order "
+            "entirely.</p>"
+        )
+        out.append(
+            "<p><b><code>sentences_segmented_identically</code> is the column "
+            "to read.</b> Nothing downstream consumes the merge list; "
+            "everything consumes the segmentation. Both merge lists are "
+            "applied to the same held-out sequences and compared on the words "
+            "they produce, so two fits that found the same merges in a "
+            "different order score as agreeing &mdash; which they should, "
+            "because they segment the same patient the same way. A low "
+            "prefix share next to a high segmentation agreement is evidence "
+            "about <i>order</i>, not about content: once "
+            "<code>0</code>+<code>0</code> becomes <code>00</code>, the "
+            "candidates <code>00</code>+<code>00</code>, "
+            "<code>00</code>+<code>0</code> and <code>0</code>+<code>00</code> "
+            "sit within a few counts of each other, and a small sample flips "
+            "their order without changing what the vocabulary contains.</p>"
+        )
+        out.append(callout(
+            "<b>This was run before deciding whether to pool the cohorts.</b> "
+            "Fitting BPE on all shock would roughly double the corpus, at the "
+            "cost of a vocabulary belonging to neither cohort &mdash; the "
+            "same string would stop meaning the same thing in the two "
+            "reports. The curve says what that trade buys: if agreement is "
+            "already high at a few thousand sequences, pooling buys "
+            "stability that was there to begin with."
+        ))
+        out.append(table(
+            pl.read_csv(stability_file),
+            {"sequences": thousands, "merges_learned": thousands,
+             "identical_prefix": thousands, "prefix_share": pct,
+             "merges_in_common_any_order": thousands,
+             "sentences_segmented_identically": pct, "word_overlap": pct},
+            key_column="sequences",
+        ))
+
+    if septic_home.is_dir():
         state_panels = [
             (label, figure(septic_home / name, note))
             for name, label, note in (
@@ -3089,7 +3909,7 @@ def section_state_space(paths, out: list) -> None:
     patient_overlays = [
         (f"Patient {index}", figure(
             septic_home / f"paths_over_motif_{index:02d}.png", ""))
-        if septic_home is not None else (f"Patient {index}", "")
+        if septic_home.is_dir() else (f"Patient {index}", "")
         for index in range(1, 13)
     ]
     combined = []
@@ -3684,7 +4504,7 @@ def section_sites(paths, out: list) -> None:
     if not features and not token_panels:
         return
 
-    out.append('<h2 id="sites">9 &middot; Why the sites separate</h2>')
+    out.append('<h2 id="sites">10 &middot; Why the sites separate</h2>')
     if features:
         out.append(
             "<p>The embedding separates the contributing sites almost perfectly "
@@ -3763,7 +4583,7 @@ def section_models(paths, out: list, logger) -> None:
     if results is None and not purity_rows:
         return
 
-    out.append('<h2 id="models">10 &middot; Models</h2>')
+    out.append('<h2 id="models">11 &middot; Models</h2>')
     out.append(
         "<p>Three frozen checkpoints of the same architecture, differing only "
         "in what they were trained on: <b>GEM-all</b> on MIMIC + UCMC + NU, "
@@ -3898,7 +4718,7 @@ def section_undifferentiated(paths, out: list) -> bool:
         return False
 
     out.append(
-        '<h2 id="undifferentiated">11 &middot; Undifferentiated shock</h2>'
+        '<h2 id="undifferentiated">12 &middot; Undifferentiated shock</h2>'
     )
     out.append(
         "<p>The cohort is selected on physiology &mdash; sustained hypotension "
@@ -4259,6 +5079,1016 @@ def section_undifferentiated(paths, out: list) -> bool:
     return True
 
 
+def _auc_cell(row) -> str:
+    """an AUC with its bootstrap interval, as one cell"""
+    if row.get("auc") is None:
+        return "—"
+    return f"{row['auc']:.3f} ({row['low']:.2f}\u2013{row['high']:.2f})"
+
+
+def _probe_table(frame: pl.DataFrame, section: str, hour=None) -> pl.DataFrame:
+    """one row per handbook, one column per probe, AUC with interval"""
+    part = frame.filter(pl.col("section") == section)
+    if hour is not None:
+        part = part.filter(pl.col("hour") == hour)
+    if part.height == 0:
+        return pl.DataFrame()
+    labels = {
+        "embedding->mortality": "GEM embedding",
+        "covariates->mortality": "age, SOFA, lactate",
+        "tokens->mortality": "token counts",
+        "embedding->group": "GEM \u2192 response group",
+        "read_hour->mortality": "read hour alone",
+        "embedding_difference->who_dies": "GEM difference, within pair",
+    }
+    rows = {}
+    for row in part.iter_rows(named=True):
+        key = int(row["handbook"])
+        rows.setdefault(key, {"handbook": key, "patients": 0})
+        # the LARGEST probe's n. The probes do not all run on the same
+        # patients -- anything predicting mortality drops those whose outcome
+        # is unknown -- so one number cannot describe the row and the biggest
+        # is the only one that is not quietly an undercount of some cell.
+        rows[key]["patients"] = max(rows[key]["patients"], int(row["n"]))
+        rows[key][labels.get(row["probe"], row["probe"])] = _auc_cell(row)
+    ordered = [rows[k] for k in sorted(rows)]
+    columns = ["handbook", "patients"] + [
+        labels[k] for k in (
+            "read_hour->mortality", "covariates->mortality",
+            "tokens->mortality", "embedding->mortality",
+            "embedding_difference->who_dies", "embedding->group",
+        ) if any(labels[k] in row for row in ordered)
+    ]
+    return pl.DataFrame(
+        [{c: row.get(c, "—") for c in columns} for row in ordered],
+        infer_schema_length=None,
+    )
+
+
+def section_handbooks(paths, out: list) -> None:
+    """
+    the treatment handbooks, who is in them, and who diverges inside them
+
+    Downstream of the state-space section and dependent on it: a handbook is
+    a course through the treatment layer and a response group is a course
+    through the response layer, so neither means anything until both layers
+    exist. Kept separate because the question is different. The state space
+    asks what states there are; this asks whether two patients given the same
+    plan do the same thing, which is the only version of the question that
+    holds management fixed.
+    """
+    cohort = COHORT or "cardiogenic"
+    # CALLOUTS THAT QUOTE SPECIFIC NUMBERS WERE WRITTEN AGAINST THE
+    # CARDIOGENIC COHORT and are not re-derived per cohort. Printing them
+    # under a septic heading would attribute cardiogenic counts, medoids
+    # and hours to septic patients, which is worse than saying less -- so
+    # they are dropped elsewhere, where the tables and figures below carry
+    # the content unaided.
+    cardiogenic_only = (
+        (lambda html: html) if cohort == "cardiogenic"
+        else (lambda html: "")
+    )
+    tables_home = paths.output_home / "tables" / "GEM-all"
+    figures_home = paths.output_home / "figures" / "GEM-all"
+    cat_file = tables_home / f"handbook_catalogue_{cohort}.csv"
+    if not cat_file.is_file():
+        return
+
+    out.append(
+        '<h2 id="handbooks">9 &middot; Treatment handbooks and who diverges '
+        "inside them</h2>"
+    )
+    out.append(cardiogenic_only(callout(
+        "<b>A handbook is an alignment, not a string match.</b> Collapsed "
+        "treatment courses are flicker-dominated &mdash; <code>0</code> covers "
+        "2,114 patients, <code>10</code> another 653, <code>010</code> 315 "
+        "&mdash; and only 21 distinct courses reach 25 patients at a 48-hour "
+        "cap. Exact matching therefore finds either everybody or nobody, and "
+        "defines nothing in between. Each handbook here is a <b>medoid</b> "
+        "course, and a patient belongs to it if their own course aligns "
+        "against that medoid above a floor of 0.25 of the achievable score. "
+        "That keeps 72% of patients; the remaining 28% are left unassigned "
+        "rather than forced into the nearest bin.<br><br>"
+        "<b>Patients are not randomised to handbooks.</b> A clinician reaches "
+        "'high norepinephrine plus vasopressin' by reading a patient who was "
+        "not responding, so the handbook is selected on the very thing the "
+        "response groups then compare. Holding the plan fixed removes the "
+        "dose confound from the measurement. It does not make any comparison "
+        "below causal, and no amount of stratification will."
+    )))
+
+    cat = pl.read_csv(cat_file)
+    # Counted, not asserted. The heading said "six" and the cohort it was
+    # written for reports five, because one handbook fell below the 120-patient
+    # floor for being split into response groups and is not in this table.
+    spread = float(cat["mortality"].max() / max(float(cat["mortality"].min()),
+                                                1e-9))
+    lactate = cat["median_lactate"]
+    sofa = cat["median_sofa_non_cv"]
+    out.append(f"<h3>The {cat.height} handbooks</h3>")
+    out.append(
+        f"<p>Mortality runs {spread:.0f}-fold across the handbooks. "
+        "Non-cardiovascular SOFA barely moves across them &mdash; "
+        f"{float(sofa.min()):.1f} to {float(sofa.max()):.1f} &mdash; but "
+        f"median lactate runs {float(lactate.min()):.1f} to "
+        f"{float(lactate.max()):.1f} mmol/L. <b>An earlier version of this "
+        "paragraph cited the flat SOFA alone and read as though the handbooks "
+        "were severity-matched. On the lactate column they plainly are "
+        "not</b> &mdash; the ordering is substantially a perfusion-severity "
+        "ordering, and it is only SOFA that is flat. "
+        "<code>response_gap</code> is "
+        "the difference in mortality between the two response groups "
+        "<i>inside</i> each handbook &mdash; the part the plan does not "
+        "explain &mdash; and it is the column this whole section exists "
+        "for.</p>"
+    )
+    out.append(table(
+        cat,
+        numeric_format={
+            "patients": thousands,
+            "median_age": num(0),
+            "median_sofa_non_cv": num(1),
+            "median_lactate": num(1),
+            "median_peak_ne": num(2),
+            "median_pressor_hours": num(0),
+            "median_hours": num(0),
+            "mortality": pct,
+            "better_group_n": thousands,
+            "better_group_mortality": pct,
+            "worse_group_n": thousands,
+            "worse_group_mortality": pct,
+            "response_gap": pct,
+        },
+        key_column="handbook",
+    ))
+
+    # ---- sequence logos: what a handbook's course generally looks like
+    consensus_file = tables_home / f"handbook_consensus_{cohort}.csv"
+    logo_panels = [
+        (
+            f"{layer.capitalize()} ({'bits' if not tag else 'share'})",
+            figure(
+                figures_home / f"handbook_logo_{layer}{tag}_{cohort}.png",
+                f"{layer} course per handbook, "
+                + ("letter heights scaled by information content"
+                   if not tag else "every column drawn full height"),
+            ),
+        )
+        for layer in ("treatment", "response")
+        for tag in ("", "_share")
+    ]
+    logo_body = tabs(logo_panels)
+    if logo_body:
+        out.append("<h3>What each handbook&rsquo;s course generally looks "
+                   "like</h3>")
+        out.append(
+            "<p>The aligned-pair renderings further down show six patients "
+            "per handbook. These show all of them, as a <b>sequence logo</b> "
+            "&mdash; the same device used to summarise a multiple sequence "
+            "alignment in genomics. One stack of letters per hour since shock "
+            "onset; each letter&rsquo;s height is how often that state "
+            "occupies that hour; the column&rsquo;s total height is how "
+            "<i>determined</i> the hour is, as information content: "
+            "log<sub>2</sub>(K) minus the entropy of the hour&rsquo;s state "
+            "distribution, small-sample corrected.</p>"
+            "<p>The <b>share</b> tabs draw every column at full height "
+            "instead, which trades the determinacy reading for a legible "
+            "composition. Read the bits version for whether an hour is "
+            "determined and the share version for what it is made of.</p>"
+        )
+        out.append(logo_body)
+        if consensus_file.is_file():
+            cons = pl.read_csv(consensus_file)
+            resp = cons.filter(pl.col("layer") == "response")
+            treat = cons.filter(pl.col("layer") == "treatment")
+
+            def _runs(text: str) -> int:
+                return sum(1 for a, b in zip(text, text[1:]) if a != b)
+
+            flat = [
+                r for r in treat.iter_rows(named=True)
+                if _runs(r["consensus"]) <= 1
+            ]
+            out.append(callout(
+                "<b>The first thing to read off these is how little an hour is "
+                "determined.</b> A response column carries a mean of "
+                f"{float(resp['mean_bits'].min()):.2f} to "
+                f"{float(resp['mean_bits'].max()):.2f} bits of a possible "
+                f"{float(resp['max_bits'][0]):.2f}, so even <i>within</i> one "
+                "handbook, knowing the hour tells you little about which state "
+                "a patient is in. The treatment logos are more determined "
+                f"&mdash; {float(treat['mean_bits'].min()):.2f} to "
+                f"{float(treat['mean_bits'].max()):.2f} bits of "
+                f"{float(treat['max_bits'][0]):.2f} &mdash; and almost "
+                "trivially so: in "
+                f"{len(flat)} of {treat.height} handbooks the treatment "
+                "consensus changes character at most once across all 48 "
+                "hours. That is worth saying plainly: <b>a handbook is mostly "
+                "a dose level held flat, not a plan with stages.</b> The "
+                "alignment-based clustering was free to find staged courses "
+                "and largely did not, which is the single most deflating "
+                "result in this section and the one that most constrains what "
+                "the word &ldquo;handbook&rdquo; can be taken to mean."))
+            out.append(callout(
+                "<b>The coverage bar under each logo is the denominator and "
+                "it falls by design.</b> Response strings are trimmed of their "
+                "trailing off-pressor run, so a patient who comes off pressors "
+                "at hour 12 contributes twelve columns and stops. The "
+                "right-hand end of every logo is therefore drawn from the "
+                "patients slowest to come off pressors, who are sicker than "
+                "the handbook they came from &mdash; a late drift toward "
+                "<code>o</code> is the survivors leaving, not a state "
+                "transition. Columns resting on fewer than 25 patients are "
+                "left blank and their bars dimmed. The bars are scaled "
+                "<i>per row</i>, because the handbooks differ ten-fold in size "
+                "and one scale made the small ones read as empty.", "warn"))
+            out.append(table(
+                cons,
+                numeric_format={
+                    "patients": thousands, "mortality": pct,
+                    "mean_bits": num(2), "max_bits": num(2),
+                },
+                key_column="handbook",
+            ))
+
+    out.append("<h3>Both layers on the projection</h3>")
+    out.append(
+        "<p>The same projection twice, tiled into hexagons: what the clinician "
+        "was doing, and what the patient was doing. The palettes differ on "
+        "purpose. Response states are <b>nominal</b> &mdash; deteriorating is "
+        "not more or less than wean held, it is a different thing &mdash; so "
+        "they take evenly spaced hues.</p>"
+        "<p>Treatment cells are <b>factorial</b>: four norepinephrine bands "
+        "crossed with the presence of vasopressin and of any other vasoactive. "
+        "So the colour is split to match the variable &mdash; the <b>agent "
+        "set picks the hue</b> (blue for norepinephrine alone, orange plus "
+        "vasopressin, green plus another agent, purple for all three) and the "
+        "<b>dose band picks the shade</b> within it, darkest at high dose. An "
+        "earlier version put all sixteen cells on one intensity ramp, which "
+        "made <code>NE mid</code> and <code>NE low +vaso +other</code> "
+        "neighbouring shades of the same colour: a reader could see how much "
+        "support a region was on and could not see what it was made of. The "
+        "ordinal reading survives <i>within</i> a hue and is gone "
+        "<i>across</i> hues, which is correct &mdash; adding vasopressin is "
+        "not a step on the norepinephrine scale.</p>"
+        "<p><i>Plurality</i> is the most common state in a hexagon and reads "
+        "directly. <i>Enrichment</i> is the state most concentrated there "
+        "relative to its own total, which lets a small state appear wherever "
+        "it genuinely localises. Where the two agree the structure is not an "
+        "artefact of group size; where they disagree, that is the finding.</p>"
+    )
+    for layer, note in (
+        ("response", "what the patient was doing"),
+        ("treatment", "what the clinician was doing"),
+    ):
+        panels = [
+            (
+                mode.capitalize() + (" + flow" if flow else ""),
+                figure(
+                    figures_home
+                    / f"layer_{layer}_hex_{mode}{'_flow' if flow else ''}"
+                    f"_6h_{cohort}.png",
+                    f"{layer} layer, {mode}"
+                    + (", with the displacement field over it" if flow else ""),
+                ),
+            )
+            for mode in ("plurality", "enrichment")
+            for flow in (False, True)
+        ]
+        panels.append((
+            "Each level alone",
+            figure(
+                figures_home / f"layer_{layer}_panels_6h_{cohort}.png",
+                f"each {layer} level on its own axes",
+            ),
+        ))
+        body = tabs(panels)
+        if body:
+            out.append(f"<h4>{esc(layer.capitalize())} &mdash; {esc(note)}</h4>")
+            out.append(body)
+
+    flow_figure = figure(
+        figures_home / f"handbook_flow_{cohort}.png",
+        "one streamplot per handbook, each from its own patients' "
+        "displacements, over the pooled point cloud in grey",
+    )
+    if flow_figure:
+        out.append("<h3>Do the handbooks move differently?</h3>")
+        out.append(
+            "<p><b>Each handbook&rsquo;s field is fitted from that "
+            "handbook&rsquo;s own patients</b> &mdash; its own consecutive "
+            "timepoints, its own displacements &mdash; and the five fields "
+            "are then overlaid on one shared grid taken from the whole cloud. "
+            "Crossing streamlines of different colours are therefore not a "
+            "contradiction: they are two groups passing through one region in "
+            "different directions, which is exactly what a pooled field "
+            "averages away. (Elsewhere in this report a flow figure fits one "
+            "field over everyone and varies only the colour underneath, so "
+            "that a difference between panels cannot be a difference in the "
+            "arrows. This figure is the deliberate exception.)</p>"
+            "<p>Two things about the arrows were wrong in an earlier version "
+            "and both shortened them. Each field took its <i>own</i> 0.5&ndash;"
+            "99.5 percentile box, so a small handbook&rsquo;s arrows stopped "
+            "at its own percentile edge rather than at the edge of its "
+            "patients; and the support floor was 0.15% of the group&rsquo;s "
+            "vectors, which on a cohort-sized frame is about 45 vectors "
+            "against a mean cell of 44 and blanked roughly half the occupied "
+            "cells. The hexagon maps above carried the same two faults.</p>"
+        )
+        out.append(flow_figure)
+        out.append(cardiogenic_only(callout(
+            "<b>The earlier version of this figure said the answer was no, "
+            "and that was an artefact of the two faults above.</b> With the "
+            "fields reaching as far as their patients do, the handbooks do "
+            "differ &mdash; in <i>reach</i> rather than in direction. "
+            "Handbooks 0 and 3 never leave the left limb (59 and 76 populated "
+            "cells); handbooks 1, 4 and 5 carry arrows well into the "
+            "upper-right limb (108, 88 and 143 cells). Those two confined "
+            "handbooks are precisely the two high-intensity plans &mdash; "
+            "<code>NE high +vaso +other</code> at 69% mortality and "
+            "<code>NE mid +vaso +other</code> at 58% &mdash; so the region a "
+            "handbook can reach tracks how much support it is built on.<br><br>"
+            "What still looks shared is the <b>direction</b>: where two "
+            "handbooks overlap, their streamlines run the same way. So the "
+            "honest reading is that the handbooks differ in where their "
+            "patients can get to and not in which way they travel once there, "
+            "and the previous, stronger claim that nothing differed should not "
+            "be carried forward.")))
+        out.append(cardiogenic_only(callout(
+            "<b>The handbooks differ several-fold in size</b>, so a small "
+            "handbook's field is drawn from fewer vectors and is noisier at "
+            "the same linewidth &mdash; 2,215 vectors for handbook 0 against "
+            "25,734 for handbook 5. The per-handbook count is in the legend "
+            "rather than implied by the ink, and part of the reach difference "
+            "above is simply that a bigger handbook has vectors in more "
+            "places. The two confined handbooks are not the two smallest, "
+            "which is what keeps the reading above from being only a sample-"
+            "size effect. And the projection is PaCMAP: it preserves "
+            "neighbourhoods, not distances, so the <i>direction</i> of a "
+            "streamline is interpretable and its <i>length</i> is not.",
+            "warn")))
+
+    # ---- which way a handbook's patients travel through the projection
+    dir_file = tables_home / f"handbook_direction_{cohort}.csv"
+    dir_panels = [
+        (
+            f"Handbook {number}",
+            figure(
+                figures_home / f"handbook_direction_hb{number}_{cohort}.png",
+                f"handbook {number}'s patients split by the direction they "
+                "travel along the cloud's main axis, each colour's field from "
+                "its own patients",
+            ),
+        )
+        for number in sorted(cat["handbook"].to_list())
+    ]
+    dir_body = tabs(dir_panels)
+    if dir_body:
+        out.append("<h3>Within a handbook, who enters which limb?</h3>")
+        out.append(
+            "<p>The overlay above compares handbooks with each other. It says "
+            "nothing about whether a handbook&rsquo;s own arrows are parallel, "
+            "and on the flow field they plainly are not: there is an "
+            "upper-right limb whose streamlines run one way and a lower-left "
+            "limb whose run the other, and they meet near the middle. So the "
+            "follow-up question is who is in each.</p>"
+            "<p>Patients are split by <b>which side of centre they enter</b> "
+            "along the limb axis, and the direction is left to the arrows. "
+            "The axis is the first principal direction of the point cloud "
+            "fitted on its central 95% &mdash; the untrimmed version came out "
+            "at (+0.99,&nbsp;+0.15), essentially horizontal, because a small "
+            "outlying island stretches the x spread and flattens it; trimming "
+            "recovers the visible diagonal in both cohorts.</p>"
+            "<p>An earlier version split on the <i>sign of travel</i> instead, "
+            "which needs a signed axis. Orienting it along the "
+            "population&rsquo;s mean displacement looked principled until the "
+            "mean turned out to have a coherence of <b>0.07</b> &mdash; the "
+            "displacements very nearly cancel, there is no prevailing drift "
+            "to point along, and the sign was arbitrary. Entry limb needs no "
+            "sign convention. It is a <i>position</i>, not a destination: a "
+            "patient who enters the upper limb can still travel down and out "
+            "of it, and nothing here claims the limbs are absorbing.</p>"
+        )
+        out.append(dir_body)
+        if dir_file.is_file():
+            frame = pl.read_csv(dir_file)
+            out.append(table(
+                frame,
+                numeric_format={
+                    "patients": thousands, "mortality": pct,
+                    "share_worse_response_group": pct,
+                    "median_start_along": num(2),
+                    "median_travel_along": num(2),
+                    "median_hours": num(0),
+                    "median_peak_ne": num(2),
+                    "median_hours_on_pressors": num(0),
+                    "median_lactate_max_in_window": num(1),
+                    "median_sofa_non_cv": num(1),
+                    "median_age_at_admission": num(0),
+                },
+                key_column="handbook",
+            ))
+            # The two group LABELS are read off the data rather than written in.
+            # They have already changed once -- the split was on the sign of
+            # travel and is now on entry limb -- and a hard-coded
+            # "mortality_ascending" would have raised a KeyError against the
+            # new table rather than quietly saying something false, but only
+            # after a forty-minute figure run.
+            labels = sorted(frame["direction"].unique().to_list())
+            if len(labels) == 2:
+                wide = frame.pivot(
+                    on="direction", index="handbook",
+                    values=["mortality", "share_worse_response_group"],
+                )
+                first, second = labels
+                gap = (
+                    wide[f"mortality_{first}"] - wide[f"mortality_{second}"]
+                )
+                group_gap = (
+                    wide[f"share_worse_response_group_{first}"]
+                    - wide[f"share_worse_response_group_{second}"]
+                ).abs()
+                ahead = int((gap > 0).sum())
+                agreeing = max(ahead, len(gap) - ahead)
+                worse = first if ahead * 2 > len(gap) else second
+                spread = 100 * float(gap.abs().median())
+                noise = 100 * float(group_gap.median())
+                # THE HEADLINE GRADES ITSELF. Written as a flat "this separates
+                # mortality" it read as a finding in both cohorts, and in
+                # septic the gap is 2.3 points against a response-group gap of
+                # 2.7 -- the same size as the quantity it is being contrasted
+                # with. A sentence that says "separates" either way is not
+                # reporting the number, it is decorating it.
+                strong = spread > 2 * noise and agreeing >= len(gap) - 1
+                out.append(callout(
+                    (
+                        "<b>Which limb a patient enters separates mortality, "
+                        "and it is nearly orthogonal to the response-group "
+                        "split.</b> "
+                        if strong else
+                        "<b>Which limb a patient enters barely separates "
+                        "mortality in this cohort.</b> "
+                    )
+                    + f"The <i>{esc(worse)}</i> carries the higher mortality "
+                    f"in {agreeing} of {len(gap)} handbooks, by a median of "
+                    f"{spread:.1f} points. Over the same handbooks the share "
+                    "of each limb sitting in the worse-outcome <i>response</i> "
+                    f"group differs by a median of {noise:.1f} points. "
+                    + (
+                        "The mortality gap is several times that, so the limb "
+                        "is carrying outcome information the response "
+                        "clustering is not: where a patient enters the "
+                        "embedding and which response course they trace are "
+                        "close to independent, and both predict."
+                        if strong else
+                        "<b>Those two are the same size</b>, so there is "
+                        "nothing here to distinguish a real geometric effect "
+                        "from the response split showing through, and this "
+                        "cohort's limbs should be read as uninformative about "
+                        "mortality until something with more power says "
+                        "otherwise."
+                    )))
+                out.append(callout(
+                    "<b><code>median_travel_along</code> cannot be used as "
+                    "evidence that the limbs converge</b>, and it will look "
+                    "like it does. Patients entering the upper limb show "
+                    "negative travel and those entering the lower limb "
+                    "positive travel in almost every handbook &mdash; but the "
+                    "groups were <i>defined</i> by the sign of their starting "
+                    "position on this same axis, so a patient who starts high "
+                    "has more room to move down than up and the reverse for "
+                    "one who starts low. That is regression to the mean "
+                    "manufactured by the split. The column is reported because "
+                    "its <i>magnitude</i> is interpretable within a limb; its "
+                    "sign is not a result.", "warn"))
+            out.append(callout(
+                "<b>Two things this cannot settle.</b> The limb axis is fitted "
+                "on each cohort's own PaCMAP, and the two projections are "
+                "separate fits with no shared orientation, so the "
+                "<i>identity</i> of the worse limb does not transfer between "
+                "cohorts even though the existence of a gap does. And the "
+                "travel column is measured over a patient's whole record, "
+                "which for someone who dies at hour 14 is fourteen hours and "
+                "for a survivor is forty-eight &mdash; so read the hours row "
+                "before the mortality row. PaCMAP preserves neighbourhoods, "
+                "not distances: the <i>direction</i> of an arrow is "
+                "interpretable and its <i>length</i> is not.", "warn"))
+        out.append(cardiogenic_only(callout(
+            "<b>Read the hours row before the mortality row.</b> Direction is "
+            "measured over a patient&rsquo;s whole record, which for someone "
+            "who dies at hour 14 is fourteen hours and for a survivor is "
+            "forty-eight. Any difference between ascending and descending is "
+            "therefore partly a difference in how long each group was "
+            "observed, and the projection is PaCMAP &mdash; the "
+            "<i>direction</i> of travel is interpretable and its "
+            "<i>magnitude</i> is not.", "warn")))
+
+    groups_file = tables_home / f"handbook_response_groups_{cohort}.csv"
+    if groups_file.is_file():
+        out.append("<h3>Two response courses inside one plan</h3>")
+        out.append(
+            "<p>Within each handbook the hourly response courses are "
+            "run-length collapsed and split in two by alignment distance. "
+            "<b>Collapsing matters and an earlier version of this table was "
+            "wrong without it.</b> Clustering raw strings separated short "
+            "off-pressor courses from long on-pressor ones, the medoids came "
+            "out as <code>ooooooooooooDo</code> against "
+            "<code>FHRFSRdNwwHFHHNNNdSHo</code>, and every covariate that "
+            "then separated the groups was a duration at standardised "
+            "differences of 0.49 to 0.76. Collapsing keeps the <i>order</i> of "
+            "what happened and discards how long each state lasted, which is "
+            "the level at which two patients can be said to have had the same "
+            "response rather than the same length of stay.</p>"
+        )
+        groups = pl.read_csv(groups_file)
+        out.append(table(
+            groups,
+            numeric_format={
+                "patients": thousands, "group_a": thousands,
+                "group_b": thousands, "mortality_a": pct,
+                "mortality_b": pct, "mortality_gap": pct,
+                "sofa_a": num(1), "sofa_b": num(1),
+                "hours_a": num(0), "hours_b": num(0),
+                "peak_ne_a": num(2), "peak_ne_b": num(2),
+            },
+            key_column="handbook",
+        ))
+        # A cohort-agnostic version of the reading above, computed rather than
+        # written, so the section still says something when the cardiogenic
+        # prose is withheld.
+        ranked = groups.sort("mortality_gap", descending=True)
+        widest = ranked.row(0, named=True)
+        narrowest = ranked.row(-1, named=True)
+        out.append(callout(
+            "<b>Where the plan stops explaining the outcome.</b> The gap "
+            "between the two response groups' mortality is widest in handbook "
+            f"{widest['handbook']} at {100 * widest['mortality_gap']:.1f} "
+            f"points ({100 * widest['mortality_a']:.0f}% against "
+            f"{100 * widest['mortality_b']:.0f}% on {widest['patients']:,} "
+            "patients) and narrowest in handbook "
+            f"{narrowest['handbook']} at "
+            f"{100 * narrowest['mortality_gap']:.1f} points. That range is "
+            "the quantity this section exists to put a number on: it is how "
+            "much of the outcome is left over once the treatment course is "
+            "held fixed, and it is not an effect of the plan because the plan "
+            "is what has been held fixed."))
+        out.append(cardiogenic_only(callout(
+            "<b>The worse course is the same course in every mid-to-high "
+            "intensity handbook.</b> Handbooks 0, 1 and 3 all put the higher "
+            "mortality on a medoid of the form "
+            "<code>DSdSdSdSdSdSdS</code> &mdash; deteriorate once, then "
+            "oscillate between stable hold and drifting hold indefinitely "
+            "&mdash; while the better group's course contains "
+            "<code>R</code>, <code>W</code> and <code>H</code>: responsive, "
+            "wean held, highly responsive. This arrives independently of the "
+            "motif work above and agrees with it, where drifting hold was "
+            "already the destination of four of the top seven motifs. In "
+            "handbook 5, the lowest-intensity plan, the gap is 1.0%: response "
+            "pattern only separates outcome once the treatment is substantial."
+        )))
+
+    # ---- where the two response groups part, on the population
+    div_file = tables_home / f"handbook_logo_divergence_{cohort}.csv"
+    div_panels = [
+        (
+            f"Handbook {number} &mdash; {layer}",
+            figure(
+                figures_home / (
+                    f"handbook_divergence_logo_{layer}_hb{number}_"
+                    f"{cohort}.png"
+                ),
+                f"both response groups' {layer} courses on one clock, with "
+                "the hour they part marked",
+            ),
+        )
+        for number in sorted(cat["handbook"].to_list())
+        for layer in ("response", "treatment")
+    ]
+    div_body = tabs(div_panels)
+    if div_body:
+        out.append("<h3>When do the two response groups actually part?</h3>")
+        out.append(
+            "<p>The matched-pair alignments below answer &ldquo;when do "
+            "<i>these two</i> courses stop matching&rdquo;, one pair at a "
+            "time. This answers it for the whole handbook. At every hour the "
+            "two response groups&rsquo; state distributions are compared by "
+            "<b>Jensen&ndash;Shannon divergence</b>, and the observed curve is "
+            "read against a null built by permuting the group labels 400 times "
+            "while holding the group sizes fixed. Two groups of unequal size "
+            "differ at every hour by sampling alone, and more so once the "
+            "cohort has thinned, so the null is not flat and a flat threshold "
+            "would have found a parting wherever the denominator fell. The "
+            "parting hour is the first hour the curve clears that band and "
+            "stays clear for two hours.</p>"
+        )
+        out.append(div_body)
+        if div_file.is_file():
+            div = pl.read_csv(div_file)
+            out.append(table(
+                div,
+                numeric_format={
+                    "group_a": thousands, "group_b": thousands,
+                    "divergence_at_hour": num(3), "null_at_hour": num(3),
+                    "peak_divergence": num(3),
+                },
+                key_column="handbook",
+            ))
+            apart = (
+                int(div["differ_from_start"].sum())
+                if "differ_from_start" in div.columns else None
+            )
+            parted = int(div["divergence_hour"].is_not_null().sum())
+            # Indexing a SORTED frame with an argmax taken on the UNSORTED one
+            # was the first version. It returned the right handbook in both
+            # cohorts by coincidence and would have silently returned the wrong
+            # one as soon as the row order changed.
+            biggest = (
+                div.with_columns(
+                    _total=pl.col("group_a") + pl.col("group_b")
+                ).sort("_total", descending=True).row(0, named=True)
+                if div.height else None
+            )
+            out.append(callout(
+                "<b>Most of these groups were never together, so there is "
+                "nothing to part.</b> A parting is reported only where the two "
+                "groups are indistinguishable from permuted labels for three "
+                "consecutive hours and then separate for two &mdash; and on "
+                f"that rule {parted} of {div.height} handbooks have a parting "
+                "hour at all"
+                + (
+                    f", while {apart} are already distinguishable in the "
+                    "opening hours"
+                    if apart is not None else ""
+                )
+                + ". <b>An earlier version of this table reported "
+                "&ldquo;divergence hour 0&rdquo; for four of five handbooks, "
+                "which is not a divergence</b>: hour 0 is the first hour on "
+                "record and nothing can have parted by then. It put a number "
+                "where the honest answer is that these groups never shared a "
+                "course, and a reader skimming the column would have read 0 as "
+                "&ldquo;immediately after onset&rdquo; rather than "
+                "&ldquo;never together&rdquo;. The phrase this section is "
+                "built around &mdash; same plan, then the courses diverge "
+                "&mdash; presumes a shared beginning that most handbooks do "
+                "not have."))
+            if biggest is not None:
+                out.append(callout(
+                    "<b>&ldquo;Hours above the null&rdquo; is a power "
+                    "statistic, not an effect size, and the largest handbook "
+                    "shows why.</b> Handbook "
+                    f"{biggest['handbook']}, with groups of "
+                    f"{biggest['group_a']:,} and {biggest['group_b']:,}, "
+                    f"clears the permutation band at "
+                    f"{biggest['hours_above_null']} of 48 hours while its peak "
+                    f"divergence is only {biggest['peak_divergence']:.3f} "
+                    "bits. A difference that small is detectable there and "
+                    "would be invisible in a handbook a tenth the size. "
+                    "Compare the <code>peak_divergence</code> column across "
+                    "handbooks; compare <code>hours_above_null</code> only "
+                    "against handbooks of similar size.", "warn"))
+        out.append(cardiogenic_only(callout(
+            "<b>This overturns the framing the section was built on.</b> "
+            "&ldquo;Same plan, then the courses diverge&rdquo; implies a "
+            "shared beginning, and four of the five handbooks part at hour "
+            "<b>zero</b>: the two response groups are distinguishable from the "
+            "first hour on record. Only handbook 0 has a genuine shared "
+            "opening, parting at hour 6 with its peak divergence at hour 26. "
+            "An earlier version of this figure drew a shared prefix and then "
+            "split &mdash; which presupposed the answer, and had to invent a "
+            "three-hour prefix in a handbook the test had just said shared "
+            "nothing. Both groups now get their whole course on one clock and "
+            "the parting hour is a marker, not a seam.", "warn")))
+        out.append(cardiogenic_only(callout(
+            "<b>Handbook 5 does not diverge at all &mdash; it converges.</b> "
+            "Its curve peaks at the start, falls monotonically, and sits below "
+            "the permutation band from about hour 18 onward. Its two response "
+            "groups begin apart and become indistinguishable. That is "
+            "consistent with its 1.0% mortality gap, with the embedding "
+            "predicting its response group at 0.584, and with the alignment "
+            "result in the same handbook: the 0.845 within-pair AUC at the "
+            "step before divergence was reported as risk being legible early, "
+            "and this says the same thing from the other side &mdash; in the "
+            "lowest-intensity plan, whatever separates the two courses is "
+            "present at hour zero and spent by the end of the first day.")))
+
+    rendered = tables_home / f"handbook_divergences_{cohort}.csv"
+    if rendered.is_file():
+        shown = pl.read_csv(rendered)
+        # the SAME handbook 42 drew its figures for -- the largest -- rather
+        # than whichever one happens to have rendered the most example pairs.
+        # Every handbook renders up to six, so a mode over this column is an
+        # arbitrary tie-break and the section would illustrate one handbook
+        # while the scatter and the violins below describe another.
+        available = set(shown["handbook"].unique().to_list())
+        ranked = cat.filter(
+            pl.col("handbook").is_in(list(available))
+        ).sort("patients", descending=True)
+        focus = int(ranked["handbook"][0]) if ranked.height else int(
+            shown["handbook"][0]
+        )
+        block = shown.filter(pl.col("handbook") == focus).head(4)
+        if block.height:
+            out.append("<h3>What a divergence looks like</h3>")
+            out.append(
+                f"<p>Four typical pairs from handbook {focus}, chosen nearest "
+                "that handbook's <b>median</b> divergence hour rather than for "
+                "being striking. Each block is five lines: the treatment "
+                "course of the better-outcome patient, their response course, "
+                "the match line, the worse patient's response course, and "
+                "their treatment course. <code>|</code> marks an identical "
+                "state, <code>+</code> a substitutable one, a blank a "
+                "mismatch, and <code>-</code> a gap. The alignment is anchored "
+                "at the first hour and its endpoint is free, so it extends "
+                "from onset for exactly as long as extending is worth points "
+                "&mdash; <b>the hour it stops is the divergence</b>, marked "
+                "<code>^</code>.</p>"
+                "<p>Everything after the <code>&gt;</code> is each course "
+                "carrying on from where the alignment stopped. That part is "
+                "<b>not</b> aligned and the two sides are not in register "
+                "there, deliberately: an earlier version of this figure "
+                "printed only the aligned region, which is by construction "
+                "the part where nothing happened, and so showed five "
+                "identical hours and stopped exactly where the reader needed "
+                "to look.</p>"
+            )
+            for row in block.iter_rows(named=True):
+                # None is "outcome unknown", and `not None` is True, so the
+                # obvious chain of truthiness tests reports an unknown pair as
+                # "both survived"
+                fates = {
+                    (False, False): "both survived",
+                    (True, True): "both died",
+                    (False, True): "survived vs died",
+                    (True, False): "died vs survived",
+                }
+                pair = (row["died_better"], row["died_worse"])
+                fate = (
+                    fates[(bool(pair[0]), bool(pair[1]))]
+                    if None not in pair else "outcome unknown"
+                )
+                identity = row.get("identity")
+                shown_identity = (
+                    f"{identity:.0%} identity up to that point &middot; "
+                    if identity is not None and identity == identity else ""
+                )
+                out.append(
+                    f"<p class=\"meta\">diverged at hour "
+                    f"{row['divergence_hour']} &middot; "
+                    f"{shown_identity}{esc(fate)}</p>"
+                )
+                out.append(formula(
+                    f"treatment  {row['treatment_better']}",
+                    f"response   {row['response_better']}",
+                    f"           {row['match']}",
+                    f"response   {row['response_worse']}",
+                    f"treatment  {row['treatment_worse']}",
+                ))
+            # written by a later version of 42 than the one that may have
+            # produced the CSV on disk; absent means the audit is
+            # unavailable, not that the plans disagreed
+            # prefer the POPULATION audit over the rendered handful: 42
+            # writes agreement over every diverging pair, and the six
+            # examples per handbook are an illustration, not a denominator
+            population = tables_home / f"handbook_plan_agreement_{cohort}.csv"
+            if population.is_file():
+                every = pl.read_csv(population)
+                gap = float(
+                    (every["band_gap_mean"] * every["diverging_pairs"]).sum()
+                    / max(every["diverging_pairs"].sum(), 1)
+                )
+                total = int(every["diverging_pairs"].sum())
+                peak = int(round(float(
+                    (every["same_peak_band"] * every["diverging_pairs"]).sum()
+                )))
+                course = int(round(float(
+                    (every["course_identical"] * every["diverging_pairs"]).sum()
+                )))
+                hourly = int(round(float(
+                    (every["hourly_identical"] * every["diverging_pairs"]).sum()
+                )))
+                has_audit = True
+            elif "band_gap_mean" in shown.columns:
+                gap = float(shown["band_gap_mean"].mean())
+                course = int(shown["plan_course_identical"].sum())
+                peak = int(shown["plan_same_peak_band"].sum())
+                total = shown.height
+                hourly = int(shown["plan_hourly_identical"].sum())
+                has_audit = True
+            else:
+                has_audit = False
+            if has_audit:
+                audit = (
+                    "<br><br><b>How fixed is 'the same plan', really?</b> "
+                    "Across every diverging matched pair, the two patients "
+                    "are a mean "
+                    f"of <b>{gap:.2f} norepinephrine bands apart per aligned "
+                    "hour</b> on a 0-to-3 scale, share a peak band in "
+                    f"{peak} of {total} pairs, and have an identical "
+                    f"collapsed course in {course} of {total}, and are "
+                    f"identical hour by hour in {hourly} of {total}. That "
+                    "last figure is the one to distrust, and it moved most "
+                    "when the audit stopped being run on a handful of "
+                    "examples: six rendered pairs per handbook put it near "
+                    "zero, because they are chosen close to the median "
+                    "divergence hour and so are the longer, more intricate "
+                    "alignments, while most diverging pairs part after only a "
+                    "few hours and those few hours agree trivially. It is "
+                    "also the wrong test regardless: a handbook is defined on "
+                    "the order of what "
+                    "was done, not its durations, so two patients on the same "
+                    "plan all week differ at every hour if one was weaned "
+                    "three hours sooner. Read the band gap. It says the plans "
+                    "are close rather than identical, and it is the honest "
+                    "bound on how much of this section is "
+                    "response-to-a-fixed-plan. Per handbook it runs from 0.17 "
+                    "in handbook 4 to 0.38 in handbook 0 &mdash; and note "
+                    "that handbook 0 has the <i>largest</i> gap while 97% of "
+                    "its pairs share a peak band, because everyone there is "
+                    "at high-dose norepinephrine so peaks agree trivially "
+                    "while the hour-to-hour path differs most."
+                )
+            else:
+                audit = ""
+            out.append(cardiogenic_only(callout(
+                "<b>Read the two treatment lines first.</b> Where they still "
+                "agree at the hour the response lines part, the divergence is "
+                "a difference in the patient under an identical plan. Where "
+                "they have already parted, the handbook floor has let two "
+                "different plans into one group and the pair says nothing "
+                "about response to a shared plan. The alignment is on the "
+                "response layer only, so the treatment lines are carried "
+                "along rather than optimised &mdash; they are a check on the "
+                "comparison, not part of it." + audit, "warn")))
+
+    probe_file = tables_home / f"divergence_probe_{cohort}.csv"
+    if probe_file.is_file():
+        probe = pl.read_csv(probe_file)
+        out.append("<h3>Is the divergence legible before it happens?</h3>")
+        out.append(
+            "<p>Cross-validated AUC with a bootstrap interval, every "
+            "transformation fitted inside the fold. The embedding is 1,024 "
+            "CORAL-corrected dimensions reduced to at most 32 principal "
+            "components and fed to L2 logistic regression, so these are "
+            "<b>floors</b> on what the representation holds, not ceilings: a "
+            "value at chance says this probe found no linear signal, not that "
+            "there is none. <code>patients</code> is the largest probe's "
+            "denominator; the mortality probes drop patients whose "
+            "outcome is unknown and so run on slightly fewer.</p>"
+        )
+        landmark = _probe_table(probe, "landmark", hour=24.0)
+        pre = _probe_table(probe, "pre_divergence")
+        out.append(tabs([
+            ("At a fixed 24 h landmark", table(
+                landmark, key_column="handbook") if landmark.height else ""),
+            ("At the step before divergence", table(
+                pre, key_column="handbook") if pre.height else ""),
+        ]))
+        out.append(cardiogenic_only(callout(
+            "<b>The two tabs are not comparable and the second is "
+            "optimistic.</b> The landmark probe reads the embedding at a hour "
+            "fixed in advance, so nothing about the future enters it. The "
+            "pre-divergence probe reads it at the last grid point before the "
+            "pair actually parted &mdash; the features are still built only "
+            "from the past, but <i>which hour to look at</i> was chosen using "
+            "the whole future course. The 'read hour alone' column exists to "
+            "bound that: it scores the hour by itself, on the same patients "
+            "and the same folds."
+        )))
+        out.append(cardiogenic_only(callout(
+            "<b>Two leaks were found and removed here, and naming them is "
+            "part of the result.</b> A first run scored "
+            "<code>DSCG//expired</code> &mdash; the discharge-disposition "
+            "token &mdash; as a top separator of the mortality groups at "
+            "q&nbsp;=&nbsp;0.008. A patient who died at hour 20 has their own "
+            "death in the stream the hour-24 embedding is built from. Patients "
+            "who left hospital before the landmark are now excluded (2% of the "
+            "cohort by 24&nbsp;h) and the <code>DSCG</code> and "
+            "<code>EOS</code> families are dropped before any probe sees them. "
+            "The effect on the AUCs was about 0.01; the effect on the "
+            "single-token screen was to cut handbook 0 from 36 hits to 11. "
+            "<b>One leak is not closed:</b> code status is censored only from "
+            "shock onset onward, so a DNR entered before onset still reaches "
+            "the probe &mdash; which is why zero patients were censored for "
+            "it, a count that is not credible.", "warn")))
+
+    scatters = sorted(figures_home.glob(f"handbook_outcome_hb*_{cohort}.png"))
+    hexes = sorted(
+        figures_home.glob(f"handbook_mortality_hex_hb*_{cohort}.png")
+    )
+    violins = sorted(figures_home.glob(f"handbook_tokens_hb*_{cohort}.png"))
+    if scatters or hexes or violins:
+        out.append("<h3>Where the outcome sits, and what is charted</h3>")
+        out.append(
+            "<p>One handbook at a time, because the question is whether "
+            "outcome localises <i>within</i> a plan rather than across plans. "
+            "The scatter puts every patient-timepoint of that handbook on the "
+            "projection, died against survived. The violins leave the "
+            "projection behind entirely and compare how often each token is "
+            "charted in the first 24&nbsp;hours, which is the same evidence "
+            "the embedding is built from but read one dimension at a "
+            "time.</p>"
+            "<p><b>Read the hexagon panel, not the scatter, for whether "
+            "outcome localises.</b> In the scatter whichever group is drawn "
+            "second sits on top, and that is the smaller one here, so the "
+            "minority looks like the majority wherever the two overlap. The "
+            "hexagons colour each region by the share who died and carry no "
+            "draw-order artefact. Both are shown because the scatter keeps "
+            "individual patients and the binning does not.</p>"
+        )
+        panels = []
+        for path in hexes:
+            panels.append((
+                f"Mortality by region \u2014 "
+                f"{path.stem.split('_hb')[1].split('_')[0]}",
+                figure(path, "share of patient-timepoints in each hexagon "
+                             "who died, against this handbook's own rate"),
+            ))
+        for path in scatters:
+            panels.append((
+                f"Outcome \u2014 {path.stem.split('_hb')[1].split('_')[0]}",
+                figure(path, "died against survived, within one handbook"),
+            ))
+        for path in violins:
+            panels.append((
+                f"Tokens \u2014 {path.stem.split('_hb')[1].split('_')[0]}",
+                figure(path, "the tokens whose rate differs most between "
+                             "died and survived, within one handbook"),
+            ))
+        out.append(tabs(panels))
+
+        use = sorted(tables_home.glob(f"handbook_token_use_hb*_{cohort}.csv"))
+        if use:
+            frame = pl.read_csv(use[0])
+            out.append(
+                "<p>The violins cannot show a point mass, and most patients "
+                "record none of most tokens, so the share of patients with "
+                "any is given here instead.</p>"
+            )
+            out.append(table(
+                frame,
+                numeric_format={
+                    "smd": num(2), "p": pval,
+                    "median_survived": num(1), "median_died": num(1),
+                    "present_survived": pct, "present_died": pct,
+                },
+                key_column="token",
+            ))
+            out.append(cardiogenic_only(callout(
+                "<b>A token count is not a measurement &mdash; it is a "
+                "measurement that someone chose to take.</b> The tokens that "
+                "separate the outcome groups here are consciousness and "
+                "oxygenation rather than haemodynamics: survivors carry more "
+                "<code>gcs_motor_Q9</code>, <code>gcs_verbal_Q9</code>, "
+                "<code>rass_Q8</code> and <code>nasal_cannula</code>, and "
+                "those who died more <code>rass_Q0</code>. Two cautions "
+                "follow, and both cut against reading this as physiology. "
+                "<b>Frequency confounds state with surveillance:</b> a high "
+                "<code>gcs_motor_Q9</code> count partly means the patient had "
+                "a recordable GCS repeatedly, so some of this separation is "
+                "how often someone was assessed rather than how they were. "
+                "And <b>nasal cannula against deep sedation is largely a "
+                "ventilation contrast</b>, which is treatment, not response "
+                "&mdash; the handbook holds the vasoactive plan fixed and "
+                "says nothing about the airway. The share-present columns "
+                "above are the partial guard: where presence differs as much "
+                "as rate, the signal is not purely charting intensity.",
+                "warn")))
+
+    out.append("<h3>What the section does and does not establish</h3>")
+    out.append(cardiogenic_only(callout(
+        "<b>Groups of patients do respond differently to the same handbook.</b> "
+        "Holding the plan fixed, response groups differ in mortality by up to "
+        "16.8 points, and the worse course is recognisably the same oscillation "
+        "in all three mid-to-high intensity handbooks.<br><br>"
+        "<b>Baseline covariates do not explain which group a patient lands "
+        "in.</b> The largest standardised difference across age, "
+        "non-cardiovascular SOFA, lactate and support intensity is 0.37, and "
+        "the top hit is a duration.<br><br>"
+        "<b>Neither does the embedding.</b> This is the part worth stating "
+        "plainly, because it is a negative result about the model this project "
+        "is built on. Within handbook, the embedding predicts <i>death</i> at "
+        "0.76 to 0.84 &mdash; well above baseline covariates, which reach only "
+        "0.59 to 0.75 &mdash; but it predicts <i>which response course a "
+        "patient will trace</i> at 0.52 to 0.64, with intervals that touch "
+        "0.5. Risk is legible early. Trajectory shape is not. Those are "
+        "different targets and conflating them would overstate what the "
+        "representation does.<br><br>"
+        "<b>Token timing is not the missing channel either.</b> First-"
+        "appearance hour yields no survivor of multiplicity correction in "
+        "handbooks 0, 1 or 3. Token <i>rate</i> separates mortality strongly "
+        "but never beats the embedding, so the embedding is largely "
+        "re-encoding token composition rather than adding physiology on top of "
+        "it.<br><br>"
+        "<b>The better-subset question remains unanswered.</b> Asking whether "
+        "a subset of the worse group does better and is managed differently "
+        "gave three different answers in three handbooks, and the direction "
+        "reversed when the response clustering was corrected and a 24-hour "
+        "landmark applied. The only consistent thread &mdash; that better "
+        "subsets received less vasoactive exposure &mdash; is confounding by "
+        "indication read backwards, not evidence that less drug helps."
+    )))
+
+
 def section_methods(paths, cfg, out: list) -> None:
     out.append('<h2 id="methods">Methods &amp; caveats</h2>')
     out.append(
@@ -4384,6 +6214,7 @@ def main() -> None:
     # need the grid, and those are each wrapped in figure().
     section_longitudinal(paths, out)
     section_state_space(paths, out)
+    section_handbooks(paths, out)
     section_sites(paths, out)
     section_models(paths, out, logger)
     # Undifferentiated shock dropped from the report. The function is kept
@@ -4420,11 +6251,16 @@ def main() -> None:
             ("flow", "6 &middot; Latent flow"),
         ]
     entries += [
-        ("sites", "7 &middot; UCMC versus NU"),
-        ("models", "8 &middot; Models"),
+        ("longitudinal", "7 &middot; Longitudinal strata"),
+        ("states", "8 &middot; MAP/pressor states and their motifs"),
+        ("handbooks", "9 &middot; Treatment handbooks"),
+        ("sites", "10 &middot; Why the sites separate"),
+        ("models", "11 &middot; Models"),
     ]
     if undifferentiated:
-        entries.append(("undifferentiated", "9 &middot; Undifferentiated shock"))
+        entries.append(
+            ("undifferentiated", "12 &middot; Undifferentiated shock")
+        )
     entries.append(("methods", "Methods &amp; caveats"))
     toc = "".join(
         f'<li><a href="#{anchor}">{label}</a></li>' for anchor, label in entries

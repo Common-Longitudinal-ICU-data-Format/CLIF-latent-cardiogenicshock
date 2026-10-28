@@ -660,6 +660,64 @@ def load_cohort_cfg(config: pathlib.Path | str | None = None) -> DictConfig:
     return OmegaConf.load(pathlib.Path(config or CONFIG_HOME / "cohort.yaml"))
 
 
+def load_dynamics_cfg(config=None):
+    """the action-response dynamics config, thresholds and bins included"""
+    return OmegaConf.load(pathlib.Path(config or CONFIG_HOME / "dynamics.yaml"))
+
+
+def _per_subset(value, subset: str | None) -> int:
+    """a config entry that may be one number or one number per cohort"""
+    if isinstance(value, (int, float)):
+        return int(value)
+    if subset is not None and subset in value:
+        return int(value[subset])
+    # No cohort given -- take the largest, so a caller that forgot to pass
+    # one over-clusters rather than silently under-clustering a cohort that
+    # needed more handbooks than the smallest entry allows.
+    return int(max(int(v) for v in value.values()))
+
+
+def handbook_defaults(config=None, subset: str | None = None) -> dict:
+    """
+    the handbook-clustering settings, as argparse defaults
+
+    Four scripts rebuild the same clustering -- 40 discovers it, 41 probes it,
+    42 draws it, 43 writes its logos -- and for a while each carried its own
+    copy of k and the sample size in its own argparse block. They had drifted
+    by a factor of two, which does not raise an error anywhere: it produces a
+    handbook table and a handbook figure that describe different clusterings of
+    the same patients and agree on the word "handbook 0". Returning the block
+    as a dict of argparse defaults means a flag still overrides it, but the
+    unflagged run is the same run in all four.
+
+    `subset` matters for k and the sample size, which are per cohort: see the
+    note in dynamics.yaml for why. Scripts therefore have to resolve these
+    AFTER argparse knows which cohort is being run, which is what
+    `apply_handbook_defaults` is for.
+    """
+    block = load_dynamics_cfg(config).handbooks
+    return {
+        "handbooks": _per_subset(block.count, subset),
+        "sample": _per_subset(block.sample, subset),
+        "min_group": int(block.min_group),
+        "min_fit": float(block.min_fit),
+        "min_fit_omspell": float(block.min_fit_omspell),
+        "distance": str(block.distance),
+        "expcost": float(block.expcost),
+        "cap_hours": int(block.cap_hours),
+        "gap_open": float(block.gap_open),
+        "gap_extend": float(block.gap_extend),
+        "seed": int(block.seed),
+        "logo_min_patients": int(block.logo_min_patients),
+        "divergence_permutations": int(block.divergence_permutations),
+        "divergence_percentile": float(block.divergence_percentile),
+        "divergence_run": int(block.divergence_run),
+        "divergence_min_shared": int(block.divergence_min_shared),
+        "divergence_local": bool(block.divergence_local),
+        "divergence_min_runs": int(block.divergence_min_runs),
+    }
+
+
 def get_logger(name: str, log_file: pathlib.Path | None = None) -> logging.Logger:
     """stdout logger, optionally mirrored to `log_file`"""
     logger = logging.getLogger(name)
@@ -682,3 +740,34 @@ def get_logger(name: str, log_file: pathlib.Path | None = None) -> logging.Logge
         logger.addHandler(handler)
 
     return logger
+
+
+#: Handbook settings that depend on the cohort and so cannot be baked into an
+#: argparse default at parser-construction time.
+HANDBOOK_ARGS = (
+    "handbooks", "sample", "min_group", "min_fit", "cap_hours", "gap_open",
+    "gap_extend", "seed", "distance", "expcost",
+)
+
+
+def apply_handbook_defaults(args, config=None, extra=()):
+    """
+    fill any unset handbook argument from the config, now that --subset is known
+
+    Every handbook flag is declared with `default=None` so that "the user did
+    not pass this" is distinguishable from "the user passed the value that
+    happens to be the default". Without that distinction a per-cohort default
+    cannot exist: the parser would already have committed to one number before
+    anything knew which cohort was being run.
+    """
+    resolved = handbook_defaults(config, getattr(args, "subset", None))
+    # `distance` first, and whether --min-fit was passed read BEFORE anything is
+    # filled in: the fit floor depends on which measure is in use, and once the
+    # default has been written in there is no way to tell it from a flag.
+    wants_default_fit = getattr(args, "min_fit", None) is None
+    for name in tuple(HANDBOOK_ARGS) + tuple(extra):
+        if getattr(args, name, None) is None:
+            setattr(args, name, resolved[name])
+    if wants_default_fit and getattr(args, "distance", None) == "omspell":
+        args.min_fit = resolved["min_fit_omspell"]
+    return args

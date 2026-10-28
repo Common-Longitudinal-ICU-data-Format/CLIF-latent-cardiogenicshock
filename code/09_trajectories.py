@@ -623,15 +623,28 @@ FLOW_MIN_FRACTION = 0.0015
 FLOW_MAXLENGTH = 0.35
 
 
-def flow_support(counts, n_vectors: int):
-    """cells whose vector carries enough local support to be drawn"""
-    floor = max(FLOW_MIN_VECTORS, FLOW_MIN_FRACTION * max(n_vectors, 0))
+def flow_support(counts, n_vectors: int, fraction: float | None = None):
+    """
+    cells whose vector carries enough local support to be drawn
+
+    `fraction` overrides the module default, which exists for the figures where
+    the field is the ONLY thing on the panel and an arrow in a cell with no
+    patients is a lie the reader cannot check. On the hexagon maps the tiling
+    underneath already reports its own occupancy -- cells below the point floor
+    are drawn grey -- so a reader can see where the field has no business being,
+    and the fractional floor there was costing coverage for a guarantee the
+    figure was already making in another ink. At 30,000 vectors on a 26x26 grid
+    the 0.15% floor is 45 vectors against a mean cell of 44, which masked out
+    roughly half of the occupied cells.
+    """
+    share = FLOW_MIN_FRACTION if fraction is None else fraction
+    floor = max(FLOW_MIN_VECTORS, share * max(n_vectors, 0))
     return counts >= floor
 
 
 def displacement_field(
     frame: pl.DataFrame, x: str, y: str, bins: int = 26, smooth: float = 1.0,
-    step_hours: float | None = None,
+    step_hours: float | None = None, extent=None,
 ):
     """
     mean displacement per grid cell, from consecutive timepoints of one patient
@@ -679,8 +692,17 @@ def displacement_field(
     px, py = dx[x].to_numpy(), dx[y].to_numpy()
     vx, vy = dx["vx"].to_numpy(), dx["vy"].to_numpy()
 
-    lo_x, hi_x = np.percentile(frame[x].to_numpy(), [0.5, 99.5])
-    lo_y, hi_y = np.percentile(frame[y].to_numpy(), [0.5, 99.5])
+    # EXTENT MATTERS WHENEVER SEVERAL FIELDS SHARE AN AXIS. Left to itself each
+    # call takes its own 0.5-99.5 percentile box, so overlaid per-group fields
+    # are integrated on grids of different size and origin and a group's arrows
+    # stop at its own percentile edge rather than at the edge of its patients.
+    # Passing the panel's extent puts every field on one grid, which is what
+    # makes two colours in one cell comparable.
+    if extent is None:
+        lo_x, hi_x = np.percentile(frame[x].to_numpy(), [0.5, 99.5])
+        lo_y, hi_y = np.percentile(frame[y].to_numpy(), [0.5, 99.5])
+    else:
+        lo_x, hi_x, lo_y, hi_y = (float(v) for v in extent)
     edges_x = np.linspace(lo_x, hi_x, bins + 1)
     edges_y = np.linspace(lo_y, hi_y, bins + 1)
 
@@ -2544,7 +2566,10 @@ def plot_last_token_single(frame, px, py, variable, home, logger) -> None:
 
 def plot_cluster_flow_overlay(frame, x, y, column, out, title, logger,
                               min_vectors: int = 5,
-                              step_hours: float | None = None) -> None:
+                              step_hours: float | None = None,
+                              density: float = 1.4,
+                              maxlength: float = 1.1,
+                              fraction: float = 0.0) -> None:
     """
     one streamplot per cluster, all on the same axes in the cluster's colour
 
@@ -2555,6 +2580,14 @@ def plot_cluster_flow_overlay(frame, x, y, column, out, title, logger,
     from its own patients' displacements, and the fields are overlaid. The
     question is no longer "where do these patients sit" but "do the clusters
     move differently through the same space".
+
+    EVERY FIELD IS FITTED ON THE POOLED EXTENT. Each call to the field builder
+    would otherwise take its own 0.5-99.5 percentile box over its own cluster,
+    so a small cluster's grid is smaller, differently centred, and at a
+    different cell size than a large one's. Overlaid, that makes "handbook 0's
+    arrows stop here" a statement about where handbook 0's percentile edge fell
+    rather than about where its patients stop going. One extent, taken from the
+    whole cloud the figure is drawn over, puts every colour on one grid.
 
     Read with two cautions. A cell can carry arrows from several clusters, so
     crossing streamlines of different colours are not a contradiction -- they
@@ -2573,8 +2606,8 @@ def plot_cluster_flow_overlay(frame, x, y, column, out, title, logger,
     palette = colors_for(column, levels)
 
     figure, (ax, legend_ax) = plt.subplots(
-        1, 2, figsize=(6.8, 5.2),
-        gridspec_kw={"width_ratios": [4.0, 1.3], "wspace": 0.04},
+        1, 2, figsize=(7.4, 5.2),
+        gridspec_kw={"width_ratios": [4.4, 1.3], "wspace": 0.04},
     )
     legend_ax.axis("off")
 
@@ -2583,22 +2616,28 @@ def plot_cluster_flow_overlay(frame, x, y, column, out, title, logger,
     ax.scatter(frame[x].to_numpy(), frame[y].to_numpy(), s=1.0, c=CONTEXT,
                linewidths=0, alpha=0.6, rasterized=True, zorder=1)
 
+    pooled = (
+        *np.percentile(frame[x].to_numpy(), [0.5, 99.5]),
+        *np.percentile(frame[y].to_numpy(), [0.5, 99.5]),
+    )
+
     handles = []
     for depth, level in enumerate(levels):
         part = frame.filter(pl.col(column) == level)
         cx, cy, vx, vy, counts, n_vectors = displacement_field(
-            part, x, y, step_hours=step_hours
+            part, x, y, step_hours=step_hours, extent=pooled
         )
         if n_vectors < min_vectors:
             logger.info(f"  {level}: {n_vectors} vectors, too few to draw")
             continue
-        mask = ~flow_support(counts, n_vectors)
+        mask = ~flow_support(counts, n_vectors, fraction=fraction)
         u = np.where(mask, np.nan, vx)
         v = np.where(mask, np.nan, vy)
         with np.errstate(invalid="ignore"):
             ax.streamplot(
                 cx, cy, u, v, color=palette[level], linewidth=0.7,
-                arrowsize=0.7, density=0.9, maxlength=FLOW_MAXLENGTH, zorder=2 + depth,
+                arrowsize=0.7, density=density, maxlength=maxlength,
+                zorder=2 + depth,
             )
         handles.append(
             plt.Line2D([], [], color=palette[level], linewidth=1.6,
@@ -2621,6 +2660,7 @@ def plot_cluster_flow_overlay(frame, x, y, column, out, title, logger,
     ax.set_title(title, loc="left", pad=8)
     ax.set_xlabel(proj_labels()[0])
     ax.set_ylabel(proj_labels()[1])
+    ax.set_aspect("equal", adjustable="datalim")
     ax.grid(True, color=GRID, linewidth=0.4, alpha=0.7)
     ax.set_axisbelow(True)
     for side in ("top", "right"):
@@ -2661,7 +2701,9 @@ def _hex_counts(ax, px, py, codes, n_levels, gridsize, extent):
 def plot_state_hexbin(frame, x, y, column, colors, order, out, title, subtitle,
                       logger, mode: str = "plurality", gridsize: int = 34,
                       min_count: int = 10, step_hours: float | None = None,
-                      flow: bool = True) -> None:
+                      flow: bool = True, flow_density: float = 1.5,
+                      flow_maxlength: float = 1.1,
+                      flow_fraction: float = 0.0) -> None:
     """
     the projection tiled into hexagons, each coloured by which state owns it
 
@@ -2708,8 +2750,8 @@ def plot_state_hexbin(frame, x, y, column, colors, order, out, title, subtitle,
     extent = (lo_x, hi_x, lo_y, hi_y)
 
     figure, (ax, legend_ax) = plt.subplots(
-        1, 2, figsize=(6.8, 5.2),
-        gridspec_kw={"width_ratios": [4.0, 1.3], "wspace": 0.04},
+        1, 2, figsize=(7.4, 5.2),
+        gridspec_kw={"width_ratios": [4.4, 1.3], "wspace": 0.04},
     )
     legend_ax.axis("off")
     collection, centres, counts = _hex_counts(
@@ -2747,18 +2789,31 @@ def plot_state_hexbin(frame, x, y, column, colors, order, out, title, subtitle,
     # streamlines and a filled hex map compete for the same ink: the field
     # answers "which way next" and the tiling answers "who is here", and
     # reading either one is easier when the other is absent.
+    #
+    # The field is fitted ON THE HEXAGONS' OWN EXTENT and with an absolute
+    # support floor rather than the fractional one. Both were costing the
+    # figure its reach: a separately-percentiled grid stopped the arrows short
+    # of the tiles they were meant to annotate, and the 0.15%-of-all-vectors
+    # floor blanked out about half the occupied cells on a cohort-sized frame.
+    # The grey tiles already mark where there are too few points to speak, so
+    # the field does not need to re-state that in missing ink.
     n_vectors = 0
     if flow:
         cx, cy, vx, vy, cell_counts, n_vectors = displacement_field(
-            frame.filter(pl.Series(keep)), x, y, step_hours=step_hours
+            frame.filter(pl.Series(keep)), x, y, step_hours=step_hours,
+            extent=extent,
         )
-        mask = ~flow_support(cell_counts, n_vectors)
+        mask = ~flow_support(cell_counts, n_vectors, fraction=flow_fraction)
         with np.errstate(invalid="ignore"):
             ax.streamplot(
                 cx, cy, np.where(mask, np.nan, vx), np.where(mask, np.nan, vy),
-                color=INK_PRIMARY, linewidth=0.6, arrowsize=0.7, density=0.9, maxlength=FLOW_MAXLENGTH,
-                zorder=5,
+                color=INK_PRIMARY, linewidth=0.6, arrowsize=0.7,
+                density=flow_density, maxlength=flow_maxlength, zorder=5,
             )
+        logger.info(
+            f"    field: {int((~mask).sum())} of {cell_counts.size} cells "
+            f"carry an arrow, from {n_vectors:,} vectors"
+        )
 
     won = np.array([
         levels[winner[h]] if totals[h] >= min_count else None
@@ -2781,15 +2836,36 @@ def plot_state_hexbin(frame, x, y, column, colors, order, out, title, subtitle,
         markerfacecolor="#e2e1dc", markeredgecolor="none",
         label=f"under {min_count} points",
     ))
+    # The treatment layer has SEVENTEEN entries and the response layer eleven,
+    # each two lines tall. At one spacing the treatment legend ran off the
+    # bottom of the figure and collided with the subtitle, so the spacing and
+    # size are taken from the number of entries rather than fixed.
+    crowded = len(handles) > 12
     legend_ax.legend(
         handles=handles, loc="upper left", bbox_to_anchor=(0, 1),
-        labelcolor=INK_SECONDARY, fontsize=6, handletextpad=0.6, borderpad=0,
-        frameon=False, labelspacing=1.1,
+        labelcolor=INK_SECONDARY, fontsize=5.5 if crowded else 6,
+        handletextpad=0.6, borderpad=0, frameon=False,
+        labelspacing=0.5 if crowded else 1.1,
     )
 
     ax.set_title(title, loc="left", pad=8)
     ax.set_xlabel(proj_labels()[0])
     ax.set_ylabel(proj_labels()[1])
+    # SAME GEOMETRY AS EVERY OTHER PROJECTION FIGURE. Without this the hexagon
+    # maps rendered on a stretched axis, so the cloud's shape differed between
+    # the scatter panels and the tiled ones and the hexagons themselves came
+    # out as ellipses -- a reader flipping between the two had to re-learn the
+    # space each time, and distances along x and y were silently on different
+    # scales in a projection where neither is metric to begin with.
+    # adjustable="datalim", MATCHING plot_flow and the other projection
+    # figures. "box" was tried first and is wrong for this report: it keeps the
+    # view tight but shrinks the axes rectangle to the data's aspect, which
+    # leaves the legend stranded in half a figure of white space and makes the
+    # panel a different SIZE from every other projection panel. The padding
+    # datalim adds is the look the rest of the report already has.
+    ax.set_aspect("equal", adjustable="datalim")
+    ax.grid(True, color=GRID, linewidth=0.4, alpha=0.6)
+    ax.set_axisbelow(True)
     for side in ("top", "right"):
         ax.spines[side].set_visible(False)
     figure.text(0.012, 0.015, subtitle, fontsize=6.5, color=INK_SECONDARY)
@@ -2985,10 +3061,16 @@ def plot_state_dag(frame, x, y, column, colors, order, out, title, logger,
                          f"{counts.get((level, level), 0) / max(departures[level], 1):.0%} stay")
         for level in levels
     ]
+    # The treatment layer has SEVENTEEN entries and the response layer eleven,
+    # each two lines tall. At one spacing the treatment legend ran off the
+    # bottom of the figure and collided with the subtitle, so the spacing and
+    # size are taken from the number of entries rather than fixed.
+    crowded = len(handles) > 12
     legend_ax.legend(
         handles=handles, loc="upper left", bbox_to_anchor=(0, 1),
-        labelcolor=INK_SECONDARY, fontsize=6, handletextpad=0.6, borderpad=0,
-        frameon=False, labelspacing=1.1,
+        labelcolor=INK_SECONDARY, fontsize=5.5 if crowded else 6,
+        handletextpad=0.6, borderpad=0, frameon=False,
+        labelspacing=0.5 if crowded else 1.1,
     )
     ax.set_title(title, loc="left", pad=8)
     ax.set_xlabel(proj_labels()[0])

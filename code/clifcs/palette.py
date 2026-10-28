@@ -221,6 +221,9 @@ DEEP_PALETTE_COLUMNS = (
     "perfusion_cluster",
     "motif_cluster_raw",
     "motif_cluster_rle",
+    # treatment handbooks are drawn as one streamplot each, overlaid on the
+    # grey cloud, which is the case this ramp exists for
+    "handbook",
 )
 
 

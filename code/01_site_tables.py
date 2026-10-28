@@ -72,6 +72,7 @@ from clifcs.cohort import (
     end_organ_criterion,
     hemodynamic_criterion,
 )
+from clifcs import memory
 from clifcs.config import CONFIG_HOME
 from clifcs.export.writer import put_model, put_table
 from clifcs.onset_winnower import OnsetWinnower
@@ -407,6 +408,13 @@ def write_ledger(paths) -> None:
                 if row["stage"] not in attempted
             ]
 
+    # One schema across rows from different invocations. A `run_stages.csv`
+    # written before `peak_rss_mb` existed has no such key, and polars takes
+    # its schema from the first row -- so merging an old file with a new run
+    # either drops the column or raises, depending which came first.
+    columns = {key: None for row in rows for key in row}
+    rows = [{**columns, **row} for row in rows]
+
     order = {stage: i for i, stage in enumerate(STAGES)}
     rows.sort(key=lambda row: order.get(row["stage"], len(order)))
     paths.cohort_home.mkdir(parents=True, exist_ok=True)
@@ -421,9 +429,17 @@ def run_stage(name, position, total, logger, fn, *args, **kwargs):
     `started` line names the stage, so the resume point is readable without a
     traceback. The timing is there because `derive` and `collate` take long
     enough that a reader needs to know whether a quiet run is working or hung.
+
+    Peak memory is recorded for the same reason as the timing, one step
+    further on. A site whose machine is too small does not get a slow run, it
+    gets a killed process and a log that stops mid-stage -- and the figure
+    that would have said how far over it went is gone with the process. The
+    peak is sampled per stage rather than per process so that `derive`, which
+    is where every large site will hit the ceiling, is attributable on its own.
     """
     logger.info(f"=== [{position}/{total}] {name}: {STAGE_PURPOSE.get(name, '')}")
     started = time.monotonic()
+    peak = None
 
     def record(status: str) -> None:
         STAGE_LEDGER.append(
@@ -431,21 +447,34 @@ def run_stage(name, position, total, logger, fn, *args, **kwargs):
                 "stage": name,
                 "status": status,
                 "seconds": round(time.monotonic() - started, 1),
+                # None, not 0, where the platform exposes no counter: a stage
+                # that cannot be measured must not look like one that used
+                # nothing.
+                "peak_rss_mb": peak.megabytes if peak is not None else None,
                 "finished_utc": dt.datetime.now(dt.timezone.utc).isoformat(
                     timespec="seconds"
                 ),
             }
         )
 
-    try:
-        result = fn(*args, **kwargs)
-    except Exception as cause:
+    # Recorded OUTSIDE the block in both cases, including the failure: the OS
+    # high-water mark is only read when `watch_peak` exits, and the failing
+    # stage is the one whose peak a site most needs.
+    failure: Exception | None = None
+    with memory.watch_peak() as peak:
+        try:
+            result = fn(*args, **kwargs)
+        except Exception as cause:
+            failure = cause
+    if failure is not None:
         record("failed")
-        raise StageFailed(name, cause) from cause
+        raise StageFailed(name, failure) from failure
     record("ok")
+    used = peak.megabytes
     logger.info(
         f"=== [{position}/{total}] {name} finished in "
         f"{time.monotonic() - started:,.0f}s"
+        + (f", peak {used:,.0f} MB" if used is not None else "")
     )
     return result
 
@@ -701,6 +730,130 @@ def sofa_by_hospitalization(wide, scores):
     return per_block.merge(scores, on="encounter_block", how="inner", validate="1:1")
 
 
+def _derive_resp(paths, site, data_dir, logger) -> None:
+    """the respiratory-support waterfall"""
+    from clifpy.tables.respiratory_support import RespiratorySupport
+
+    logger.info(f"[{site}] clifpy: respiratory-support waterfall")
+    resp = RespiratorySupport.from_file(
+        data_directory=str(data_dir), filetype="parquet", timezone="UTC"
+    )
+    # `return_dataframe=True` because `waterfall` copies internally and then
+    # wraps the result in a second RespiratorySupport. Taking the frame leaves
+    # one copy of the table live instead of three.
+    processed = resp.waterfall(return_dataframe=True)
+    processed.to_parquet(data_dir / "clif_respiratory_support_processed.parquet")
+
+
+def _derive_doses(paths, site, data_dir, units, logger) -> None:
+    """
+    the two converted medication tables, each in its own scope
+
+    TWO ORCHESTRATORS, TWO WEIGHT TABLES, and the second one is a bug fix
+    rather than a consequence of the scoping.
+
+    `convert_dose_units_for_continuous_meds` loads vitals itself, filtered to
+    `vital_category=['weight_kg']` AND to the hospitalizations present in the
+    CONTINUOUS medication table, then leaves the table object on the
+    orchestrator. The intermittent conversion then reuses whatever is already
+    there -- `if (self.vitals is None) or (self.vitals.df is None)`. So a
+    patient with intermittent medications but no continuous ones never had a
+    weight in this pipeline, and every weight-based intermittent dose they
+    received fell back to its original unit. At Rush that is 1,992 patients:
+    6,707 rows with no weight becomes 4,715.
+
+    Giving each conversion its own orchestrator fixes it, because each loads
+    vitals for its own medication table. It is a real change to the token
+    stream -- `collation.yaml` reads `_convert_status` to decide whether a
+    MED-INT token carries a dose at all -- and it is being taken in the same
+    pass as the SOFA fix, which re-tokenises every site anyway. Doing it later
+    would cost a second re-tokenisation for the same result.
+
+    Separate orchestrators are also what frees the continuous medication frame
+    before the intermittent one is read: function return is the scope boundary
+    that actually releases a pandas-backed clifpy table.
+    """
+    import clifpy as cpy
+
+    logger.info(f"[{site}] clifpy: dose conversion")
+    output_directory = str(paths.log_home / f"clifpy-{site.lower()}")
+
+    def convert(kind: str, preferred) -> None:
+        orchestrator = cpy.ClifOrchestrator(
+            data_directory=str(data_dir),
+            filetype="parquet",
+            timezone="UTC",
+            output_directory=output_directory,
+        )
+        method = getattr(orchestrator, f"convert_dose_units_for_{kind}_meds")
+        # `show_intermediate=True` stays -- `collation.yaml` reads the `_`
+        # columns it adds.
+        method(
+            preferred_units=preferred,
+            show_intermediate=True,
+            override=True,
+            save_to_table=True,
+        )
+        converted = getattr(orchestrator, f"medication_admin_{kind}").df_converted
+        converted.to_parquet(
+            data_dir / f"clif_medication_admin_{kind}_converted.parquet"
+        )
+        weighed = int(converted["weight_kg"].notna().sum())
+        logger.info(
+            f"[{site}]   {kind}: {len(converted):,} rows, {weighed:,} with a "
+            f"weight ({weighed / max(len(converted), 1):.1%})"
+        )
+
+    convert("continuous", OmegaConf.to_container(units.continuous))
+    convert("intermittent", OmegaConf.to_container(units.intermittent))
+
+
+def _derive_sofa(paths, site, data_dir, logger) -> None:
+    """
+    the whole-stay SOFA score, and the windowed grid beside it
+
+    One wide build serves both, which is what makes them provably consistent:
+    the whole-stay worst and the worst in each 24 h window are extremal
+    reductions of the same rows. The grid costs about a second per offset on
+    top of a build that takes a minute, so it is not worth a separate pass --
+    and it finally populates the `sofa_grid.parquet` that 09, 12 and 13 all
+    read and nothing wrote.
+    """
+    from clifcs import sofa_grid
+    from clifcs.sofa_grid import SOFA_GRID_OFFSETS
+
+    logger.info(f"[{site}] clifpy: SOFA scoring")
+    orchestrator, wide = sofa_grid.build_sofa_wide(paths, site, logger)
+
+    # The whole-stay collapse is `sofa_by_hospitalization` above -- one row
+    # per encounter block, merged on the encounter_block COLUMN. Scoring is
+    # separate from collapsing, which is the better split: the collapse is a
+    # pure function of two frames and can be tested without clifpy.
+    scores = orchestrator.compute_sofa_scores(
+        wide_df=wide, create_new_wide_df=False
+    )
+    # read back from the orchestrator: that call merges the encounter mapping
+    # into the frame it was given, and `wide` itself has no encounter_block.
+    # Projected to the three columns the collapse reads, because the sort is
+    # on `event_time` alone and this frame is millions of rows wide.
+    stamped = orchestrator.wide_df
+    whole_stay = sofa_by_hospitalization(
+        stamped[["encounter_block", "event_time", "hospitalization_id"]], scores
+    )
+    logger.info(
+        f"[{site}] SOFA rows for {len(whole_stay)} of "
+        f"{stamped['encounter_block'].nunique()} encounter blocks"
+    )
+    whole_stay.to_parquet(data_dir / "clif_sofa.parquet")
+
+    grid = sofa_grid.sofa_on_grid(
+        paths, site, SOFA_GRID_OFFSETS, logger, wide=wide,
+        orchestrator=orchestrator,
+    )
+    if grid.height:
+        grid.write_parquet(data_dir / "sofa_grid.parquet")
+
+
 def stage_derive(paths, sites, logger, force: bool) -> None:
     """
     build the derived tables cocoa's collation.yaml expects
@@ -709,77 +862,70 @@ def stage_derive(paths, sites, logger, force: bool) -> None:
     in that order: the first saves the converted medication tables, the second
     re-converts only the four SOFA vasopressors in memory without overwriting
     them.
-    """
-    import clifpy as cpy
-    from clifpy.tables.respiratory_support import RespiratorySupport
 
+    SPLIT INTO THREE, and each one its own function rather than three blocks of
+    one. Function return is the scope boundary that actually frees a
+    pandas-backed clifpy table; `del` inside one long function is the version
+    the next edit silently breaks, and at UCMC this stage peaks around 17.5 GB
+    with all three sets of tables co-resident. The per-artifact skip checks
+    also mean a run that died in SOFA does not redo the waterfall.
+    """
     units = OmegaConf.load(CONFIG_HOME / "clifpy_units.yaml")
 
-    targets = (
-        "clif_respiratory_support_processed",
-        "clif_medication_admin_continuous_converted",
-        "clif_medication_admin_intermittent_converted",
-        "clif_sofa",
+    artifacts = (
+        (("clif_respiratory_support_processed",), _derive_resp, ()),
+        (
+            (
+                "clif_medication_admin_continuous_converted",
+                "clif_medication_admin_intermittent_converted",
+            ),
+            _derive_doses,
+            (units,),
+        ),
+        (("clif_sofa",), _derive_sofa, ()),
     )
 
     for site in sites:
         data_dir = paths.raw_subset(site)
-        if all((data_dir / f"{t}.parquet").is_file() for t in targets) and not force:
-            logger.info(f"[{site}] derived tables exist, skipping")
-            continue
-
-        logger.info(f"[{site}] clifpy: respiratory-support waterfall")
-        resp = RespiratorySupport.from_file(
-            data_directory=str(data_dir), filetype="parquet", timezone="UTC"
-        )
-        processed = resp.waterfall()
-        processed.df.to_parquet(data_dir / "clif_respiratory_support_processed.parquet")
-
-        logger.info(f"[{site}] clifpy: dose conversion")
-        orchestrator = cpy.ClifOrchestrator(
-            data_directory=str(data_dir),
-            filetype="parquet",
-            timezone="UTC",
-            output_directory=str(paths.log_home / f"clifpy-{site.lower()}"),
-        )
-        orchestrator.convert_dose_units_for_continuous_meds(
-            preferred_units=OmegaConf.to_container(units.continuous),
-            show_intermediate=True,
-            override=True,
-            save_to_table=True,
-        )
-        orchestrator.medication_admin_continuous.df_converted.to_parquet(
-            data_dir / "clif_medication_admin_continuous_converted.parquet"
-        )
-        orchestrator.convert_dose_units_for_intermittent_meds(
-            preferred_units=OmegaConf.to_container(units.intermittent),
-            show_intermediate=True,
-            override=True,
-            save_to_table=True,
-        )
-        orchestrator.medication_admin_intermittent.df_converted.to_parquet(
-            data_dir / "clif_medication_admin_intermittent_converted.parquet"
-        )
-
-        logger.info(f"[{site}] clifpy: SOFA scoring")
-        sofa = cpy.ClifOrchestrator(
-            data_directory=str(data_dir),
-            filetype="parquet",
-            timezone="UTC",
-            output_directory=str(paths.log_home / f"clifpy-{site.lower()}"),
-        )
-        sofa.convert_dose_units_for_continuous_meds(
-            preferred_units=OmegaConf.to_container(units.sofa_continuous),
-            override=True,
-        )
-        sofa.compute_sofa_scores()
-        sofa_df = sofa_by_hospitalization(sofa.wide_df, sofa.sofa_df)
-        logger.info(
-            f"[{site}] SOFA rows for {len(sofa_df)} of "
-            f"{sofa.wide_df['encounter_block'].nunique()} encounter blocks"
-        )
-        sofa_df.to_parquet(data_dir / "clif_sofa.parquet")
+        for targets, build, extra in artifacts:
+            if all((data_dir / f"{t}.parquet").is_file() for t in targets) and not force:
+                logger.info(f"[{site}] {targets[0]} exists, skipping")
+                continue
+            build(paths, site, data_dir, *extra, logger)
         logger.info(f"[{site}] derived tables written to {data_dir}")
+
+    _mirror_sofa_grid(paths, logger)
+
+
+def _mirror_sofa_grid(paths, logger) -> None:
+    """
+    assemble the pooled `sofa_grid.parquet` that 09, 12 and 13 read
+
+    ASSEMBLED FROM EVERY SITE, not written by each. The three readers use the
+    legacy pooled `patient_level_home` while the canonical copy is per site,
+    beside the other derived tables -- so a per-site write into one pooled path
+    means the last site to run silently replaces the others, and a
+    `--site RUSH` run would leave the pooled file holding Rush alone. Rebuilt
+    from whatever each site has on disk instead, which is correct whichever
+    subset of sites this invocation touched.
+
+    The readers are corrected to `patient_level_home_for(site)` separately;
+    until then this keeps them reading a complete file.
+    """
+    parts = []
+    for site in paths.sites:
+        path = paths.raw_subset(site) / "sofa_grid.parquet"
+        if path.is_file():
+            parts.append(pl.read_parquet(path).with_columns(site=pl.lit(site)))
+    if not parts:
+        return
+    pooled = pl.concat(parts, how="diagonal_relaxed")
+    paths.patient_level_home.mkdir(parents=True, exist_ok=True)
+    pooled.write_parquet(paths.patient_level_home / "sofa_grid.parquet")
+    logger.info(
+        f"sofa_grid: {pooled.height:,} rows from {len(parts)} site(s) -> "
+        f"{paths.patient_level_home / 'sofa_grid.parquet'}"
+    )
 
 
 # =================================================== stages: collate/tokenize
@@ -1014,14 +1160,45 @@ def stage_tokencounts(paths, sites, logger, min_cell: int) -> None:
                     site=pl.lit(site),
                     anchor=pl.lit(anchor),
                 )
-                # primary suppression, and `total_occurrences` goes with it
-                blank = (pl.col("n_patients") > 0) & (pl.col("n_patients") < min_cell)
+                # THE SHARED RULE, not a hand-rolled one. The version this
+                # replaces blanked `n_patients` in 1..min_cell-1 and stopped
+                # there, which covers only half the exposure: a token emitted by
+                # all but a handful of the cohort published a `prevalence` that
+                # gives those few back as
+                # `n_cohort - round(prevalence * n_cohort)`, and published
+                # `n_patients` itself, from which the same subtraction works
+                # directly. `token_families_anchor-onset.csv` carried exactly
+                # one such value and the export-time validator refused it.
+                #
+                # Nothing new is declared here. The registry already carries
+                # both halves: `prevalence` over `n_cohort` with numerator
+                # `n_patients`, and the ("n_patients", "n_cohort") complement
+                # pair. Calling the shared suppressor is what connects them.
+                #
+                # `by=None` because these rows are tokens, not a partition -- a
+                # patient emits many tokens and is counted in every one of them,
+                # so no group of these rows sums to the cohort and the
+                # group-wise complementary pass has nothing to protect. The
+                # within-row complement pass still runs, and that is the one
+                # that matters here.
+                from clifcs.export import suppress
+
                 table = table.with_columns(
-                    n_patients=pl.when(blank).then(None).otherwise(pl.col("n_patients")),
-                    total_occurrences=pl.when(blank)
+                    prevalence=pl.col("n_patients") / pl.col("n_cohort")
+                )
+                table = suppress.suppress_counts(
+                    table, min_cell=min_cell, by=None, logger=logger
+                )
+                # `total_occurrences` goes with a blanked patient count, on the
+                # argument `suppress.NOT_PATIENT_STATISTICS` records for it: it
+                # is not itself a patient cell, but a token occurring four times
+                # in one patient is as identifying as the count. The suppressor
+                # leaves it alone by design, so the producer does it.
+                table = table.with_columns(
+                    total_occurrences=pl.when(pl.col("n_patients").is_null())
                     .then(None)
-                    .otherwise(pl.col("total_occurrences")),
-                ).with_columns(prevalence=pl.col("n_patients") / pl.col("n_cohort"))
+                    .otherwise(pl.col("total_occurrences"))
+                )
                 suppressed = int(table.select(pl.col("n_patients").is_null().sum()).item())
                 put_table(
                     paths, [site], f"{name}_anchor-{anchor}.csv",
@@ -1113,11 +1290,28 @@ def stage_baseline(paths, sites, logger, min_cell: int) -> None:
         # cannot be computed without the dose conversion. This is the same
         # directory 09 passes trajectory_state.
         collected = baseline.collect(paths.raw_subset(site), part, logger)
-        table = baseline.summarise(collected, site, min_cell)
+        table = baseline.summarise(collected, site)
         if not table.height:
             logger.warning(f"[{site}] baseline table is empty")
             continue
-        put_table(paths, [site], "baseline_by_shock_type.csv", table, min_cell, logger, suppressed=True)
+        # `summarise` emits true values; suppression is applied here, by the
+        # one module that decides what may be published. Shock types partition
+        # the site within a variable, which is the group a single blanked cell
+        # would be recoverable from by subtraction.
+        #
+        # `suppressed=True` then tells `put_table` the builder has already done
+        # it, so it validates and writes rather than suppressing again -- which
+        # is only a true claim because of the call above. In the version this
+        # replaces, the baseline table was written with no suppression at all.
+        from clifcs.export import suppress
+
+        table = suppress.suppress_counts(
+            table, min_cell=min_cell, by=("site", "variable"), logger=logger
+        )
+        put_table(
+            paths, [site], "baseline_by_shock_type.csv", table, min_cell,
+            logger, suppressed=True,
+        )
         blanked = int(table.select(pl.col("n").is_null().sum()).item())
         logger.info(
             f"  baseline_by_shock_type.csv: {table.height} rows across "
@@ -1181,111 +1375,144 @@ def stage_trials(paths, sites, logger, min_cell: int) -> None:
         )
     )
 
-    for anchor in ANCHORS:
-        per_site = []
-        for site in sites:
-            part = cohort.filter(pl.col("site") == site)
-            if part.height == 0:
-                continue
-            # the anchor only shifts which physiology the criteria read; the
-            # 24h anchor uses admission + 24h, onset uses cs_onset_dttm, and
-            # attach_features keys off cs_onset_dttm either way
-            part = attach_features(paths.site_data[site], part, cohort_cfg, logger)
-            part = attach_procedures(paths.site_data[site], part, logger)
-            per_site.append(part)
-        if not per_site:
+    # ONE FRAME, BOTH ANCHORS, and that is a statement about the anchors
+    # rather than an optimisation. Nothing between here and `assign_guideline`
+    # reads `anchor`: `attach_features` keys off `cs_onset_dttm` whichever
+    # anchor is named, and every column built from it follows. The two
+    # `trial_patient_anchor-*.parquet` files this stage writes were verified
+    # byte-identical after sorting -- 5,677 x 111, every column equal -- so the
+    # loop was computing the same table twice and writing it under two names.
+    #
+    # Hoisted rather than left: it halves the slowest site-side stage. But it
+    # also makes the identity structural, so if the 24h anchor is ever meant to
+    # read physiology at admission + 24h, that belongs in `attach_features`,
+    # and this hoist has to come back out at the same time.
+    per_site = []
+    for site in sites:
+        part = cohort.filter(pl.col("site") == site)
+        if part.height == 0:
             continue
-
-        frame = pl.concat(per_site, how="diagonal_relaxed")
-        frame = add_eligibility(frame, trials)
-        for trial in trials:
-            frame = table1_position(frame, trial, logger)
-        frame = attach_severity(paths, frame, logger)
-        frame = add_concordance(frame, trials, logger)
-
-        # ----------------------------------------------- coverage and guideline
-        # Both were computed at the coordinating site by 11 until now, which
-        # meant a site sharing nothing patient-level reported neither -- even
-        # though neither reads an embedding. `rank_and_orphans` wants Regions
-        # rather than Trials, so it gets unfitted ones: every `inside_*` and
-        # `lift_*` column is then absent, `n_regions_inside` is 0 and
-        # `evidence_orphan` collapses to `criteria_orphan`, which is exactly
-        # the criteria-only reading. 11 still recomputes all of it against the
-        # fitted regions when the embeddings are pooled.
-        regions = tuple(
-            Region(
-                key=t.key,
-                label=t.label,
-                n_eligible=int(frame[f"elig_{t.key}"].sum()),
-                fitted=False,
-                applies_to=t.applies_to,
-            )
-            for t in trials
-        )
-        frame = rank_and_orphans(frame, regions)
-        frame = assign_guideline(
-            frame, trials, logger, order=specificity_order(trial_cfg, logger)
-        )
-
-        # What the ordering WOULD be if ranked on this cohort, logged next to
-        # the assignment that used the committed one. At the derivation site
-        # this is the line you copy into `specificity_order`; everywhere else
-        # it is the check that says how far this site's eligible shares have
-        # drifted from the ordering being applied to it.
-        local = specificity_from_frame(frame, trials)
-        committed = specificity_order(trial_cfg) or []
-        logger.info(
-            f"[{anchor}] specificity ranked on THIS cohort, most specific "
-            "first (the derivation site commits this to "
-            "`specificity_order` in trials.yaml):"
-        )
-        logger.info("  " + " ".join(local))
-        if committed and committed != local:
-            moved = [
-                f"{k}({committed.index(k)}->{local.index(k)})"
-                for k in local
-                if k in committed and committed.index(k) != local.index(k)
-            ]
-            logger.info(
-                f"  differs from the committed order at {len(moved)} of "
-                f"{len(local)} positions: {' '.join(moved)}. The committed "
-                "order is the one that was applied, which is what makes this "
-                f"site's assignment comparable with every other site's."
-            )
-
-        # The per-patient columns, kept for 02 to export under the contract.
-        # Written here rather than recomputed there because the predicates read
-        # raw CLIF and this stage has already paid for that pass -- an earlier
-        # version had `writer.trial_eligibility` do the whole join again, which
-        # doubled the slowest site-side read for the same numbers.
+        # the anchor only shifts which physiology the criteria read; the
+        # 24h anchor uses admission + 24h, onset uses cs_onset_dttm, and
+        # attach_features keys off cs_onset_dttm either way
         #
-        # Only the four `t1_` statistics the contract names travel, plus
-        # eligibility and concordance. `t1_maxdist_` and the two `n_` columns
-        # stay here: nothing is coloured by them, and every continuous column
-        # widens the quasi-identifier the exported row forms.
-        per_patient = frame.select(
-            "hospitalization_id",
-            "site",
-            # `sofa_non_cv` rides along because this is the only frame that has
-            # it. attach_severity computes it here, from the clif_sofa parquet
-            # the derive stage wrote, and it is NOT on the cohort table -- so
-            # omitting it from this select, as the first version did, dropped it
-            # for good. The contract names it, 07 reports severity-adjusted
-            # results against it, and 12 uses it as an adjuster, so losing it
-            # silently turned every adjusted comparison into an unadjusted one.
-            *[
-                c
-                for c in ("sofa_non_cv",)
-                if c in frame.columns
-            ],
-            *[
-                c
-                for c in frame.columns
-                if c.startswith(contract.TRIAL_PREFIX)
-                or c.startswith(contract.TRIAL_FIT_PREFIXES)
-                or c.startswith(contract.CONCORDANCE_PREFIX)
-            ],
+        # raw_subset, not site_data, for the same reason stage_baseline
+        # gives: every table these two read is in REQUIRED_TABLES and so is
+        # already in the cohort subset, cut down by an inner join on
+        # hospitalization_id. Reading the full extract instead meant seven
+        # lazy scans over the untrimmed tables -- 930 MB of clif_labs at
+        # Rush against 76 MB subset -- twice per run, once per anchor, for
+        # data that is identical either way.
+        #
+        # It also has to be the subset for a duller reason: at a site whose
+        # extract sits on a synced drive, scanning it is a page fault
+        # waiting to happen. Rush died in polars' collect_schema on
+        # clif_labs with "Windows fatal exception: page error", which is
+        # Box handing back a placeholder for a mapped page. Scratch is
+        # local by construction.
+        part = attach_features(paths.raw_subset(site), part, cohort_cfg, logger)
+        part = attach_procedures(paths.raw_subset(site), part, logger)
+        per_site.append(part)
+    if not per_site:
+        logger.warning("no site has any cohort rows; nothing to compare")
+        return
+
+    frame = pl.concat(per_site, how="diagonal_relaxed")
+    frame = add_eligibility(frame, trials)
+    for trial in trials:
+        frame = table1_position(frame, trial, logger)
+    frame = attach_severity(paths, frame, logger)
+    frame = add_concordance(frame, trials, logger)
+
+    # ----------------------------------------------- coverage and guideline
+    # Both were computed at the coordinating site by 11 until now, which
+    # meant a site sharing nothing patient-level reported neither -- even
+    # though neither reads an embedding. `rank_and_orphans` wants Regions
+    # rather than Trials, so it gets unfitted ones: every `inside_*` and
+    # `lift_*` column is then absent, `n_regions_inside` is 0 and
+    # `evidence_orphan` collapses to `criteria_orphan`, which is exactly
+    # the criteria-only reading. 11 still recomputes all of it against the
+    # fitted regions when the embeddings are pooled.
+    regions = tuple(
+        Region(
+            key=t.key,
+            label=t.label,
+            n_eligible=int(frame[f"elig_{t.key}"].sum()),
+            fitted=False,
+            applies_to=t.applies_to,
         )
+        for t in trials
+    )
+    frame = rank_and_orphans(frame, regions)
+    frame = assign_guideline(
+        frame, trials, logger, order=specificity_order(trial_cfg, logger)
+    )
+
+    # What the ordering WOULD be if ranked on this cohort, logged next to
+    # the assignment that used the committed one. At the derivation site
+    # this is the line you copy into `specificity_order`; everywhere else
+    # it is the check that says how far this site's eligible shares have
+    # drifted from the ordering being applied to it.
+    local = specificity_from_frame(frame, trials)
+    committed = specificity_order(trial_cfg) or []
+    logger.info(
+        "specificity ranked on THIS cohort, most specific first (the "
+        "derivation site commits this to `specificity_order` in trials.yaml):"
+    )
+    logger.info("  " + " ".join(local))
+    if committed and committed != local:
+        moved = [
+            f"{k}({committed.index(k)}->{local.index(k)})"
+            for k in local
+            if k in committed and committed.index(k) != local.index(k)
+        ]
+        logger.info(
+            f"  differs from the committed order at {len(moved)} of "
+            f"{len(local)} positions: {' '.join(moved)}. The committed "
+            "order is the one that was applied, which is what makes this "
+            f"site's assignment comparable with every other site's."
+        )
+
+    # The per-patient columns, kept for 02 to export under the contract.
+    # Written here rather than recomputed there because the predicates read
+    # raw CLIF and this stage has already paid for that pass -- an earlier
+    # version had `writer.trial_eligibility` do the whole join again, which
+    # doubled the slowest site-side read for the same numbers.
+    #
+    # Only the four `t1_` statistics the contract names travel, plus
+    # eligibility and concordance. `t1_maxdist_` and the two `n_` columns
+    # stay here: nothing is coloured by them, and every continuous column
+    # widens the quasi-identifier the exported row forms.
+    per_patient = frame.select(
+        "hospitalization_id",
+        "site",
+        # `sofa_non_cv` rides along because this is the only frame that has
+        # it. attach_severity computes it here, from the clif_sofa parquet
+        # the derive stage wrote, and it is NOT on the cohort table -- so
+        # omitting it from this select, as the first version did, dropped it
+        # for good. The contract names it, 07 reports severity-adjusted
+        # results against it, and 12 uses it as an adjuster, so losing it
+        # silently turned every adjusted comparison into an unadjusted one.
+        *[
+            c
+            # `sofa_window` beside it: two values, no patient in either, and
+            # it is what tells a reader whether the adjustment came from the
+            # 24h-ending-at-onset window or the contaminated whole-stay
+            # fallback. A pooled analysis can then refuse a mixture instead of
+            # averaging two different quantities under one column name.
+            for c in ("sofa_non_cv", "sofa_window")
+            if c in frame.columns
+        ],
+        *[
+            c
+            for c in frame.columns
+            if c.startswith(contract.TRIAL_PREFIX)
+            or c.startswith(contract.TRIAL_FIT_PREFIXES)
+            or c.startswith(contract.CONCORDANCE_PREFIX)
+        ],
+    )
+
+    for anchor in ANCHORS:
         out = paths.cohort_home / f"trial_patient_anchor-{anchor}.parquet"
         per_patient.write_parquet(out)
         logger.info(
@@ -1351,6 +1578,47 @@ def stage_export(paths, sites, logger, min_cell: int) -> None:
 
 
 # =================================================================== driver
+
+
+SHIPPED_MODELS = {
+    "phenotype_model": "phenotype_model.json",
+    "seymour_model": "seymour_model.json",
+    "bhavani_model": "bhavani_model.json",
+}
+
+
+def resolve_shipped_models(args, models_home):
+    """Fill in each --*-model the caller did not name, INDEPENDENTLY.
+
+    Returns ``(named, filled, absent)``: the schemes the caller named on the
+    command line, those just filled in from ``models/``, and those that are
+    neither -- the shipped file is missing, so the scheme would refit.
+
+    Independence is the whole point. This used to be
+
+        transferred = args.phenotype_model or args.seymour_model or ...
+
+    so naming any ONE model suppressed the shipped defaults for the other two:
+    ``--phenotype-model mine.json`` alone left both sepsis flags empty and
+    refit Seymour and Bhavani -- the same silent refit the default exists to
+    prevent, reached by an invocation that looks more careful rather than
+    less.
+
+    Mutates ``args`` because everything downstream reads the flags off it; the
+    return value is for the caller to report and for tests to assert on.
+    """
+    named, filled, absent = [], [], []
+    for attr, filename in SHIPPED_MODELS.items():
+        if getattr(args, attr):
+            named.append(attr)
+            continue
+        path = models_home / filename
+        if path.is_file():
+            setattr(args, attr, str(path))
+            filled.append(attr)
+        else:
+            absent.append((attr, path))
+    return named, filled, absent
 
 
 def main() -> None:
@@ -1500,67 +1768,62 @@ def main() -> None:
         needs_cohort = "cohort" in STAGES[STAGES.index(args.from_stage):]
     else:
         needs_cohort = args.stage in ("all", "cohort")
-    transferred = (
-        args.phenotype_model or args.seymour_model or args.bhavani_model
-    )
     # The shipped models are the default. They are in git, under models/, and
     # applying them is what every contributing site should do -- so making the
     # three flags mandatory bought nothing except an invocation long enough to
-    # get mangled, which is exactly what happened at Rush: a shell ate the
-    # flags, the cohort stage refit its own clusters, and the only sign was the
-    # word "refit" in one log line among warnings that looked like findings.
+    # get mangled, which is what happened at Rush: a shell ate the flags, the
+    # cohort stage refit its own clusters, and the only sign was the word
+    # "refit" in one log line among warnings that looked like findings.
     #
-    # Defaulting to them is strictly safer than erroring. Refitting is still
-    # something you have to ask for with --refit-phenotypes.
+    # Refitting is still something you have to ask for with --refit-phenotypes.
     models_home = pathlib.Path(__file__).resolve().parent.parent / "models"
-    if needs_cohort and not transferred and not args.refit_phenotypes:
-        shipped = {
-            "phenotype_model": models_home / "phenotype_model.json",
-            "seymour_model": models_home / "seymour_model.json",
-            "bhavani_model": models_home / "bhavani_model.json",
-        }
-        missing = [str(p) for p in shipped.values() if not p.is_file()]
-        if not missing:
-            for attr, path in shipped.items():
-                setattr(args, attr, str(path))
-            transferred = True
+    if args.refit_phenotypes:
+        if any(getattr(args, attr) for attr in SHIPPED_MODELS):
+            parser.error(
+                "--refit-phenotypes contradicts the --*-model flags; pass one "
+                "or the other"
+            )
+        logger.warning(
+            "REFITTING the phenotype models on this cohort. Correct only at "
+            "the derivation site -- the labels will not be comparable with "
+            "those of any other site."
+        )
+    elif needs_cohort:
+        named, filled, absent = resolve_shipped_models(args, models_home)
+        if absent:
+            parser.error(
+                "the cohort stage would REFIT "
+                + ", ".join(attr for attr, _ in absent)
+                + " on this cohort, which is only correct at the derivation "
+                "site. Refitting makes the labels mean something different "
+                "here than at every other site, and the pooled breakdowns "
+                "become uninterpretable.\n\n"
+                "These shipped models are missing from models/:\n"
+                + "".join(f"    {path}\n" for _, path in absent)
+                + "\nEither restore them, or point the flags at your own "
+                "copies:\n"
+                + "".join(
+                    f"    --{attr.replace('_', '-')} <path>\n"
+                    for attr, _ in absent
+                )
+                + "\nAt the derivation site, say so explicitly instead:\n"
+                "    --refit-phenotypes"
+            )
+        if filled:
             logger.info(
                 "applying the phenotype models shipped in models/ -- pass "
                 "--refit-phenotypes to fit new ones on this cohort instead"
             )
-            # NAMED, not summarised. The line above said "the models" and was
-            # true of the Zweck model alone for some time: `sepsis_models` was
-            # built from these flags before this block filled them in, so the
-            # two sepsis schemes silently refit while the log said they were
-            # being applied. One line per scheme means the next time a model
-            # fails to reach a scheme, the log says which.
-            for attr in shipped:
-                logger.info(f"  {attr:<16} {getattr(args, attr)}")
-    if needs_cohort and not transferred and not args.refit_phenotypes:
-        parser.error(
-            "the cohort stage would REFIT the phenotype models on this "
-            "cohort, which is only correct at the derivation site. Refitting "
-            'makes "phenotype II", "beta" and "group A" mean something '
-            "different here than at every other site, and the pooled "
-            "breakdowns become uninterpretable.\n\n"
-            "At a contributing site, apply the shared models:\n"
-            f"    --phenotype-model {models_home / 'phenotype_model.json'}\n"
-            f"    --seymour-model   {models_home / 'seymour_model.json'}\n"
-            f"    --bhavani-model   {models_home / 'bhavani_model.json'}\n\n"
-            "At the derivation site, say so explicitly:\n"
-            "    --refit-phenotypes"
-        )
-    if transferred and args.refit_phenotypes:
-        parser.error(
-            "--refit-phenotypes contradicts the --*-model flags; pass one or "
-            "the other"
-        )
-    if args.refit_phenotypes:
-        logger.warning(
-            "REFITTING the phenotype models on this cohort. Correct only at "
-            "the derivation site -- the labels will not be comparable with "
-            "any other site's."
-        )
+        # NAMED, not summarised, and with the source of each. The line above
+        # said "the models" and was true of the Zweck model alone for some
+        # time: `sepsis_models` was built from these flags before the block
+        # that filled them in, so the two sepsis schemes silently refit while
+        # the log said they were being applied. One line per scheme means the
+        # next time a model fails to reach a scheme, the log says which -- and
+        # now whether it came from a flag or from models/.
+        for attr in SHIPPED_MODELS:
+            source = "flag   " if attr in named else "shipped"
+            logger.info(f"  {attr:<16} {source}  {getattr(args, attr)}")
 
     # BUILT HERE, not up with the config loading, and that placement is the
     # point. `--seymour-model` and `--bhavani-model` are empty until the

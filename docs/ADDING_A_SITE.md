@@ -140,7 +140,7 @@ is resolved on access, not at load, so tier 1 runs without the weights on disk.
 Sanity check — this reads config and lists directories, and opens no CLIF table:
 
 ```bash
-bash hpc/00_preflight.sh
+python code/01_site_tables.py --check
 ```
 
 It verifies that every path resolves and that each site has the 14 required

@@ -7,8 +7,11 @@ from clifcs.config import (
     ROLES,
     Paths,
     RoleViolation,
+    apply_handbook_defaults,
     get_logger,
+    handbook_defaults,
     load_cohort_cfg,
+    load_dynamics_cfg,
     load_paths,
     site_embedding_files,
 )
@@ -28,8 +31,11 @@ __all__ = [
     "ROLES",
     "Paths",
     "RoleViolation",
+    "apply_handbook_defaults",
     "get_logger",
+    "handbook_defaults",
     "load_cohort_cfg",
+    "load_dynamics_cfg",
     "load_paths",
     "site_embedding_files",
 ]

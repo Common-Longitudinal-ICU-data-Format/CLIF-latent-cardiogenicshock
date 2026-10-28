@@ -182,6 +182,40 @@ stage writes its summary tables straight into `output/upload_to_box_<SITE>/`,
 already suppressed, so they exist in one place only; `output/cohort/` keeps the
 patient-level parquet files.
 
+## Read the run back
+
+```bash
+python code/01_report.py --open
+```
+
+Writes `output/report_01.html`: one self-contained page carrying everything the
+run produced and nothing else — a ledger of which stages have output and when
+each was last written, your attrition table, the phenotype and baseline
+breakdowns, token prevalence, the trial analysis, an inventory of the directory
+you are about to send, and a count of how many cells were suppressed in each
+table.
+
+Read it before you send anything. It is built from the same suppressed CSVs
+that go in the bundle, it opens no patient record, and so it can be sent along
+with the directory or shown to whoever has to approve the upload.
+
+It is not `07_report.py`, which assembles the pooled analyses and needs the
+model weights and every later stage. This one needs neither — a stage with no
+output says so in place of its tables, so it is worth running on a partial run
+too.
+
+The coordinating site runs the same report over what arrived:
+
+```bash
+python code/01_report.py --bundles output/received
+```
+
+One `upload_to_box_<SITE>/` per site in that directory, dropped in as it was
+sent. Which site a row belongs to comes from each bundle's `manifest.json`, so
+renaming a directory in transit is harmless. A bundle carries only what the
+export contract permits, and the report names what is therefore absent instead
+of reporting it as a stage that did not run.
+
 ## If a stage fails
 
 The run stops at the stage that failed and prints a block naming it:
@@ -216,6 +250,14 @@ python code/01_site_tables.py --stage derive --force # redo just one stage
 Everything is also written to `output/logs/01_site_tables.log`. If you get
 stuck, send us that file — it has the stage timings and the full traceback.
 
+The log itself is **not** in the directory you send, and should not be put
+there: it prints your attrition ledger and phenotype counts without the
+suppression applied, and it names your `data_dir`, `output_home` and
+`scratch_home` as absolute paths. What does travel is `run_stages.csv` — one
+row per stage, holding its name, whether it succeeded and how long it took, and
+nothing else. That is what lets us tell a complete run from a partial one
+without asking you. Send the log separately if we ask for it.
+
 **If the process disappears without an error**, it ran out of memory. That
 happens in `derive` or `collate` on a large cohort. Give it more memory, or run
 one site at a time with `--site YOURSITE`.
@@ -230,7 +272,9 @@ one site at a time with `--site YOURSITE`.
 output/
   upload_to_box_<SITE>/        <-- SEND THIS
     manifest.json                site, code version, minimum cell size
-    token_levels.csv             the token legend (only with tokenizer_yaml)
+    token_levels.csv             the token legend
+    run_stages.csv               which stages ran, how long each took, and
+                                 the peak memory it needed
     counts/
       filter_ledger.csv          patient flow and attrition
       phenotype_summary.csv      Zweck phenotype breakdown

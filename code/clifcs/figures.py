@@ -69,6 +69,32 @@ def save_figure(figure, out_path: pathlib.Path, attempts: int = 6,
             time.sleep(0.5 * 2**attempt)
 
 
+def save_table(frame, out_path: pathlib.Path, attempts: int = 6) -> None:
+    """
+    write a CSV, retrying if the destination is locked or transiently absent
+
+    The same hazard `save_figure` guards against, on the other kind of
+    output. A sync client mid-operation can make an EXISTING directory report
+    itself as absent for a second or two, not merely lock a file: a run here
+    died with FileNotFoundError on output/tables/GEM-all while the directory
+    was present before and after. So the parent is recreated on each attempt
+    rather than once, and the write is staged so a failure leaves the previous
+    table intact rather than truncated.
+    """
+    out_path = pathlib.Path(out_path)
+    staged = out_path.with_suffix(".tmp.csv")
+    for attempt in range(attempts):
+        try:
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            frame.write_csv(staged)
+            staged.replace(out_path)
+            return
+        except OSError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(0.5 * 2**attempt)
+
+
 #: resolution for the manuscript variants. 500 is above most journals' 300 dpi
 #: floor with room to be cropped or scaled down without resampling artefacts.
 MANUSCRIPT_DPI = 500

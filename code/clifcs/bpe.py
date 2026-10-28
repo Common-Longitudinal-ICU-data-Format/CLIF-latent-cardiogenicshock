@@ -23,9 +23,15 @@ gives a SEGMENTATION into variable-length units. Three consequences:
   * Unit length is learned. Nothing caps a word at four states, so a recurring
     seven-state manoeuvre can become a single word if the data contains one.
 
-THE TERMINAL SYMBOL IS A HARD BOUNDARY. Merges never cross it. Allowing them
-would let BPE learn words that encode death, and every downstream comparison
-would inherit an outcome it was supposed to be predicting.
+BOUNDARY SYMBOLS ARE HARD. Merges never cross one. For the coarse sequences
+that is the terminal "E" alone: allowing merges across it would let BPE learn
+words that encode death, and every downstream comparison would inherit an
+outcome it was supposed to be predicting. The fine-grained sequences add "_"
+at each 6-hour window edge, which is what makes a word there a within-window
+manoeuvre rather than an arbitrary span -- and is only worth doing because
+those sequences carry several letters per window. On the coarse sequences,
+where one letter IS one window, a "_" after every letter would make every
+letter its own word and block every merge.
 
 VOCABULARIES ARE FITTED PER COHORT, by choice. The same string therefore means
 different things in the cardiogenic and septic reports, and the two
@@ -41,7 +47,7 @@ import polars as pl
 
 
 def learn_merges(sequences, n_merges: int = 100, boundary: str = "E",
-                 logger=None):
+                 suffix: str | None = None, logger=None):
     """
     the merge list, in the order BPE learned it
 
@@ -57,8 +63,24 @@ def learn_merges(sequences, n_merges: int = 100, boundary: str = "E",
         pairs = Counter()
         for tokens in corpus:
             for a, b in zip(tokens, tokens[1:]):
-                # never merge across the terminal symbol
-                if boundary in (a, b):
+                # A HARD boundary is never merged at all. For the coarse
+                # sequences that is the terminal "E": merging across it would
+                # let BPE learn words that encode death, and every downstream
+                # comparison would inherit an outcome it was meant to be
+                # predicting. `boundary` is a SET of characters, not one --
+                # `boundary in (a, b)` would compare the whole string against
+                # each token and match nothing.
+                if a in boundary or b in boundary:
+                    continue
+                # A SUFFIX boundary is absorbed rightward instead, the way
+                # SentencePiece attaches its word marker. "320" + "_" becomes
+                # the word "320_", which means "weaned, and that is how the
+                # window ended" and is a different thing from a "320" sitting
+                # mid-window. What stays forbidden is extending PAST a marker:
+                # once a token ends with one, it cannot take another token on
+                # its right, so no word ever spans two windows and "_" only
+                # ever appears as a token's last character.
+                if suffix and a.endswith(suffix):
                     continue
                 pairs[(a, b)] += 1
         if not pairs:
@@ -107,6 +129,72 @@ def apply_merges(sequence: str, merges) -> list[str]:
     return tokens
 
 
+def _neighbours(segmented):
+    """
+    counts of where each word sits and what sits either side of it
+
+    Shared by `vocabulary_table` and `word_context` so the two can never
+    disagree about what precedes what -- they were separate tables with
+    separate passes over the same segmentation, and only one of them carried
+    the context at all.
+
+    NEIGHBOURS ARE LITERALLY ADJACENT. With the window marker absorbed into
+    the token that closes a window -- "320_" the way SentencePiece writes
+    "ing_" -- the next token simply IS the next word, and no skipping is
+    needed. An earlier version stood "_" alone between every pair and had to
+    skip it; attaching it instead makes the question "what came before this"
+    answerable by reading the sequence.
+
+    A BARE "_" still survives where a window held no record at all, since it
+    has nothing on its left to attach to. That is informative rather than
+    noise: a word followed by "_" is a word followed by a window in which
+    nothing was charted.
+    """
+    occurrences, carriers = Counter(), Counter()
+    opens, closes = Counter(), Counter()
+    before, after = {}, {}
+    for tokens in segmented:
+        if not tokens:
+            continue
+        carriers.update(set(tokens))
+        last = len(tokens) - 1
+        for position, word in enumerate(tokens):
+            occurrences[word] += 1
+            if position == 0:
+                opens[word] += 1
+            if position == last:
+                closes[word] += 1
+        for position, word in enumerate(tokens):
+            if position > 0:
+                before.setdefault(word, Counter())[tokens[position - 1]] += 1
+            if position < last:
+                after.setdefault(word, Counter())[tokens[position + 1]] += 1
+    n_patients = sum(1 for t in segmented if t)
+    return occurrences, carriers, opens, closes, before, after, n_patients
+
+
+def _render_neighbours(counter, denominator, edge_label, boundary="_", top=3):
+    """
+    the commonest neighbours as one readable cell
+
+    The window marker is spelled out rather than printed as "_". On the
+    fine-grained sequences it is the commonest neighbour of almost every word,
+    and "_ 61%" in a table column means nothing to a reader who has not read
+    the tokeniser -- what it means is that the word starts, or ends, a 6-hour
+    window.
+    """
+    if not counter:
+        return edge_label
+    pieces = []
+    for word, n in counter.most_common(top):
+        shown = (
+            "(window edge)" if word == boundary
+            else "(record ended)" if word == "E" else word
+        )
+        pieces.append(f"{shown} {n / max(denominator, 1):.0%}")
+    return ", ".join(pieces)
+
+
 def vocabulary_table(sequences, merges, states, logger, top: int = 30):
     """
     the learned words, how common they are, and what they spell out
@@ -133,12 +221,8 @@ def vocabulary_table(sequences, merges, states, logger, top: int = 30):
     segmented = [apply_merges(s, merges) for s in sequences]
     letters = sum(len(s) for s in sequences)
     words = sum(len(t) for t in segmented)
-    carriers = Counter()
-    for tokens in segmented:
-        carriers.update(set(tokens))
-    occurrences = Counter()
-    for tokens in segmented:
-        occurrences.update(tokens)
+    (occurrences, carriers, opens, closes, before, after,
+     n_patients) = _neighbours(segmented)
 
     logger.info(
         f"BPE: {len(merges)} merges, {len(carriers):,} distinct words, "
@@ -147,12 +231,27 @@ def vocabulary_table(sequences, merges, states, logger, top: int = 30):
     rows = []
     for word, n in occurrences.most_common():
         share = carriers[word] / max(len(sequences), 1)
+        # Denominators exclude the occurrences that HAVE no neighbour on that
+        # side: a word appearing only at the start of a sentence has no
+        # preceding word, and dividing by its total occurrences would make
+        # every share of its predecessors sum to less than one for a reason
+        # that has nothing to do with what precedes it.
         rows.append({
             "word": word,
             "length": len(word),
             "occurrences": n,
             "patients": carriers[word],
             "share_of_patients": share,
+            "opens_sentence": opens[word] / max(n, 1),
+            "closes_sentence": closes[word] / max(n, 1),
+            "commonly_preceded_by": _render_neighbours(
+                before.get(word), sum(before.get(word, {}).values()),
+                "(always opens)",
+            ),
+            "commonly_followed_by": _render_neighbours(
+                after.get(word), sum(after.get(word, {}).values()),
+                "(always closes)",
+            ),
             "meaning": spell(word),
         })
     for row in rows[:top]:
@@ -219,28 +318,8 @@ def word_context(segmented, states, logger, top: int = 25):
             return f"{names[0]}  x{len(names)}"
         return "  ->  ".join(names)
 
-    occurrences = Counter()
-    carriers = Counter()
-    opens = Counter()
-    closes = Counter()
-    before = {}
-    after = {}
-    for tokens in segmented:
-        if not tokens:
-            continue
-        carriers.update(set(tokens))
-        for position, word in enumerate(tokens):
-            occurrences[word] += 1
-            if position == 0:
-                opens[word] += 1
-            if position == len(tokens) - 1:
-                closes[word] += 1
-            if position > 0:
-                before.setdefault(word, Counter())[tokens[position - 1]] += 1
-            if position + 1 < len(tokens):
-                after.setdefault(word, Counter())[tokens[position + 1]] += 1
-
-    n_patients = sum(1 for t in segmented if t)
+    (occurrences, carriers, opens, closes, before, after,
+     n_patients) = _neighbours(segmented)
     rows = []
     logger.info("the commonest BPE words, and what surrounds them:")
     for word, count in occurrences.most_common(top):
@@ -248,12 +327,8 @@ def word_context(segmented, states, logger, top: int = 25):
         following = after.get(word, Counter())
         inner = max(count - opens[word], 1)
         outer = max(count - closes[word], 1)
-        top_before = ", ".join(
-            f"{w} {n / inner:.0%}" for w, n in preceding.most_common(3)
-        ) or "(sentence start)"
-        top_after = ", ".join(
-            f"{w} {n / outer:.0%}" for w, n in following.most_common(3)
-        ) or "(sentence end)"
+        top_before = _render_neighbours(preceding, inner, "(sentence start)")
+        top_after = _render_neighbours(following, outer, "(sentence end)")
         rows.append({
             "word": word,
             "length": len(word),

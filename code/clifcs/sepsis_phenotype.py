@@ -651,7 +651,15 @@ def bhavani_trajectories(
         empty = keys.with_columns(
             [pl.lit(None, dtype=pl.Float64).alias(c) for c in columns]
         )
-        return empty, keys.with_columns(n_complete_blocks=pl.lit(0, dtype=pl.Int32))
+        # all three counts, not just the first: the default rule reads
+        # `n_core_blocks` and `n_temp_observations`, and a frame carrying only
+        # `n_complete_blocks` raises ColumnNotFound at the eligibility step
+        # rather than admitting nobody, which is the answer here.
+        return empty, keys.with_columns(
+            n_complete_blocks=pl.lit(0, dtype=pl.Int32),
+            n_core_blocks=pl.lit(0, dtype=pl.Int32),
+            n_temp_observations=pl.lit(0, dtype=pl.Int32),
+        )
 
     long = long.filter(pl.col("block").is_between(0, n_blocks - 1)).with_columns(
         cell=pl.col("vital_category") + "_h" + pl.col("block").cast(pl.String)
@@ -699,7 +707,38 @@ def bhavani_trajectories(
     return wide, counts
 
 
-def _bhavani_eligible(counts: pl.DataFrame, cfg, logger) -> pl.DataFrame:
+def bhavani_rule(cfg) -> dict:
+    """
+    the eligibility rule, as data rather than as control flow
+
+    Returned as a dict so it can be written into the model JSON. The transfer
+    path has to apply the rule the CENTROIDS WERE FITTED UNDER, not whatever
+    this site configures: a site that admitted patients the derivation cohort
+    excluded would place people the clustering never saw, and a site that
+    excluded more would drop patients for a reason no other site applied.
+    Either way the group sizes stop being comparable, which is the one thing
+    the shared model exists to protect.
+    """
+    bh = cfg.bhavani
+    return {
+        "require_complete_blocks": bool(bh.get("require_complete_blocks", False)),
+        "min_complete_blocks": int(bh.min_complete_blocks),
+        "min_core_blocks": int(bh.get("min_core_blocks", 3)),
+        "min_temp_observations": int(bh.get("min_temp_observations", 1)),
+        "core_variables": list(bh.get("core_variables", [])),
+    }
+
+
+def _eligibility_expr(rule: dict) -> pl.Expr:
+    """the rule as a predicate over the per-patient block counts"""
+    if rule["require_complete_blocks"]:
+        return pl.col("n_complete_blocks") >= int(rule["min_complete_blocks"])
+    return (pl.col("n_core_blocks") >= int(rule["min_core_blocks"])) & (
+        pl.col("n_temp_observations") >= int(rule["min_temp_observations"])
+    )
+
+
+def _bhavani_eligible(counts: pl.DataFrame, rule: dict, logger) -> pl.DataFrame:
     """
     who has enough of a trajectory to be clustered
 
@@ -708,31 +747,30 @@ def _bhavani_eligible(counts: pl.DataFrame, cfg, logger) -> pl.DataFrame:
     `require_complete_blocks` there for why the literal one is not the default
     and what it costs.
     """
-    bh = cfg.bhavani
-    if bool(bh.get("require_complete_blocks", False)):
-        rule = pl.col("n_complete_blocks") >= int(bh.min_complete_blocks)
+    predicate = _eligibility_expr(rule)
+    if rule["require_complete_blocks"]:
         logger.info(
             "Bhavani: applying the published rule literally "
-            f"(>= {int(bh.min_complete_blocks)} blocks with every vital measured)"
+            f"(>= {int(rule['min_complete_blocks'])} blocks with every vital "
+            "measured)"
         )
     else:
-        rule = (pl.col("n_core_blocks") >= int(bh.get("min_core_blocks", 3))) & (
-            pl.col("n_temp_observations") >= int(bh.get("min_temp_observations", 1))
-        )
         logger.info(
-            f"Bhavani: >= {int(bh.get('min_core_blocks', 3))} blocks of "
-            f"{', '.join(bh.get('core_variables', []))} plus >= "
-            f"{int(bh.get('min_temp_observations', 1))} temperature, with "
+            f"Bhavani: >= {int(rule['min_core_blocks'])} blocks of "
+            f"{', '.join(rule['core_variables'])} plus >= "
+            f"{int(rule['min_temp_observations'])} temperature, with "
             "temperature carried forward (a documented departure from the "
             "published rule -- see config)"
         )
-        strict = int((counts["n_complete_blocks"] >= int(bh.min_complete_blocks)).sum())
+        strict = int(
+            (counts["n_complete_blocks"] >= int(rule["min_complete_blocks"])).sum()
+        )
         logger.info(
             f"  the literal rule would admit {strict} of {counts.height} "
             f"({strict / max(counts.height, 1):.0%}); this one admits "
-            f"{int(counts.select(rule.sum()).item())}"
+            f"{int(counts.select(predicate.sum()).item())}"
         )
-    return counts.filter(rule).select("hospitalization_id")
+    return counts.filter(predicate).select("hospitalization_id")
 
 
 def _clip_implausible_cells(
@@ -757,8 +795,8 @@ def _clip_implausible_cells(
 
 
 def _fill_trajectories(
-    matrix: np.ndarray, n_vars: int, n_blocks: int
-) -> np.ndarray:
+    matrix: np.ndarray, n_vars: int, n_blocks: int, medians: np.ndarray | None = None
+) -> tuple[np.ndarray, np.ndarray]:
     """
     carry each vital forward into empty hours, then fall back to the median
 
@@ -766,6 +804,13 @@ def _fill_trajectories(
     k-means cannot, so this stands in. Last-observation-carried-forward within
     a variable is how a chart is read, and the column median is the fallback for
     a patient whose first hours hold nothing at all.
+
+    Returns the filled matrix and the medians it used, so a fit can record them
+    and a transfer can reuse them. `medians=None` computes them from `matrix`,
+    which is right at the derivation site and wrong anywhere else: a column
+    median is a property of the cohort, so letting each site compute its own
+    would fill the same empty hour with a different value per site and move
+    patients between groups for no clinical reason.
     """
     filled = matrix.copy()
     for v in range(n_vars):
@@ -779,12 +824,13 @@ def _fill_trajectories(
             block[missing, h] = block[missing, h + 1]
         filled[:, v * n_blocks : (v + 1) * n_blocks] = block
 
-    with np.errstate(invalid="ignore"):
-        medians = np.nanmedian(filled, axis=0)
+    if medians is None:
+        with np.errstate(invalid="ignore"):
+            medians = np.nanmedian(filled, axis=0)
     medians = np.where(np.isfinite(medians), medians, 0.0)
     gaps = ~np.isfinite(filled)
     filled[gaps] = np.take(medians, np.where(gaps)[1])
-    return filled
+    return filled, medians
 
 
 def assign_bhavani(
@@ -805,7 +851,8 @@ def assign_bhavani(
     n_blocks = int(bh.window_hours) // int(bh.block_hours)
     columns = [f"{v}_h{b}" for v in variables for b in range(n_blocks)]
 
-    eligible = _bhavani_eligible(complete, cfg, logger)
+    rule = bhavani_rule(cfg)
+    eligible = _bhavani_eligible(complete, rule, logger)
     usable = trajectories.join(eligible, on="hospitalization_id", how="semi")
     logger.info(
         f"Bhavani: {usable.height} of {trajectories.height} patients "
@@ -826,7 +873,7 @@ def assign_bhavani(
         )
 
     raw = usable.select(columns).to_numpy().astype(float)
-    filled = _fill_trajectories(raw, len(variables), n_blocks)
+    filled, medians = _fill_trajectories(raw, len(variables), n_blocks)
 
     # standardised to the cohort's own mean and SD, as the paper specifies.
     # Under federation this is the step that has to use transferred moments
@@ -912,6 +959,16 @@ def assign_bhavani(
         "scale": scale,
         "centroids": centroids,
         "labels": [order[c] for c in range(len(centroids))],
+        # The two preparation steps, recorded so the transfer path can repeat
+        # them. Without these a receiving site ran `apply_model` on raw
+        # trajectories: every unmeasured hour standardised to a non-finite z,
+        # which `apply_model` replaces with 0.0 -- the derivation mean -- so a
+        # patient with almost nothing charted landed on whichever centroid sits
+        # nearest the origin and came back with a confident label. The fit path
+        # left that patient null instead, and both paths wrote an identically
+        # named column.
+        "eligibility": rule,
+        "fill_medians": [float(x) for x in medians],
     }
     return out, centroid_frame, model
 
@@ -963,6 +1020,18 @@ def save_model(path, model: dict, scheme: str, extra: dict | None = None) -> Non
         # predates the fix" -- see the check there.
         "log_transform": list(model.get("log_transform", [])),
         "z_clip": model.get("z_clip"),
+        # Bhavani only, and absent rather than empty for Seymour, so
+        # `apply_bhavani` can tell a model that recorded no rule from one
+        # fitted before the rule travelled. Enumerated here for the same
+        # reason `log_transform` is: a field this payload does not name does
+        # not reach the receiving site, however carefully the fit put it in
+        # the model dict.
+        **({"eligibility": dict(model["eligibility"])} if "eligibility" in model else {}),
+        **(
+            {"fill_medians": [float(x) for x in model["fill_medians"]]}
+            if "fill_medians" in model
+            else {}
+        ),
         **(extra or {}),
     }
     pathlib.Path(path).write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -1034,6 +1103,133 @@ def apply_model(
             [model["labels"][i] for i in nearest],
             dtype=pl.Enum(labels),
         )
+    )
+
+
+def apply_bhavani(
+    trajectories: pl.DataFrame, counts: pl.DataFrame, path, cfg, logger
+) -> pl.DataFrame:
+    """
+    label patients with a Bhavani model fitted elsewhere
+
+    `apply_model` alone is not the model that was fitted. The fit path applies
+    two steps before the centroids ever see a patient, and the transfer path
+    applied neither:
+
+      * **eligibility** -- `_bhavani_eligible` keeps only patients with enough
+        charted trajectory and deliberately leaves the rest null, because "not
+        enough vitals in eight hours" is a real category
+      * **carry-forward** -- `_fill_trajectories` does LOCF, then a backward
+        pass for leading gaps, then a median fallback, and the shipped
+        centroids were fitted on those filled values
+
+    Without them, every unmeasured hour standardises to a non-finite z, which
+    `apply_model` replaces with 0.0 -- the derivation mean. A patient with
+    almost nothing charted lands on whichever centroid sits nearest the origin
+    and comes back with a confident label, in a column named and typed exactly
+    like the one the fit path writes. That is worse than a crash and worse than
+    a null, because nothing downstream can tell the difference.
+
+    Both steps are taken from the model file, not from this site's config, so
+    the preparation matches the one the centroids were fitted under.
+    """
+    import json
+    import pathlib as _pathlib
+
+    model = json.loads(_pathlib.Path(path).read_text(encoding="utf-8"))
+    if model.get("scheme") != "bhavani":
+        raise ValueError(
+            f"{path} holds a {model.get('scheme')!r} model, not 'bhavani'"
+        )
+    columns = list(model["features"])
+    missing = [c for c in columns if c not in trajectories.columns]
+    if missing:
+        raise KeyError(
+            "the bhavani model needs trajectory cell(s) this site did not "
+            f"build: {missing}. They cannot be dropped locally -- the "
+            "centroids were fitted in a space that includes them."
+        )
+
+    # The (variable, hour) layout, recovered from the feature names rather than
+    # from cfg, since the fill slices by variable and the model decides the
+    # ordering. Asserted rather than assumed: a mis-sliced matrix would carry
+    # one vital forward into another and still produce labels.
+    order = []
+    for name in columns:
+        variable = name.rsplit("_h", 1)[0]
+        if variable not in order:
+            order.append(variable)
+    n_blocks = len(columns) // len(order)
+    expected = [f"{v}_h{b}" for v in order for b in range(n_blocks)]
+    if columns != expected:
+        raise ValueError(
+            f"{path} lists its trajectory cells in an order this code cannot "
+            "slice by variable; expected every hour of one vital to be "
+            "contiguous"
+        )
+
+    rule = model.get("eligibility")
+    if rule is None:
+        rule = bhavani_rule(cfg)
+        logger.warning(
+            f"{path} does not record the eligibility rule its centroids were "
+            "fitted under, so this site's own rule is being applied. If the "
+            "two differ, this site admits or excludes patients the derivation "
+            "cohort did not and the group sizes stop being comparable. "
+            "Re-running the cohort stage with --refit-phenotypes at the "
+            "derivation site records it."
+        )
+    eligible = _bhavani_eligible(counts, rule, logger)
+    usable = trajectories.join(eligible, on="hospitalization_id", how="semi")
+    logger.info(
+        f"Bhavani: {usable.height} of {trajectories.height} patients "
+        f"({usable.height / max(trajectories.height, 1):.0%}) have a usable "
+        "trajectory"
+    )
+
+    null_column = pl.lit(None, dtype=pl.Enum(BHAVANI_LABELS)).alias(
+        "bhavani_phenotype"
+    )
+    if usable.height == 0:
+        logger.warning(
+            "Bhavani: no patient at this site has a usable trajectory; every "
+            "patient is left unassigned"
+        )
+        return trajectories.select("hospitalization_id").with_columns(null_column)
+
+    fitted_medians = model.get("fill_medians")
+    if fitted_medians is None:
+        logger.warning(
+            f"{path} does not record the column medians its centroids were "
+            "fitted on, so the median fallback uses this cohort's own. It "
+            "applies only to an eligible patient whose variable is empty "
+            "across the whole window, but it fills that gap with a different "
+            "value at every site."
+        )
+        medians = None
+    else:
+        medians = np.asarray(fitted_medians, dtype=float)
+        if medians.shape[0] != len(columns):
+            raise ValueError(
+                f"{path} records {medians.shape[0]} fill medians for "
+                f"{len(columns)} features"
+            )
+
+    raw = usable.select(columns).to_numpy().astype(float)
+    filled, _ = _fill_trajectories(raw, len(order), n_blocks, medians)
+
+    prepared = pl.DataFrame(
+        {
+            "hospitalization_id": usable["hospitalization_id"],
+            **{c: filled[:, i] for i, c in enumerate(columns)},
+        }
+    )
+    labelled = apply_model(prepared, path, "bhavani", BHAVANI_LABELS, logger)
+
+    # Ineligible patients come back null from the left join, which is what the
+    # fit path writes for them -- see the comment at the end of assign_bhavani.
+    return trajectories.select("hospitalization_id").join(
+        labelled, on="hospitalization_id", how="left"
     )
 
 
@@ -1120,8 +1316,8 @@ def attach(
         )
     )
     if "bhavani" in models:
-        bhavani = apply_model(
-            trajectories, models["bhavani"], "bhavani", BHAVANI_LABELS, logger
+        bhavani = apply_bhavani(
+            trajectories, counts, models["bhavani"], cfg, logger
         )
     else:
         bhavani, centroids, model = assign_bhavani(trajectories, counts, cfg, logger)
@@ -1209,6 +1405,10 @@ def summarize(
         row = {
             scheme: label,
             "n": part.height,
+            # the denominator `share` is over, exported so the share can be
+            # checked. Without it the share was a rate over a number that
+            # appeared nowhere in the table.
+            "n_total": frame.height,
             "share": part.height / max(frame.height, 1),
             "mortality": float(part["in_hospital_mortality"].mean() or 0.0)
             if part.height
@@ -1218,15 +1418,24 @@ def summarize(
             else None,
         }
         # one column per site rather than the hardcoded pair the Zweck
-        # summary used, so a third site needs no code change
+        # summary used, so a third site needs no code change.
+        #
+        # NO per-site SHARE. `share_<site>` was `n_<site>` over that site's
+        # sepsis cohort, a denominator this table does not carry -- and because
+        # `writer._DERIVED` matched statistic names exactly, `share_ucmc` and
+        # friends matched nothing and were never blanked, while the paired
+        # `n_<site>` was. The share handed the suppressed count straight back.
+        #
+        # Removed rather than legitimised: giving each site its own exported
+        # denominator would add two columns per hospital to a table that has to
+        # scale to a dozen, and the information is already in `n_<site>` beside
+        # the site cohort sizes in filter_ledger.csv. At a contributing site,
+        # where `sites` has one element, it was equal to `share` anyway.
         for site in sites:
-            at_site = frame.filter(pl.col("site") == site)
             row[f"n_{site}"] = int(
-                at_site.filter(pl.col(column) == label).height
-            )
-            row[f"share_{site}"] = (
-                at_site.filter(pl.col(column) == label).height
-                / max(at_site.height, 1)
+                frame.filter(
+                    (pl.col("site") == site) & (pl.col(column) == label)
+                ).height
             )
         rows.append(row)
 
@@ -1234,9 +1443,13 @@ def summarize(
     summary = pl.DataFrame(rows)
 
     logger.info(f"{scheme} phenotypes, n={frame.height}:")
+    site_totals = {
+        s: max(frame.filter(pl.col("site") == s).height, 1) for s in sites
+    }
     for row in summary.iter_rows(named=True):
+        # the per-site share is computed here for the log and does not travel
         per_site = "  ".join(
-            f"{s} {row[f'share_{s}']:.1%}" for s in sites
+            f"{s} {row[f'n_{s}'] / site_totals[s]:.1%}" for s in sites
         )
         logger.info(
             f"  {row[scheme]:<8} n={row['n']:<6} {row['share']:.1%}  "

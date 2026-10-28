@@ -111,8 +111,11 @@ def characterise(frame: pl.DataFrame, paths, label: str, logger) -> pl.DataFrame
             ("nee_median", "median norepinephrine equivalents", "median"),
             ("n_vasopressors_max", "peak vasoactive agents", "median"),
             ("icu_los_days", "ICU length of stay (days)", "median"),
+            ("icu_free_days", "ICU-free days to 28", "median"),
             ("ever_imv", "invasive ventilation", "share"),
+            ("new_imv_after", "ventilation begun after +48h", "share"),
             ("ever_rrt", "renal replacement", "share"),
+            ("new_rrt_after", "dialysis begun after +48h", "share"),
             ("in_hospital_mortality", "died in hospital", "share"),
         ):
             if column not in part.columns:
@@ -809,6 +812,176 @@ def state_crosstab(long_states, logger):
             f"{cell(row['MAP <65'])} {cell(row['both MAP levels'])}"
         )
     return table
+
+
+def outcome_panel(labels_frame, perfusion, counts, vocab_families, offsets,
+                  logger, split_hours: float = 48.0, horizon_days: int = 28):
+    """
+    four outcomes with their timing made explicit
+
+    Mortality is clean. The other three each need a decision that changes what
+    they mean:
+
+      ICU-FREE DAYS, not raw length of stay. A patient who dies on day two has
+      a stay of two days, so raw LOS conflates recovering quickly with dying
+      quickly -- and in a mortality-adjacent analysis that inverts the result.
+      Death scores zero ICU-free days, which ranks it worst while still
+      rewarding a short stay among survivors.
+
+      NEW ventilation and NEW dialysis, counted only when they begin AFTER the
+      window the trajectory describes. `ever_imv` includes patients ventilated
+      on arrival, which is baseline rather than outcome: nothing in the first
+      48 hours caused it.
+
+    Both support measures stay partly circular however they are timed, because
+    GEM read the RESP and CRRT tokens -- "the embedding predicts future
+    ventilation" is partly "the embedding read the ventilator settings".
+    Mortality carries no such leak, which is why it stays the primary.
+    """
+    frame = labels_frame
+
+    if "icu_los_days" in frame.columns and "in_hospital_mortality" in frame.columns:
+        frame = frame.with_columns(
+            icu_free_days=pl.when(pl.col("in_hospital_mortality").fill_null(False))
+            .then(pl.lit(0.0))
+            .otherwise(
+                (pl.lit(float(horizon_days)) - pl.col("icu_los_days"))
+                .clip(lower_bound=0.0)
+            )
+        )
+        logger.info(
+            f"ICU-free days to {horizon_days}: median "
+            f"{frame['icu_free_days'].median():.1f}, "
+            f"{(frame['icu_free_days'] == 0).mean():.1%} at zero "
+            "(died, or stayed the whole horizon)"
+        )
+
+    if not perfusion.is_empty() and "on_imv" in perfusion.columns:
+        timing = perfusion.group_by("hospitalization_id").agg(
+            imv_early=(
+                pl.col("on_imv").filter(pl.col("offset_hours") <= split_hours)
+                .max() > 0
+            ),
+            imv_late=(
+                pl.col("on_imv").filter(pl.col("offset_hours") > split_hours)
+                .max() > 0
+            ),
+        ).with_columns(
+            new_imv_after=pl.col("imv_late").fill_null(False)
+            & ~pl.col("imv_early").fill_null(False)
+        )
+        frame = frame.join(
+            timing.select("hospitalization_id", "new_imv_after"),
+            on="hospitalization_id", how="left",
+        )
+        logger.info(
+            f"new ventilation after {split_hours:+.0f}h: "
+            f"{int(frame['new_imv_after'].fill_null(False).sum()):,} patients "
+            f"({frame['new_imv_after'].fill_null(False).mean():.1%})"
+        )
+
+    crrt = [t for t, family in vocab_families.items() if family == "CRRT"]
+    if crrt:
+        windows = counts.filter(pl.col("token_id").is_in(crrt)).group_by(
+            "hospitalization_id"
+        ).agg(
+            rrt_early=(pl.col("window") <= split_hours).any(),
+            rrt_late=(pl.col("window") > split_hours).any(),
+        )
+        frame = frame.join(windows, on="hospitalization_id", how="left")
+        frame = frame.with_columns(
+            new_rrt_after=pl.col("rrt_late").fill_null(False)
+            & ~pl.col("rrt_early").fill_null(False)
+        ).drop("rrt_early", "rrt_late")
+        logger.info(
+            f"new dialysis after {split_hours:+.0f}h: "
+            f"{int(frame['new_rrt_after'].sum()):,} patients "
+            f"({frame['new_rrt_after'].mean():.1%})"
+        )
+    return frame
+
+
+def bpe_stability(sequences, sizes, n_merges, seed, logger, probe: int = 2000):
+    """
+    how much the learned vocabulary depends on how many sequences it saw
+
+    Fits BPE on nested subsamples and compares each against the full-corpus
+    fit three ways, because the three disagree and the disagreement is the
+    finding.
+
+      IDENTICAL PREFIX is the strictest. BPE is sequential -- merge k is chosen
+      from a corpus already rewritten by merges 1..k-1 -- so once two fits
+      diverge, nothing after is strictly comparable. It is also brutal on ties:
+      after '0'+'0' becomes '00', the candidates '00'+'00', '00'+'0' and
+      '0'+'00' sit within a few counts of each other, and a small sample flips
+      their order without changing what the vocabulary ends up containing. A
+      low prefix share is therefore evidence about ORDER, not about content.
+
+      MERGES IN COMMON ignores order entirely and asks only whether the two
+      fits found the same pairs.
+
+      SEGMENTATION AGREEMENT is the one that matters downstream. Both merge
+      lists are applied to the same held-out sequences and compared on the
+      words they produce, because nothing in this analysis reads the merge
+      list -- everything reads the segmentation. Two fits that learned the same
+      merges in a different order segment identically and should score as
+      agreeing, which only this measure does.
+    """
+    from clifcs.bpe import apply_merges, learn_merges
+
+    rng = np.random.default_rng(seed)
+    full = learn_merges(sequences, n_merges=n_merges)
+    held_out = [
+        sequences[i]
+        for i in rng.choice(
+            len(sequences), size=min(probe, len(sequences)), replace=False
+        )
+    ]
+    reference = [apply_merges(s, full) for s in held_out]
+
+    rows = []
+    for size in sizes:
+        if size >= len(sequences):
+            continue
+        picked = [
+            sequences[i]
+            for i in rng.choice(len(sequences), size=size, replace=False)
+        ]
+        partial = learn_merges(picked, n_merges=n_merges)
+        agree = 0
+        for a, b in zip(full, partial):
+            if a != b:
+                break
+            agree += 1
+        shared = len(set(full) & set(partial))
+
+        other = [apply_merges(s, partial) for s in held_out]
+        same_sentence = sum(a == b for a, b in zip(reference, other))
+        words_a = Counter(w for t in reference for w in t)
+        words_b = Counter(w for t in other for w in t)
+        overlap = sum((words_a & words_b).values())
+        rows.append({
+            "sequences": size,
+            "merges_learned": len(partial),
+            "identical_prefix": agree,
+            "prefix_share": agree / max(len(full), 1),
+            "merges_in_common_any_order": shared,
+            "sentences_segmented_identically": same_sentence / max(len(held_out), 1),
+            "word_overlap": overlap / max(sum(words_a.values()), 1),
+        })
+        logger.info(
+            f"    n={size:>6,}: prefix {agree:>3} ({agree / max(len(full), 1):>4.0%}), "
+            f"{shared}/{len(full)} merges in common, "
+            f"{same_sentence / max(len(held_out), 1):.1%} of held-out sentences "
+            f"segmented identically"
+        )
+    rows.append({
+        "sequences": len(sequences), "merges_learned": len(full),
+        "identical_prefix": len(full), "prefix_share": 1.0,
+        "merges_in_common_any_order": len(full),
+        "sentences_segmented_identically": 1.0, "word_overlap": 1.0,
+    })
+    return pl.DataFrame(rows)
 
 
 def describe_states(counts, token_ids, states, patients, offsets, names, logger):
@@ -1677,6 +1850,16 @@ def main() -> None:
             "merged": [a + b for a, b in merges],
         }).write_csv(tables_home_early / f"bpe_merges_{args.subset}.csv")
 
+        # How much of this vocabulary is a property of the cohort rather than
+        # of its size. Asked before deciding whether to refit on all shock
+        # instead: if the curve is flat by a few thousand sequences, pooling
+        # the cohorts buys stability that is already there, at the cost of a
+        # vocabulary that belongs to neither.
+        logger.info("BPE stability against the full-corpus fit:")
+        bpe_stability(
+            raw_sequences, (1000, 2500, 5000), 100, args.seed, logger
+        ).write_csv(tables_home_early / f"bpe_stability_{args.subset}.csv")
+
         # the sentence as a string of space-separated words, plus the 0-48h
         # prefix that the latent comparison uses -- nine windows, which is the
         # only stretch where the state grid and the embedding grid overlap
@@ -1751,6 +1934,13 @@ def main() -> None:
         )
     else:
         logger.warning("no perfusion state table: treatment columns omitted")
+
+    labels_frame = outcome_panel(
+        labels_frame, perfusion, counts,
+        (vocabulary(str(paths.tokenizer_yaml))[1]
+         if paths.tokenizer_yaml_or_none is not None else {}),
+        OFFSETS, logger,
+    )
 
     names, _families = (
         vocabulary(str(paths.tokenizer_yaml))
@@ -1844,6 +2034,22 @@ def main() -> None:
                     tables_home
                     / f"divergence_outcomes_prefix{prefix_length}_{args.subset}.csv"
                 )
+
+    # The outcome panel lives on labels_frame, but 15 and 16 read the parquet,
+    # so the four outcomes have to cross over explicitly -- the same omission
+    # that left 14 without a bpe_sentence_48h column.
+    carried = [
+        c for c in ("in_hospital_mortality", "icu_los_days", "icu_free_days",
+                    "new_imv_after", "new_rrt_after", "ever_imv", "ever_rrt",
+                    "site")
+        if c in labels_frame.columns and c not in assignments.columns
+    ]
+    if carried:
+        assignments = assignments.join(
+            labels_frame.select(["hospitalization_id"] + carried),
+            on="hospitalization_id", how="left",
+        )
+        logger.info(f"carried into the parquet: {', '.join(carried)}")
 
     out = (
         paths.patient_level_home

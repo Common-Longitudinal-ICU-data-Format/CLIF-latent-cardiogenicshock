@@ -194,13 +194,29 @@ def _join_state(cohort: pl.DataFrame, state: pl.DataFrame) -> pl.DataFrame:
     return cohort.drop(shared).join(state, on="hospitalization_id", how="left")
 
 
-def summarise(frame: pl.DataFrame, site: str, min_cell: int) -> pl.DataFrame:
+def summarise(frame: pl.DataFrame, site: str) -> pl.DataFrame:
     """
-    median [IQR] and n (%) per coded shock type, long-form and suppressed
+    median [IQR] and n (%) per coded shock type, long-form
 
     Long rather than wide -- one row per (variable, shock type) -- because a
     wide table has to be rebuilt whenever a shock type is added or a site
     reports a different set, and the report renders either shape equally well.
+
+    EMITS TRUE VALUES. Suppression is applied afterwards by
+    `clifcs.export.suppress.suppress_counts`, which is the only thing that
+    decides what may be published. This function used to implement its own
+    policy inline, and the policy it implemented was incomplete in a way that
+    is hard to see: on a binary row it put `positives` -- the NUMERATOR -- in
+    `n_measured`, left the real denominator unexported, and checked only that
+    the positive arm was not small. The negative arm, `len(measured) -
+    positives`, was never checked, and `n_measured / share` gave the
+    denominator back anyway.
+
+    So binary rows now carry `n_measured` (the denominator, as the name says)
+    and `n_positive` (the numerator), and the proportion is `share_positive`
+    rather than `share`. The rename matters: `share` means "over `n_total`"
+    everywhere else in the bundle, and the registry permits a column name only
+    one denominator.
     """
     rows: list[dict] = []
     groups = [
@@ -209,24 +225,24 @@ def summarise(frame: pl.DataFrame, site: str, min_cell: int) -> pl.DataFrame:
     for group in groups:
         part = frame.filter(pl.col("shock_type") == group)
         n_group = part.height
-        suppressed = 0 < n_group < min_cell
 
         for key, label, places in CONTINUOUS:
             if key not in part.columns:
                 continue
             values = part[key].cast(pl.Float64, strict=False).drop_nulls()
-            ok = (not suppressed) and len(values) >= min_cell
+            measured = len(values)
             rows.append({
                 "site": site,
                 "shock_type": group,
                 "variable": label,
                 "kind": "continuous",
-                "n": n_group if not suppressed else None,
-                "n_measured": len(values) if ok else None,
-                "median": round(values.median(), places) if ok else None,
-                "q1": round(values.quantile(0.25), places) if ok else None,
-                "q3": round(values.quantile(0.75), places) if ok else None,
-                "share": None,
+                "n": n_group,
+                "n_measured": measured,
+                "n_positive": None,
+                "median": round(values.median(), places) if measured else None,
+                "q1": round(values.quantile(0.25), places) if measured else None,
+                "q3": round(values.quantile(0.75), places) if measured else None,
+                "share_positive": None,
             })
 
         for key, label, null_is_false in BINARY:
@@ -237,24 +253,24 @@ def summarise(frame: pl.DataFrame, site: str, min_cell: int) -> pl.DataFrame:
                 series = series.fill_null(False)
             measured = series.drop_nulls()
             positives = int(measured.sum()) if len(measured) else 0
-            # the count is suppressed when it names few patients, and so is the
-            # share, which would otherwise hand it straight back
-            ok = (
-                not suppressed
-                and len(measured) >= min_cell
-                and not (0 < positives < min_cell)
-            )
             rows.append({
                 "site": site,
                 "shock_type": group,
                 "variable": label,
                 "kind": "binary",
-                "n": n_group if not suppressed else None,
-                "n_measured": positives if ok else None,
+                "n": n_group,
+                "n_measured": len(measured),
+                "n_positive": positives,
                 "median": None,
                 "q1": None,
                 "q3": None,
-                "share": round(positives / len(measured), 4) if ok else None,
+                # NOT rounded. `publishable` recovers the numerator as
+                # share * n_measured, and a value rounded to four places lands
+                # between integers at these denominators, which turns the
+                # numerator test into a guess.
+                "share_positive": (
+                    positives / len(measured) if len(measured) else None
+                ),
             })
 
     return pl.DataFrame(rows) if rows else pl.DataFrame()

@@ -533,27 +533,39 @@ def _warn_unjoinable_formats(data_dir, shock: pl.DataFrame, logger) -> None:
     therefore returns zero from the CPT arm and a plausible-looking number from
     the PCS arm, with nothing to indicate half the search silently found
     nothing. Checking coverage per format turns that into a visible warning.
+
+    ONE PASS, NO PYTHON SETS. This built a Python set of every distinct id per
+    format -- 1.72M interned strings for the CPT arm alone, at roughly 80 bytes
+    apiece before the set's own overhead -- and re-collected the table once per
+    format to do it. The same two numbers come out of a single grouped scan
+    with `is_in` against a polars Series, which stays in Arrow memory and reads
+    the file once. The warning text and the 1% threshold are unchanged; the
+    test is that the emitted warnings are identical.
     """
-    cohort_ids = set(shock["hospitalization_id"].to_list())
-    frame = scan(data_dir, "clif_patient_procedures").select(
-        "hospitalization_id", "procedure_code_format"
-    )
-    formats = (
-        frame.select("procedure_code_format").unique().collect().to_series().to_list()
-    )
-    for fmt in formats:
-        ids = set(
-            frame.filter(pl.col("procedure_code_format") == fmt)
-            .select("hospitalization_id")
-            .unique()
-            .collect()
-            .to_series()
-            .to_list()
+    cohort_ids = shock.select("hospitalization_id").unique().to_series()
+    n_cohort = max(cohort_ids.len(), 1)
+    # `.implode()` because a bare Series argument to `is_in` is ambiguous and
+    # deprecated in polars 1.x -- it reads as "one list value per row" rather
+    # than "this set". A one-element list Series broadcasts, which is the
+    # membership test meant here.
+    wanted = cohort_ids.implode()
+
+    coverage = (
+        scan(data_dir, "clif_patient_procedures")
+        .select("hospitalization_id", "procedure_code_format")
+        .unique()
+        .group_by("procedure_code_format")
+        .agg(
+            n_ids=pl.len(),
+            n_matched=pl.col("hospitalization_id").is_in(wanted).sum(),
         )
-        covered = len(cohort_ids & ids) / max(len(cohort_ids), 1)
+        .collect()
+    )
+    for fmt, n_ids, n_matched in coverage.iter_rows():
+        covered = n_matched / n_cohort
         if covered < 0.01:
             logger.warning(
-                f"clif_patient_procedures format {fmt!r} has {len(ids)} ids but "
+                f"clif_patient_procedures format {fmt!r} has {n_ids} ids but "
                 f"matches {covered:.1%} of the cohort: it is keyed on something "
                 "other than hospitalization_id, so procedures recorded under it "
                 "cannot be used here"

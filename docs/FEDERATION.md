@@ -411,7 +411,7 @@ here in case the question returns:
 
 The pipeline as written does none of these. It does the co-located analysis,
 and the figure it exists for is described in
-[RUNNING_ON_HPC.md](RUNNING_ON_HPC.md).
+[TIER_2_AND_POOLED.md](TIER_2_AND_POOLED.md).
 
 ---
 

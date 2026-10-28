@@ -42,6 +42,7 @@ nothing said it could not. A denylist cannot see a column nobody thought of.
 from __future__ import annotations
 
 import dataclasses
+import pathlib
 import re
 
 import polars as pl
@@ -51,7 +52,11 @@ from clifcs.export import suppress
 #: bumped whenever the permitted column set changes in a way that makes an
 #: older bundle non-conformant. The coordinating site compares this against
 #: each bundle's manifest and refuses a mismatch rather than guessing.
-SCHEMA_VERSION = "3.0"
+# 3.1: every published statistic now names the count it was computed over,
+# and an unregistered numeric column refuses the export. Rates that used to
+# travel over an unexported or superset denominator are blanked, so a 3.0
+# bundle is NOT interchangeable with a 3.1 one.
+SCHEMA_VERSION = "3.1"
 
 #: the embedding itself: `emb_0000 .. emb_{dim-1}`.
 #:
@@ -153,6 +158,13 @@ OUTCOMES: tuple[Permitted, ...] = (
     Permitted("sex_category", "reported in every trial baseline table"),
     Permitted("hours_admission_to_cs_onset", "relative, so not a HIPAA date"),
     Permitted("sofa_non_cv", "the severity adjustment 07 reports against"),
+    # Which window produced `sofa_non_cv`: "pre24h_onset" (the worst score in
+    # the 24h ending at onset, which is the adjuster) or "whole_stay" (the
+    # contaminated fallback). Two values, no patient in either -- it is there
+    # so a bundle says which definition it used, and so a pooled analysis can
+    # refuse a mixture instead of averaging two different quantities under one
+    # column name.
+    Permitted("sofa_window", "which SOFA window the adjustment came from"),
 )
 
 # ---------------------------------------------------------------------------
@@ -375,20 +387,35 @@ def validate_patient_frame(frame: pl.DataFrame, origin: str) -> None:
 
 def validate_counts_frame(frame: pl.DataFrame, origin: str, min_cell: int) -> None:
     """
-    refuse an aggregate table that still carries a suppressible cell
+    refuse an aggregate table that still carries a recoverable cell
 
-    Counts travel more freely than patient rows, but a count of 2 in a
-    phenotype x shock-type x site cell is closer to naming a patient than to
-    being a statistic. `clifcs.export.suppress` is what produces a conformant
-    table; this checks the result, so a table assembled by hand cannot skip it.
+    `clifcs.export.suppress` is what produces a conformant table; this checks
+    the result, so a table assembled by hand, or by a producer that forgot,
+    cannot skip it. Neither end assumes the other ran -- that is the whole
+    point of checking twice -- so this re-tests the thresholds rather than
+    trusting that the suppressor was called.
 
-    Only columns named `n` or `n_*` are checked, which is the naming convention
-    every count table in this pipeline already follows -- minus the handful of
-    `n_*` columns that count something other than patients, which
-    `suppress.NOT_PATIENT_COUNTS` names and which this has to skip for the same
-    reason `suppress_counts` does. Checking them here while exempting them there
-    would make every fit table unexportable.
+    Two passes, because there are two ways a cell gets out.
+
+    PASS 1, counts. Columns named `n` or `n_*`, minus the handful that count
+    something other than patients (`suppress.NOT_PATIENT_COUNTS`).
+
+    PASS 2, statistics. This is the half that did not exist. The old version
+    skipped every column not named `n`/`n_*`, so no rate, share, mean or median
+    was ever examined at either end of the pipeline -- and a published rate
+    hands back its numerator by multiplication. Every numeric column must now be
+    either a registered `suppress.Statistic`, whose denominator has to be in the
+    same row and whose numerator and complement are re-tested, or named in
+    `suppress.NOT_PATIENT_STATISTICS` with the argument for why it determines no
+    patient cell.
+
+    An unregistered numeric column REFUSES THE EXPORT. That is the allowlist
+    argument this module already makes about patient columns -- "a denylist
+    cannot see a column nobody thought of" -- applied to statistics, and it is
+    what turns every future omission from a silent leak into a failed export at
+    the sending site.
     """
+    # ------------------------------------------------------------- pass 1
     for column in frame.columns:
         if column != "n" and not column.startswith("n_"):
             continue
@@ -404,6 +431,70 @@ def validate_counts_frame(frame: pl.DataFrame, origin: str, min_cell: int) -> No
                 f"1 and {min_cell - 1}, which the minimum cell size forbids. "
                 "Pass the table through clifcs.export.suppress.suppress_counts "
                 "before writing it."
+            )
+
+    # ------------------------------------------------------------- pass 2
+    counted = {
+        c
+        for c in frame.columns
+        if (c == "n" or c.startswith("n_"))
+        and c not in suppress.NOT_PATIENT_COUNTS
+        and frame.schema[c] in _INT_DTYPES
+    }
+    for column in suppress.numeric_columns(frame):
+        # NOT_PATIENT_COUNTS as well as NOT_PATIENT_STATISTICS: a column like
+        # `n_variables_compared` is excluded from `counted` precisely BECAUSE it
+        # is declared not to be a patient cell, so falling through to the
+        # unregistered-numeric refusal below would make the two declarations
+        # contradict each other and every fit table unexportable.
+        if (
+            column in counted
+            or column in suppress.NOT_PATIENT_STATISTICS
+            or column in suppress.NOT_PATIENT_COUNTS
+        ):
+            continue
+        stat = suppress.statistic_for(column)
+        if stat is None:
+            raise ContractViolation(
+                f"{origin}: numeric column {column!r} is not registered. Every "
+                "statistic has to name the count it was computed over, because "
+                "a published rate hands back its numerator by multiplication. "
+                "Add a clifcs.export.suppress.Statistic for it, or name it in "
+                "NOT_PATIENT_STATISTICS with the argument for why it determines "
+                "no patient cell."
+            )
+        if stat.over not in frame.columns:
+            raise ContractViolation(
+                f"{origin}: column {column!r} is computed over {stat.over!r}, "
+                f"which this table does not export. A rate whose denominator is "
+                "not in the same row cannot be checked by anyone -- export the "
+                "denominator as a count column, or do not publish the rate."
+            )
+        offending = frame.filter(
+            pl.col(column).is_not_null()
+            & ~suppress.publishable(stat, min_cell)
+        )
+        if offending.height:
+            raise ContractViolation(
+                f"{origin}: column {column!r} holds {offending.height} value(s) "
+                f"that resolve to a group of 1 to {min_cell - 1} patients over "
+                f"{stat.over!r}. Pass the table through "
+                "clifcs.export.suppress.suppress_counts before writing it."
+            )
+
+    # ------------------------------- within-row complements, re-tested here too
+    for part, whole, why in suppress.COMPLEMENT_PAIRS:
+        if part not in frame.columns or whole not in frame.columns:
+            continue
+        if part in suppress.NOT_PATIENT_COUNTS or whole in suppress.NOT_PATIENT_COUNTS:
+            continue
+        gap = pl.col(whole) - pl.col(part)
+        offending = frame.filter(gap.is_not_null() & (gap > 0) & (gap < min_cell))
+        if offending.height:
+            raise ContractViolation(
+                f"{origin}: {whole!r} minus {part!r} leaves "
+                f"{offending.height} cell(s) of 1 to {min_cell - 1} patients "
+                f"({why}). Suppress {part!r} where its complement is small."
             )
 
 
@@ -444,5 +535,57 @@ def describe() -> str:
     return "\n".join(lines)
 
 
+def audit_bundle(bundle: pathlib.Path, min_cell: int = suppress.DEFAULT_MIN_CELL):
+    """
+    run both validation passes over every CSV in a bundle, and report
+
+    What a contributing site runs on its own upload directory before sending,
+    and what a reviewer runs on one that arrived. Returns a list of
+    `(relative path, message)`; empty means nothing in the bundle resolves to a
+    group under `min_cell`.
+
+    Reads only the tables; it needs no cohort, no config and no model.
+    """
+    problems: list[tuple[str, str]] = []
+    for path in sorted(bundle.rglob("*.csv")):
+        relative = path.relative_to(bundle).as_posix()
+        try:
+            frame = pl.read_csv(path)
+        except Exception as exc:
+            problems.append((relative, f"could not be read: {exc}"))
+            continue
+        if not frame.height:
+            continue
+        try:
+            validate_counts_frame(frame, relative, min_cell)
+        except ContractViolation as exc:
+            problems.append((relative, str(exc).split(": ", 1)[-1]))
+    return problems
+
+
+def _audit_cli(argv) -> int:
+    bundle = pathlib.Path(argv[0])
+    if not bundle.is_dir():
+        print(f"not a directory: {bundle}")
+        return 2
+    min_cell = int(argv[1]) if len(argv) > 1 else suppress.DEFAULT_MIN_CELL
+    problems = audit_bundle(bundle, min_cell)
+    print(f"auditing {bundle} at min_cell={min_cell}")
+    tables = sorted(p.relative_to(bundle).as_posix() for p in bundle.rglob("*.csv"))
+    print(f"  {len(tables)} table(s) read")
+    if not problems:
+        print("  no recoverable cell found")
+        return 0
+    for relative, message in problems:
+        print(f"  [LEAK] {relative}")
+        print(f"         {message}")
+    print(f"  {len(problems)} table(s) carry a recoverable cell")
+    return 1
+
+
 if __name__ == "__main__":
+    import sys
+
+    if len(sys.argv) > 1 and sys.argv[1] == "--audit":
+        raise SystemExit(_audit_cli(sys.argv[2:]))
     print(describe())

@@ -1,0 +1,263 @@
+%YAML 1.2
+---
+# Action-response dynamics: every threshold and bin for phases 1-5.
+#
+# Logged with every output. Nothing in the dynamics modules hard-codes a cut --
+# if a number below is changed, every downstream table and figure changes with
+# it, which is the point.
+
+nee:
+  # Norepinephrine-equivalent conversion, as commonly cited from Goradia et al.
+  # 2021 (vasopressor dose equivalence, scoping review and suggested formula).
+  #
+  # VERIFY AGAINST THE PAPER BEFORE PUBLICATION. These factors are reproduced
+  # from the formula as it is usually quoted, and two of them are genuinely
+  # disputed between sources: dopamine appears as /100 here and as /150 in
+  # clifcs/labels.py, and vasopressin's 2.5 per u/min rests on the convention
+  # that 0.04 u/min ~ 0.1 mcg/kg/min of norepinephrine. The existing
+  # labels.NOREPINEPHRINE_EQUIVALENTS is deliberately NOT changed to match --
+  # seven-plus scripts depend on it and every prior NEE figure would move.
+  conversion:
+    norepinephrine:  {mcg/kg/min: 1.0}
+    epinephrine:     {mcg/kg/min: 1.0}
+    phenylephrine:   {mcg/kg/min: 0.1}
+    dopamine:        {mcg/kg/min: 0.01}
+    angiotensin:     {ng/kg/min: 0.01, mcg/kg/min: 10.0}
+    metaraminol:     {mcg/kg/min: 0.125}
+
+  # Vasopressin is INCLUDED in the summed NEE, per Goradia, AND tracked as an
+  # on/off flag. An earlier version excluded it from the sum on the grounds
+  # that it is not titrated, which conflated two different things: starting
+  # vasopressin IS an escalation decision and its pressor effect is real, so
+  # removing it understates vasoactive burden and biases a dose-response fit
+  # downward for exactly the sickest patients.
+  #
+  # What the flag is for instead: `nee_titratable` is published alongside the
+  # total so phase 2 can check whether a dose-response estimate moves when the
+  # fixed-rate agent is dropped, and so an "escalation" that was only the
+  # start of a fixed-rate drug can be identified rather than assumed away.
+  vasopressin: {u/min: 2.5, u/hr: 0.041666666666666664}
+  include_vasopressin_in_nee: true
+  vasopressin_agents: [vasopressin]
+
+  resolution_minutes: 60      # NEE is resampled to this before differencing
+  tolerance_hours: 4.0        # a dose older than this is not carried forward
+
+map:
+  range: [20.0, 200.0]        # outside this is an artefact; the raw table hit 1040
+
+  # SYSTOLIC VALUES ARE WRITTEN INTO THE MAP FIELD and a range filter cannot
+  # catch them: among readings above 130 the median MAP and the median SBP at
+  # the same timestamp are both 152, and 48% of them have MAP >= SBP, which is
+  # impossible. The rate is strongly site-dependent -- 3.48% of UCMC readings
+  # fail these checks against 0.38% at NU and 0.04% at RUSH -- so leaving it
+  # uncorrected biases the sites differently, and the error inflates MAP, which
+  # pushes states toward "adequate" and can manufacture a response.
+  plausibility:
+    require_below_sbp: true   # MAP >= SBP at the same timestamp is dropped
+    # when SBP and DBP are both present, MAP should sit near (SBP + 2*DBP)/3;
+    # the median gap is 3 mmHg overall and 31 mmHg among readings above 130
+    max_gap_from_calculated: 20.0
+  resolution_minutes: 60
+  tolerance_hours: 4.0        # a MAP older than this is unknown, not carried
+  adequate: 65.0              # the MAP the unit titrates to
+
+action:
+  step_hours: 2.0             # one decision step
+  # A dose change counts as an action only if it clears BOTH floors. Relative
+  # alone calls 0.01 -> 0.02 a doubling; absolute alone ignores scale on a
+  # patient running 0.4.
+  relative_minimum: 0.25
+  absolute_minimum: 0.01
+
+response:
+  hours: 2.0                  # MAP change measured over this window after the step
+  # MAP movement smaller than this is "flat". Without a band, "rose" and "fell"
+  # split on measurement noise: a 1 mmHg difference between two cuff readings
+  # would classify a response.
+  deadband_mmhg: 3.0
+
+sensitivity:
+  # Where the saturating curve bends. POOLED, not per-patient: a per-patient
+  # bend point cannot be identified when the per-patient gain cannot be, and
+  # fitting one would produce a number that moves only because the optimiser
+  # had to put it somewhere.
+  reference_dose: 0.1         # log form: log1p(NEE / reference)
+  ed50: 0.1                   # Emax form: NEE / (NEE + ed50)
+  preferred_form: log         # which s(t) is written for phase 3
+
+  # Priors on the two random-walk states. The baseline prior is centred on the
+  # MAP the unit titrates to, with a wide variance; the slope prior is centred
+  # on ZERO rather than on a positive expected response, so a patient with no
+  # usable titrations is reported as "no measured sensitivity" rather than as
+  # "average sensitivity".
+  prior_baseline_var: 400.0   # (20 mmHg)^2
+  prior_slope_var: 25.0       # (5 mmHg per unit)^2
+
+  # Direction model: geometric discounting of a patient's own past titrations,
+  # plus a prior worth this many events centred on the cohort rate. At 0.97 an
+  # event is worth half as much after ~23 hours.
+  forgetting_per_hour: 0.97
+  direction_prior_events: 8.0
+
+regions:
+  # Bands on the MAP response. "small" runs from the response deadband up to
+  # `big_mmhg`; anything under the deadband is flat. A slight dip after a wean
+  # is tolerable and a large one is not, which is the distinction `big_mmhg`
+  # exists to draw.
+  big_mmhg: 10.0
+
+  # Bins on the size of the norepinephrine change, in mcg/kg/min. Used instead
+  # of a ratio: dividing by a dose change of 0.01 makes any noise swing look
+  # like extreme sensitivity, so the dose change goes on the x-axis as a
+  # stratum and the MAP response is averaged within it.
+  dose_bins: [0.01, 0.02, 0.05, 0.10, 0.20, 1000.0]
+
+  # A pressor increase this small counts as "barely any more drug", so a large
+  # MAP rise alongside it reads as more responsive than the same rise bought
+  # with a big escalation.
+  minimal_increase: 0.02
+
+  # Strata on the MAP the hour STARTED at. A +2 mmHg mean pools hours starting
+  # at 55 with hours starting at 85, where the response to a pressor change is
+  # unlikely to be the same thing.
+  starting_map_bins: [0.0, 60.0, 65.0, 75.0, 300.0]
+
+  # A patient needs this many labelled titration-hours before their region
+  # composition is compared against the cohort.
+  min_hours_per_patient: 10
+
+treatment:
+  # What the CLINICIAN is doing, as a state in its own right -- separate from
+  # the response states, which describe what the patient did. The two layers
+  # exist because the response states turned out to be largely recoverable
+  # from dose and MAP level: norepinephrine dose alone predicts "responsive"
+  # at AUC 0.856 and "wean held" at 0.854, so comparing responses WITHOUT
+  # holding dose fixed compares treatment intensity wearing a response label.
+  #
+  # Bands in mcg/kg/min. These are the conventional cuts and they land at
+  # roughly the 60th and 90th percentile of norepinephrine-hours in this
+  # cohort, so they are clinically recognisable and not degenerate.
+  ne_bands: [0.0, 0.1, 0.3, 1000.0]
+  ne_band_names: [low, mid, high]
+  other_agents: [epinephrine, phenylephrine, dopamine, angiotensin]
+  min_hours_per_cell: 200
+
+handbooks:
+  # The treatment-course clustering in 40, and every script that rebuilds it --
+  # 41 (the divergence probe), 42 (the figures), 43 (the logos). These lived as
+  # argparse defaults in four scripts and had already drifted: 40 defaulted to
+  # k=8 over a 1,200-course sample while 41, 42 and 43 defaulted to k=6 over
+  # 600, so a cohort run with the defaults produced a handbook table and a
+  # handbook figure describing different clusterings of the same patients. One
+  # value, read by all four.
+  #
+  # k IS A REPORTING CHOICE, NOT A FITTED ONE. No elbow, gap statistic or
+  # stability criterion selected 6 -- the medoids are reported as a convenient
+  # coarse description of how these patients were managed, and a different k
+  # would give a different, also-defensible description. What matters for the
+  # comparisons downstream is that BOTH cohorts use the same k, so septic
+  # handbook 0 and cardiogenic handbook 0 are cut at the same resolution.
+  # K AND THE SAMPLE SIZE ARE PER COHORT, and the reason is not aesthetic.
+  # Running septic at the cardiogenic k=6 collapsed it to TWO handbooks with
+  # enough patients to split into response groups, out of six; at k=8 it gives
+  # five, which is what the cardiogenic cohort gives at k=6. Septic is both
+  # larger (8,031 against 6,269 courses) and more varied in how it is managed,
+  # so the same k buys less resolution there. Forcing one k across cohorts
+  # would have bought a comparability that does not exist anyway -- the cluster
+  # INDEX is arbitrary per cohort, and what is actually compared between them
+  # is the medoid description, which carries its own dose and agents.
+  count:
+    cardiogenic: 6
+    septic: 8
+    all: 8
+  sample:                     # courses clustered before everyone is assigned
+    cardiogenic: 600
+    septic: 1200
+    all: 1200
+  min_group: 120              # a handbook below this is not split or reported
+
+  # HOW "managed alike" IS MEASURED. `align` is this project's semi-global
+  # aligner. `omspell` is TraMineR's spell-based optimal matching. On a test set
+  # of the phenotypes we expect -- stays on low pressors, weans repeatedly, held
+  # high -- each perturbed the way real data is messy (a one-hour dose spike, a
+  # spurious off-pressor hour, a shifted start), the aligner came LAST of
+  # fourteen measures at 58% nearest-neighbour purity with a negative margin:
+  # a perturbed course was more often nearer another phenotype than its own
+  # clean sibling. OMspell came first at 100% with a 0.54 margin.
+  distance: omspell
+  expcost: 0.5                # OMspell price of a spell's DURATION. 0 is pure
+                              # order, equivalent to a run-length collapse;
+                              # large values let a long plateau dominate the
+                              # order of events. This is the one knob for the
+                              # duration-versus-order trade-off.
+
+  # The two measures put `fit` on different scales -- OMspell normalised
+  # distance is a metric in [0, 1] and the aligner's normalised score is not --
+  # so the floor below which a patient is left unassigned is separate for each.
+  # Reusing one number across both would silently change how many patients are
+  # called similarly managed.
+  min_fit: 0.25               # normalised alignment to the medoid to belong
+  min_fit_omspell: 0.45       # 1 - normalised OMspell distance. Chosen to
+                              # retain 72.5% of the cardiogenic cohort, which
+                              # matches what min_fit 0.25 retains under the
+                              # aligner (72%), so that a comparison between the
+                              # two measures is made at equal coverage rather
+                              # than giving one of them a larger or cleaner
+                              # subset to work with. The OMspell fit
+                              # distribution is median 0.56, 10th centile 0.34,
+                              # 90th 0.77; 0.45 is its 25th centile.
+  cap_hours: 48
+  gap_open: 4.0
+  gap_extend: 1.0
+  seed: 42
+
+  # 43's logos. A column is drawn only if this many patients are still on
+  # record at that hour; below it the letter heights are estimated from a
+  # handful of courses and the tail of the logo reads as structure.
+  logo_min_patients: 25
+
+  # Where the two response groups inside one handbook start to differ, found
+  # by permuting the group labels rather than asserted. The observed
+  # Jensen-Shannon divergence between the groups' symbol distributions at each
+  # hour is compared against this many label permutations, and the divergence
+  # hour is the first hour the observed value clears the null's upper
+  # percentile and STAYS clear for the run length below -- one hour above a
+  # permutation band is a spike, not a parting.
+  divergence_permutations: 400
+  divergence_percentile: 95.0
+  divergence_run: 2
+
+  # A PARTING NEEDS A SHARED PERIOD BEFORE IT. Without this the test reported
+  # "divergence hour 0" for four of five handbooks in both cohorts, which is
+  # not a divergence -- hour 0 is the first hour on record and nothing can have
+  # parted by then. It means the two response groups were never together. A
+  # parting is now declared only where this many consecutive hours with the
+  # groups indistinguishable from permuted labels are immediately followed by
+  # `divergence_run` hours where they are not; otherwise the handbook is
+  # flagged `differ_from_start` and its parting hour is left empty.
+  divergence_min_shared: 3
+
+  # THE MATCHED REGION NEED NOT BEGIN AT ONSET. The divergence alignment is
+  # LOCAL -- Smith-Waterman, free start on both courses -- which abandons the
+  # anchoring premise the module was built on. Anchoring was defensible: every
+  # course starts at shock onset, a genuine common origin. What overrode it is
+  # that real courses share a long stretch which begins after a prologue
+  # matching nothing, e.g.
+  #
+  #     A   3200 11221100000012 5550
+  #     C   00000 11122210000043112 5444
+  #
+  # starting at hour 4 and hour 5 respectively. Anchored, the aligner is
+  # charged for the prologue. Local alignment finds the stretch and reports
+  # where it began, so the anchoring assumption becomes a measurement.
+  #
+  # A local alignment always finds SOMETHING -- any two courses share two or
+  # three runs by chance -- so a pair matching fewer runs than this is reported
+  # as having no shared course rather than as having agreed and then parted.
+  # The examples above share five to eight runs. Measured on one unrelated
+  # pair, anchoring forced a nine-run alignment at identity 0.56 and called it
+  # a divergence, where local alignment found a perfect three-run match and
+  # this floor correctly refused it.
+  divergence_local: true
+  divergence_min_runs: 4

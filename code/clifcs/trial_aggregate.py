@@ -47,7 +47,7 @@ from __future__ import annotations
 import polars as pl
 
 from clifcs.clif import ci_in
-from clifcs.export import suppress
+from clifcs.export import contract, suppress
 from clifcs.trials import (
     VARIABLE_CONFIDENCE,
     inside_all_null,
@@ -134,6 +134,19 @@ def outcomes_table(
                 )
                 treated = known.filter(pl.col(conc))
                 untreated = known.filter(~pl.col(conc))
+                # The arm sizes are EXPORTED, not just used. Each arm mortality
+                # is a rate over its own arm, and a rate whose denominator is
+                # not in the row cannot be checked by anybody -- which is how
+                # `mortality_concordant` came to be suppressed on `n_eligible`,
+                # two supersets away, and published over groups of three.
+                #
+                # Exporting them discloses nothing a reader did not already
+                # have: `share_concordant` times `n_concordance_known` is the
+                # treated arm exactly. Same argument as `n_variables_compared`
+                # in suppress.py -- a denominator recoverable by arithmetic is
+                # not protected by being withheld, only made uninterpretable.
+                row["n_concordant"] = treated.height
+                row["n_discordant"] = untreated.height
                 row["mortality_concordant"] = (
                     float(treated["in_hospital_mortality"].mean())
                     if treated.height
@@ -147,6 +160,8 @@ def outcomes_table(
             else:
                 row["n_concordance_known"] = 0
                 row["share_concordant"] = None
+                row["n_concordant"] = 0
+                row["n_discordant"] = 0
                 row["mortality_concordant"] = None
                 row["mortality_discordant"] = None
 
@@ -444,52 +459,24 @@ def coverage_table(
     return pl.DataFrame(rows).sort("scheme", "level", "n_specific_trials")
 
 
-#: statistics suppressed wherever the count they are computed over is
-_DERIVED_OUTCOMES = (
-    "share_eligible",
-    "mortality_eligible",
-    "median_icu_los_eligible",
-    "share_concordant",
-    "mortality_concordant",
-    "mortality_discordant",
-    "share_inside_all_iqrs",
-    "null_inside_all_iqrs",
-    "ratio_to_null",
-    "n_variables_compared",
-)
-_DERIVED_IQR = (
-    "median_here",
-    "share_below_q1",
-    "share_inside_iqr",
-    "share_above_q3",
-)
-#: the two criteria-only tables moved out of 11. Both are grouped per patient
-#: rather than per trial, so their statistics hang off `n` -- the size of the
-#: assignment or coverage cell -- not off an eligible count.
-_DERIVED_ASSIGNMENT = (
-    "share_of_stratum",
-    "mortality",
-    "median_icu_los_days",
-)
-_DERIVED_COVERAGE = _DERIVED_ASSIGNMENT + (
-    "median_age",
-    "share_female",
-    "median_trials_in_type",
-)
-
-#: which count each table's statistics are computed over, and so which count
-#: has to fall below `min_cell` for them to be blanked
-_COUNT_FOR = {
-    "trial_outcomes": "n_eligible",
-    "trial_iqr_position": "n_compared",
-    "trial_guideline_assignment": "n",
-    "trial_coverage": "n",
-}
-_DERIVED_FOR = {
-    "trial_outcomes": _DERIVED_OUTCOMES,
-    "trial_iqr_position": _DERIVED_IQR,
-    "trial_guideline_assignment": _DERIVED_ASSIGNMENT,
-    "trial_coverage": _DERIVED_COVERAGE,
+#: the grouping a published row of each table corresponds to -- the columns
+#: held CONSTANT across the cells that partition a population, so complementary
+#: suppression blanks a second cell where subtraction would give the first back.
+#:
+#: This replaces six constants (`_DERIVED_OUTCOMES`, `_DERIVED_IQR`,
+#: `_DERIVED_ASSIGNMENT`, `_DERIVED_COVERAGE`, `_COUNT_FOR`, `_DERIVED_FOR`).
+#: They declared, per table, which statistics hang off which count -- which is
+#: now declared once per COLUMN in `suppress.STATISTICS`, because a column name
+#: may only mean one thing. The per-table version let `mortality_concordant`
+#: be keyed to `n_eligible` in one place while actually being computed over the
+#: treated arm in another, which is the bug.
+_COMPLEMENTARY_BY: dict[str, tuple[str, ...]] = {
+    # within one trial and one scheme, the scheme's levels partition the cohort
+    "trial_outcomes": ("site", "anchor", "scheme", "trial_key"),
+    "trial_iqr_position": ("site", "anchor", "scheme", "trial_key", "variable"),
+    # within one scheme level, the assignment and coverage cells partition it
+    "trial_guideline_assignment": ("site", "anchor", "scheme", "level"),
+    "trial_coverage": ("site", "anchor", "scheme", "level"),
 }
 
 
@@ -497,11 +484,15 @@ def build(
     paths, frame: pl.DataFrame, trials, site: str, anchor: str, logger, min_cell: int
 ) -> dict[str, pl.DataFrame]:
     """
-    the two aggregate trial tables, suppressed and ready to ship
+    the four aggregate trial tables, suppressed and ready to ship
 
     `frame` must already carry the eligibility booleans, the concordance
-    booleans and the `t1_*` position columns -- i.e. it is the frame 11 builds
+    booleans and the `t1_*` position columns -- i.e. the frame 01 assembles
     site-side, before any of it is reduced.
+
+    Suppression AND validation both happen here, at the producer, not only in
+    `writer.put_table`. A table that fails the contract should fail where it
+    was built, naming the column, rather than two stages later.
     """
     tables = {
         "trial_outcomes": outcomes_table(frame, trials, site, anchor, logger),
@@ -522,24 +513,16 @@ def build(
         if table.height == 0:
             logger.warning(f"[{site}/{anchor}] {name}: no rows")
             continue
-        derived = _DERIVED_FOR[name]
-        # Suppression keyed on the count each statistic is computed over, which
-        # differs between the tables: eligibility shares are over `n_eligible`,
-        # IQR shares over `n_compared`, and the two per-patient tables over `n`.
-        count = _COUNT_FOR[name]
-        table = table.with_columns(
-            [
-                pl.when(pl.col(count) < min_cell)
-                .then(None)
-                .otherwise(pl.col(c))
-                .alias(c)
-                for c in derived
-                if c in table.columns
-            ]
-        )
+        # One call. Every statistic is keyed to its own denominator by the
+        # registry, so the hand-rolled pre-pass that blanked whole lists of
+        # columns against one count is gone.
         table = suppress.suppress_counts(
-            table, min_cell=min_cell, derived=derived, logger=logger
+            table,
+            min_cell=min_cell,
+            by=_COMPLEMENTARY_BY[name],
+            logger=logger,
         )
+        contract.validate_counts_frame(table, name, min_cell)
         suppressed[name] = table
         logger.info(f"[{site}/{anchor}] {name}: {table.height} rows")
     return suppressed

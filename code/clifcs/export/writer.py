@@ -25,9 +25,14 @@ place per contributor:
     export/<SITE>/
       manifest.json          written by tier 1, amended by tier 2
       token_levels.csv       the legend, derived from the tokenizer alone
+      run_stages.csv         tier 1: which stages ran, and how long each took
       counts/                tier 1: aggregate tables, suppressed
       purity/                tier 1: per-phenotype coherence in GEM space
       patient/               tier 2: embeddings and ordered token labels
+
+Tier 1 may rewrite only what it owns -- see `TIER1_CLEARS`. The two tiers share
+one directory and often run days apart, so a tier-1 re-export that cleared the
+directory wholesale deleted work it did not produce.
 
 What does not go out, and cannot: raw records, timestamps, record numbers, ages
 in years, race and ethnicity, the token *sequences*, and anything else not named
@@ -52,8 +57,138 @@ from clifcs.export import contract, manifest, suppress
 from clifcs.tokenlabels import coverage, last_pre_anchor_ranks, levels
 from clifcs.tokens import family_matrix, load_pre_anchor_tokens, vocabulary
 
-#: derived statistics that must be suppressed wherever their count is
-_DERIVED = ("mortality", "median_icu_los_days", "share", "availability")
+#: for each aggregate table, the grouping a published row of it corresponds to
+#: -- the columns held CONSTANT across the cells that partition a population.
+#:
+#: This replaces `_DERIVED`, a tuple of statistic names that was passed to
+#: `suppress_counts` as `derived=`. That parameter is gone: a statistic is now
+#: registered in `suppress.STATISTICS` against the count it was computed over,
+#: keyed by column name alone, so one name has one denominator everywhere
+#: rather than one anchor per frame.
+#:
+#: The `by` groupings used to be built at the call site as "every candidate
+#: column present in the table", which swept in the VARYING dimension --
+#: `shock_type` for the shock-type breakdown, `cs_phenotype` for a phenotype
+#: summary -- leaving one row per group, so complementary suppression never
+#: fired on any table here.
+#:
+#: `()` means the whole table is one group. `None` opts out, for a table whose
+#: rows do not partition anything.
+#:
+#: An unknown name raises rather than defaulting, so adding a table to the
+#: bundle forces a decision about it.
+_COMPLEMENTARY_BY: dict[str, tuple[str, ...] | None] = {
+    # rows are nested subsets, not a partition: subtracting one step from the
+    # next IS the attrition ledger, which is the point of the table
+    "filter_ledger.csv": None,
+    # one distribution over the phenotype labels, which partition the cohort
+    "phenotype_summary.csv": (),
+    "phenotype_centroids.csv": (),
+    # a cross-tab of two labellings of the same patients: the cells partition
+    # the cohort, so a blanked cell is recoverable from the others
+    "phenotype_variant_agreement.csv": (),
+    "seymour_summary.csv": (),
+    "bhavani_summary.csv": (),
+    "seymour_centroids.csv": (),
+    "bhavani_centroids.csv": (),
+    "seymour_agreement.csv": (),
+    # each site's shock types partition that site
+    "shock_type_summary.csv": ("site",),
+    # one row per variable; variables do not partition patients
+    "seymour_availability.csv": None,
+}
+
+#: table families whose names carry a parameter -- the phenotype variants, one
+#: file per denominator. Matched by prefix because the suffix is a column name
+#: from `phenotype.PHENOTYPE_VARIANTS`, not a fixed string.
+_COMPLEMENTARY_PREFIXES: tuple[tuple[str, tuple[str, ...] | None], ...] = (
+    ("phenotype_summary_", ()),
+    ("phenotype_centroids_", ()),
+)
+
+
+def complementary_by(name: str) -> tuple[str, ...] | None:
+    """
+    the grouping `name` partitions, or None if its rows partition nothing
+
+    Raises for a table nobody has decided about, which is the one property
+    that matters here: a new aggregate table fails the export rather than
+    travelling with complementary suppression quietly disabled.
+    """
+    if name in _COMPLEMENTARY_BY:
+        return _COMPLEMENTARY_BY[name]
+    for prefix, grouping in _COMPLEMENTARY_PREFIXES:
+        if name.startswith(prefix):
+            return grouping
+    raise KeyError(
+        f"{name} has no entry in writer._COMPLEMENTARY_BY, so there is no "
+        "declaration of which population a published row of it partitions. "
+        "Add one: `()` if the whole table is one group, a tuple of the columns "
+        "held constant across a partition, or None if its rows partition "
+        "nothing."
+    )
+
+
+#: what tier 1 writes inside a bundle, and therefore what it may clear
+#:
+#: `shutil.rmtree(bundle)` stood in `stage_export` for this, and it is the
+#: right instinct for the wrong unit: a table a previous code version wrote
+#: under a name this one no longer produces has to go, or it travels forever.
+#: But the bundle is shared. Tier 2 writes patient/, purity/ and
+#: counts/token_coverage.csv into the same directory, often days later and from
+#: a different machine, so a tier-1 re-export -- which is what picking up one
+#: newly produced table means -- silently deleted every embedding the site had
+#: computed and left a bundle that `bundles.discover` reads as an incomplete
+#: copy.
+#:
+#: `manifest.json` is deliberately NOT here. `write_aggregate` overwrites it
+#: unconditionally, so there is no stale name to remove, and clearing it first
+#: destroyed the tier-2 anchors and row counts it reads back out of the
+#: existing file to carry forward.
+TIER1_CLEARS = (
+    "token_levels.csv",
+    "run_stages.csv",
+    "counts/*.csv",
+    "trials/*.csv",
+)
+
+#: files that match TIER1_CLEARS but belong to tier 2
+#:
+#: `token_coverage.csv` is per-variable token availability. It needs the
+#: winnowed token stream that 02 holds, so it is written by `write_patient`,
+#: but it is an aggregate and so it lives in counts/ with the rest of them --
+#: which puts it inside a tier-1 glob without being a tier-1 file.
+TIER2_IN_TIER1_PATHS = frozenset({"counts/token_coverage.csv"})
+
+
+def clear_tier1(bundle: pathlib.Path, logger) -> None:
+    """
+    remove what tier 1 is about to rewrite, and nothing else
+
+    Not a recursive delete. See TIER1_CLEARS for what that cost.
+    """
+    if not bundle.is_dir():
+        return
+    removed = 0
+    for pattern in TIER1_CLEARS:
+        for stale in sorted(bundle.glob(pattern)):
+            if stale.relative_to(bundle).as_posix() in TIER2_IN_TIER1_PATHS:
+                continue
+            if stale.is_file():
+                stale.unlink()
+                removed += 1
+    kept = [
+        name
+        for name in ("patient", "purity")
+        if (bundle / name).is_dir() and any((bundle / name).iterdir())
+    ]
+    if removed:
+        logger.info(f" cleared {removed} tier-1 file(s) from the existing bundle")
+    if kept:
+        logger.info(
+            f"  left {', '.join(f'{k}/' for k in kept)} in place -- written by "
+            "02_site_embeddings.py, not by this script"
+        )
 
 
 def row_keys(frame: pl.DataFrame, salt: str) -> pl.Series:
@@ -333,21 +468,28 @@ def put_table(
     Suppressed here unless its builder already did it (the trial, baseline and
     token tables), then checked, so the folder never holds an unchecked file,
     even when a run stops halfway.
+
+    `suppressed=True` is a claim about the BUILDER, and it is only a true claim
+    where the builder actually suppresses. The baseline table was passed with
+    it while `stage_baseline` wrote raw values; that stage now suppresses
+    before calling here, which is what makes the flag honest.
+
+    The grouping comes from `complementary_by(name)` rather than from "every
+    candidate column present in the frame". That older rule swept in the
+    varying dimension -- `shock_type` for the shock-type breakdown -- so each
+    group held exactly one row and complementary suppression never fired.
     """
     if not suppressed:
         table = suppress.suppress_counts(
             table,
             min_cell=min_cell,
-            derived=_DERIVED,
-            # a published row of these tables is one phenotype across the
-            # sites, so complementary suppression works within a phenotype
-            by=tuple(
-                c
-                for c in ("cs_phenotype", "seymour", "bhavani", "shock_type", "site")
-                if c in table.columns
-            ),
+            by=complementary_by(name),
             logger=logger,
         )
+    # Checked whether or not this function suppressed, because the two-ended
+    # design is the point: a table assembled by some other route, or by a
+    # builder that believes it suppressed, still cannot reach a bundle
+    # unchecked.
     contract.validate_counts_frame(table, name, min_cell)
     for site in sites:
         out = paths.upload_home(site) / folder / name
@@ -441,6 +583,49 @@ def write_aggregate(
             "Everything else is."
         )
 
+    # The stage ledger, if the run left one. This is the only part of
+    # output/logs/01_site_tables.log that can cross a site boundary: the log
+    # prints the attrition ledger and the per-phenotype counts unsuppressed and
+    # names data_dir, output_home and scratch_home as absolute local paths,
+    # none of which is in the contract. A stage name, a status and a duration
+    # are, and they answer the question a thin bundle actually raises, which is
+    # whether the run finished. Copied rather than re-validated because it
+    # holds no counts to suppress.
+    ledger = paths.cohort_home / "run_stages.csv"
+    if ledger.is_file():
+        shutil.copyfile(ledger, bundle / "run_stages.csv")
+        logger.info(f" run_stages.csv ({pl.read_csv(ledger).height} stages)")
+    else:
+        logger.info(
+            " no run_stages.csv in output/cohort/ -- this bundle carries no "
+            "stage ledger, so a reader cannot tell a complete run from a "
+            "partial one except by what is in it"
+        )
+
+    # What tier 2 recorded, where it has already run. `build` writes
+    # `shares_patient_level: false` and empty anchors because tier 1 does not
+    # know about embeddings -- correct on a first export, wrong on a re-export
+    # over a bundle whose patient/ directory is sitting right there. Left
+    # unhandled, re-running tier 1 alone to pick up a table left the embeddings
+    # on disk and the manifest denying them, which `bundles.discover` reads as
+    # an incomplete copy.
+    existing = {}
+    if (bundle / manifest.MANIFEST_NAME).is_file() and (bundle / "patient").is_dir():
+        try:
+            previous = manifest.read(bundle)
+        except Exception:
+            previous = {}
+        if previous.get("shares_patient_level"):
+            existing = {
+                "anchors": tuple(previous.get("anchors") or ()),
+                "row_counts": dict(previous.get("row_counts") or {}),
+                "shares_patient_level": True,
+            }
+            logger.info(
+                "  carrying forward the tier-2 fields already in this "
+                f"bundle's manifest (anchors {', '.join(existing['anchors'])})"
+            )
+
     manifest.write(
         manifest.build(
             site=site,
@@ -454,11 +639,11 @@ def write_aggregate(
             # still travels.
             model_home=paths.model_home_or_none,
             tokenizer_yaml=paths.tokenizer_yaml_or_none,
-            anchors=tuple(),
-            row_counts={},
+            anchors=existing.get("anchors", tuple()),
+            row_counts=existing.get("row_counts", {}),
             min_cell=min_cell,
             embedding_dim=embedding_dim,
-            shares_patient_level=False,
+            shares_patient_level=existing.get("shares_patient_level", False),
         ),
         bundle,
     )
@@ -490,6 +675,14 @@ def write_purity(
         return
     home = bundle / "purity"
     home.mkdir(parents=True, exist_ok=True)
+    # Suppressed, THEN validated. It was only ever validated, so a site with a
+    # phenotype of five patients did not leak -- it hit ContractViolation and
+    # the whole tier-2 export died, naming a column and no remedy. Within a
+    # scheme the labels partition the cohort, which is the group a single
+    # blanked cell is recoverable from.
+    purity = suppress.suppress_counts(
+        purity, min_cell=min_cell, by=("site", "anchor", "scheme"), logger=logger
+    )
     contract.validate_counts_frame(purity, "phenotype purity", min_cell)
     purity.write_csv(home / "phenotype_purity.csv")
     logger.info(
@@ -575,7 +768,18 @@ def write_patient(
     # nulls. Lands in counts/ because it is aggregate.
     if coverages:
         (bundle / "counts").mkdir(parents=True, exist_ok=True)
-        pl.concat(coverages).write_csv(bundle / "counts" / "token_coverage.csv")
+        # This table went out with no suppression and no validation at all. A
+        # variable charted in three patients shipped `n_charted = 3`, and a
+        # variable charted in all but nine shipped the nine by subtraction --
+        # which is exactly what one Rush row did (5668 of 5677 for heart_rate).
+        # One row per variable, so the rows do not partition patients: `None`
+        # opts out of the down-column pass, and the (n_charted, n_total)
+        # complement pair is what does the work here.
+        table = suppress.suppress_counts(
+            pl.concat(coverages), min_cell=min_cell, by=None, logger=logger
+        )
+        contract.validate_counts_frame(table, "token_coverage.csv", min_cell)
+        table.write_csv(bundle / "counts" / "token_coverage.csv")
 
     amended = dict(prior)
     amended["shares_patient_level"] = True

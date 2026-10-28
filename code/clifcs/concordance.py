@@ -79,38 +79,94 @@ PROCEDURE_CODES: dict[str, dict[str, tuple]] = {
 
 def attach_severity(paths, cohort: pl.DataFrame, logger) -> pl.DataFrame:
     """
-    join the SOFA score the `derive` stage already computed
+    join the SOFA score in the 24 hours ENDING AT ONSET
+
+    THE WINDOW IS THE POINT. `stage_derive` also writes a whole-stay score --
+    one row per encounter, stamped at the last event time of the admission --
+    and that is what adjusted the outcomes until now. A whole-stay worst is
+    contaminated by the outcome: deterioration caused by the trajectory, and
+    the organ failure of dying, are both inside it. Adjusting a mortality
+    comparison by a number that partly measures the mortality is not
+    adjustment.
+
+    So the adjuster is the worst score in `[cs_onset_dttm - 24h,
+    cs_onset_dttm]` -- offset 0 of the grid `sofa_grid.parquet` holds. It
+    contains no post-onset data; 24 h is the conventional accumulation period;
+    and it ends AT onset rather than before it so that patients who were
+    sickest on arrival, who are not missing at random, still have a score.
+    `12_covariate_balance.py` and `13_adjusted_mortality.py` already define
+    their baseline covariate in exactly those words, so anything else would
+    make two different numbers share one name.
+
+    The name `sofa_non_cv` is kept and redefined rather than renamed: renaming
+    would touch seven files and leave old bundles readable-but-different, which
+    is worse because it is silent. `sofa_window` says which definition produced
+    the row, so a bundle is self-describing and a mixture is detectable.
 
     Read from the per-site scratch subset rather than recomputed, so the score
     adjusting the outcomes is the same one the model read as tokens. Patients
     clifpy produced no score for keep a null, which propagates into the
-    adjusted comparison as an exclusion rather than a zero.
+    adjusted comparison as an exclusion rather than a zero -- and a window with
+    nothing in it at all is absence of measurement, not a SOFA of zero.
     """
+    from clifcs.sofa_grid import BASELINE_OFFSET
+
+    keep = ["hospitalization_id", "sofa_total", *NON_CV_SOFA_COMPONENTS]
+    # The sites in THIS frame, not every site in paths.yaml. A `--site RUSH`
+    # run otherwise warns about the two sites it was not asked to touch, and a
+    # warning a reader is meant to ignore teaches them to ignore the ones that
+    # matter.
+    present = [s for s in paths.sites if s in set(cohort["site"].unique())]
     frames = []
-    for site in paths.sites:
-        path = paths.raw_subset(site) / "clif_sofa.parquet"
-        if not path.is_file():
+    for site in present:
+        windowed = paths.raw_subset(site) / "sofa_grid.parquet"
+        whole_stay = paths.raw_subset(site) / "clif_sofa.parquet"
+
+        if windowed.is_file():
+            frame = pl.read_parquet(windowed).filter(
+                pl.col("offset_hours") == BASELINE_OFFSET
+            )
+            window = "pre24h_onset"
+        elif whole_stay.is_file():
+            # The fallback exists so a subset derived before the grid was
+            # written still produces adjusted numbers. It is WARNED, not
+            # silent, because the two definitions are not interchangeable and
+            # the whole-stay one is the contaminated half.
             logger.warning(
-                f"[{site}] clif_sofa.parquet absent; run 01 --stage derive. "
+                f"[{site}] no sofa_grid.parquet; falling back to the "
+                "WHOLE-STAY score, which is contaminated by the outcome. "
+                "Re-run 01 --stage derive to get the windowed adjuster."
+            )
+            frame = pl.read_parquet(whole_stay)
+            window = "whole_stay"
+        else:
+            logger.warning(
+                f"[{site}] no SOFA tables; run 01 --stage derive. "
                 "Outcomes will be reported unadjusted only."
             )
             continue
-        frame = pl.read_parquet(path)
-        keep = ["hospitalization_id", "sofa_total", *NON_CV_SOFA_COMPONENTS]
+
         missing = [c for c in keep if c not in frame.columns]
         if missing:
-            logger.warning(f"[{site}] clif_sofa is missing {missing}; skipped")
+            logger.warning(f"[{site}] SOFA table is missing {missing}; skipped")
+            continue
+        if frame.is_empty():
+            logger.warning(
+                f"[{site}] no patient has a scoreable {window} window; skipped"
+            )
             continue
         frames.append(
             frame.select(keep).with_columns(
                 pl.col("hospitalization_id").cast(pl.String),
                 site=pl.lit(site),
+                sofa_window=pl.lit(window),
             )
         )
     if not frames:
         return cohort.with_columns(
             sofa_total=pl.lit(None, dtype=pl.Int32),
             sofa_non_cv=pl.lit(None, dtype=pl.Int32),
+            sofa_window=pl.lit(None, dtype=pl.String),
         )
 
     sofa = pl.concat(frames, how="diagonal_relaxed").unique(
@@ -127,6 +183,20 @@ def attach_severity(paths, cohort: pl.DataFrame, logger) -> pl.DataFrame:
         f"median total {out['sofa_total'].median()}, "
         f"median non-cardiovascular {out['sofa_non_cv'].median()}"
     )
+    # Logged side by side, because the windowed median MUST come out below the
+    # whole-stay one -- a window inside the stay cannot hold a worse extremum
+    # than the stay does. If it does not, the window is wrong.
+    for site in present:
+        path = paths.raw_subset(site) / "clif_sofa.parquet"
+        if not path.is_file():
+            continue
+        stay = pl.read_parquet(path)
+        if "sofa_total" in stay.columns and stay.height:
+            logger.info(
+                f"  [{site}] median whole-stay SOFA "
+                f"{stay['sofa_total'].median()} vs windowed "
+                f"{out.filter(pl.col('site') == site)['sofa_total'].median()}"
+            )
     return out
 
 

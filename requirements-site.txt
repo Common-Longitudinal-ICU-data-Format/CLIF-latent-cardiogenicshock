@@ -46,6 +46,13 @@ numpy
 scikit-learn
 scipy
 
+# --- diagnostics -------------------------------------------------------------
+# peak memory per stage, written to the stage ledger. Already a clifpy
+# dependency, so this installs nothing new -- declared because clifcs/memory.py
+# imports it directly, and because the one thing a site that runs out of memory
+# needs is the number saying by how much.
+psutil
+
 # --- config ------------------------------------------------------------------
 omegaconf
 pyyaml
